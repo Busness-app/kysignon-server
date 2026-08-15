@@ -169,6 +169,43 @@ func (s *Server) routes() *http.ServeMux {
 	fontsDir := http.Dir("./fonts")
 	mux.Handle("GET /fonts/", http.StripPrefix("/fonts/", http.FileServer(fontsDir)))
 
+	// Explicit Favicon routes
+	mux.HandleFunc("GET /favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		if s.staticFS != nil {
+			if data, err := fs.ReadFile(s.staticFS, "favicon.svg"); err == nil {
+				_, _ = w.Write(data)
+				return
+			}
+		}
+		if data, err := os.ReadFile("web/dist/favicon.svg"); err == nil {
+			_, _ = w.Write(data)
+			return
+		}
+		_, _ = w.Write([]byte(defaultFaviconSVG))
+	})
+
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		if s.staticFS != nil {
+			if data, err := fs.ReadFile(s.staticFS, "favicon.ico"); err == nil {
+				_, _ = w.Write(data)
+				return
+			}
+			if data, err := fs.ReadFile(s.staticFS, "favicon.svg"); err == nil {
+				_, _ = w.Write(data)
+				return
+			}
+		}
+		if data, err := os.ReadFile("web/dist/favicon.ico"); err == nil {
+			_, _ = w.Write(data)
+			return
+		}
+		_, _ = w.Write([]byte(defaultFaviconSVG))
+	})
+
 	// Static Frontend SPA fallback handler
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -239,3 +276,12 @@ const defaultIndexHTML = `<!DOCTYPE html>
     </div>
 </body>
 </html>`
+
+const defaultFaviconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" rx="14" fill="#0d0f14"/>
+  <rect x="1" y="1" width="62" height="62" rx="13" stroke="#4deeea" stroke-opacity="0.3" stroke-width="1.5"/>
+  <path d="M32 10 L48 16 V30 C48 41.5 41.2 50.2 32 54 C22.8 50.2 16 41.5 16 30 V16 L32 10 Z" fill="#121820" stroke="#4deeea" stroke-width="2.5" stroke-linejoin="round"/>
+  <circle cx="32" cy="27" r="5.5" fill="#0d0f14" stroke="#4deeea" stroke-width="2"/>
+  <path d="M32 32.5 V42 M29 42 H35" stroke="#4deeea" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="32" cy="27" r="2" fill="#4deeea"/>
+</svg>`

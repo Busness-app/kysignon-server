@@ -106,6 +106,24 @@ func TestHealthAndOIDCDiscoveryEndpoints(t *testing.T) {
 	if oidcCfg.Issuer != "http://localhost:5867" || oidcCfg.JwksURI == "" {
 		t.Fatalf("unexpected OIDC config: %+v", oidcCfg)
 	}
+
+	// 3. Favicon SVG & ICO
+	req = httptest.NewRequest("GET", "/favicon.svg", nil)
+	rec = httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /favicon.svg, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Fatalf("expected Content-Type image/svg+xml, got %s", ct)
+	}
+
+	req = httptest.NewRequest("GET", "/favicon.ico", nil)
+	rec = httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /favicon.ico, got %d", rec.Code)
+	}
 }
 
 func TestLoginAndCSRFAuthenticationFlow(t *testing.T) {

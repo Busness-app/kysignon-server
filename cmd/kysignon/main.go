@@ -65,7 +65,9 @@ func main() {
 		if adminCount == 0 {
 			firstRunPass := crypto.GenerateRandomAlphanumeric(16)
 			passFile := cfg.DataDir + "/first-run-password.txt"
-			_ = os.WriteFile(passFile, []byte(fmt.Sprintf("User: %s\nPassword: %s\n", cfg.BootstrapUser, firstRunPass)), 0600)
+			if err := os.WriteFile(passFile, []byte(fmt.Sprintf("User: %s\nPassword: %s\n", cfg.BootstrapUser, firstRunPass)), 0600); err != nil {
+				log.Printf("Warning: failed to write %s: %v", passFile, err)
+			}
 			ensureBootstrapAdmin(dbStore, cfg.BootstrapUser, firstRunPass)
 			log.Printf("Bootstrap admin created. Credentials written to %s", passFile)
 		}
@@ -150,17 +152,19 @@ func runBootstrap(username, password, email string) {
 }
 
 func ensureBootstrapAdmin(dbStore *store.Store, username, password string) {
-	existing, err := dbStore.GetUserByUsername(username)
-	if err != nil {
-		return
-	}
-	if existing != nil {
-		return // Admin already exists
-	}
-
 	passHash, err := auth.HashPassword(password)
 	if err != nil {
 		log.Printf("Failed to hash bootstrap password: %v", err)
+		return
+	}
+
+	existing, err := dbStore.GetUserByUsername(username)
+	if err != nil {
+		log.Printf("Failed to check existing user: %v", err)
+		return
+	}
+	if existing != nil {
+		_ = dbStore.UpdateUserPassword(existing.ID, passHash)
 		return
 	}
 

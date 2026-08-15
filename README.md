@@ -75,9 +75,6 @@ Review and adjust variables in `.env`:
 # Interface binding (0.0.0.0 for LAN access, 127.0.0.1 for local only)
 KYSIGNON_BIND=0.0.0.0
 
-# Static container IP on the internal kypost-net network
-KYSIGNON_IP=10.89.0.2
-
 # Public URL used in issued tokens (use your LAN IP or domain in production)
 KYSIGNON_ISSUER_URL=http://localhost:5867
 
@@ -103,18 +100,6 @@ Open your browser and navigate to:
 http://<YOUR_SERVER_IP>:5867
 ```
 Sign in with `admin` and the retrieved password.
-
----
-
-## Network & Static IP Mapping
-
-KySignOn joins the shared `kypost-net` Docker network with default static IP allocations:
-
-| Service | Static IPv4 | Default Port | Description |
-| :--- | :--- | :--- | :--- |
-| **KySignOn** | `10.89.0.2` | `5867` | Central SSO Identity Provider & User Directory |
-| **KyPost** | `10.89.0.5` | `5866` | Encrypted IMAP Webmail & Identity Client |
-| **Network Subnet** | `10.89.0.0/24` | — | Shared Docker bridge network (`kypost-net`) |
 
 ---
 

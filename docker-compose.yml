@@ -17,9 +17,6 @@ services:
       - BOOTSTRAP_ADMIN_PASS=${BOOTSTRAP_ADMIN_PASS:-}
     volumes:
       - kysignon-data:/data
-    networks:
-      kypost-net:
-        ipv4_address: ${KYSIGNON_IP:-10.89.0.2}
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:5867/healthz || exit 1"]
       interval: 30s
@@ -30,10 +27,3 @@ services:
 volumes:
   kysignon-data:
     driver: local
-
-networks:
-  kypost-net:
-    name: ${KYPOST_NETWORK:-kypost-net}
-    ipam:
-      config:
-        - subnet: ${KYPOST_SUBNET:-10.89.0.0/24}

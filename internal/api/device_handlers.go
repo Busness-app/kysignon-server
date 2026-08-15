@@ -2,7 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
 	"github.com/Yoshiofthewire/kysignon-server/internal/mfa"
@@ -248,18 +251,82 @@ func (h *DeviceHandler) GenerateRecoveryCodes(w http.ResponseWriter, r *http.Req
 	})
 }
 
-// ListApplications returns dashboard application links.
+// ListApplications returns dashboard application links, aggregating custom applications and registered OAuth clients.
 func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request) {
-	apps, err := h.store.ListApplications()
+	customApps, err := h.store.ListApplications()
 	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
 
-	if apps == nil {
-		apps = []store.Application{}
+	oauthClients, err := h.store.ListOAuthClients()
+	if err != nil {
+		oauthClients = []store.OAuthClient{}
+	}
+
+	appMap := make(map[string]store.Application)
+	for _, app := range customApps {
+		if app.Enabled {
+			appMap[app.ID] = app
+		}
+	}
+
+	// Add OAuth clients as launchable applications
+	for _, client := range oauthClients {
+		if !client.Enabled {
+			continue
+		}
+		if _, exists := appMap[client.ID]; exists {
+			continue
+		}
+
+		var uris []string
+		_ = json.Unmarshal([]byte(client.RedirectURIsJSON), &uris)
+		launchURL := ""
+		for _, uStr := range uris {
+			if parsed, err := url.Parse(uStr); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+				// Pick the first valid absolute URI origin as the launch URL
+				if launchURL == "" || (strings.Contains(launchURL, "localhost") && !strings.Contains(parsed.Host, "localhost")) {
+					launchURL = fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+				}
+			}
+		}
+
+		if launchURL == "" && len(uris) > 0 {
+			launchURL = uris[0]
+		}
+
+		if launchURL != "" {
+			iconName := "globe"
+			switch strings.ToLower(client.ID) {
+			case "kydns":
+				iconName = "globe"
+			case "kypost":
+				iconName = "mail"
+			case "kypasswords":
+				iconName = "lock"
+			case "kybookmarks":
+				iconName = "bookmark"
+			case "kynotes":
+				iconName = "file-text"
+			}
+
+			appMap[client.ID] = store.Application{
+				ID:          client.ID,
+				Name:        client.ClientName,
+				URL:         launchURL,
+				IconName:    iconName,
+				Description: fmt.Sprintf("OAuth 2.0 / OIDC SSO App (%s)", client.ClientType),
+				Enabled:     true,
+			}
+		}
+	}
+
+	result := make([]store.Application, 0, len(appMap))
+	for _, app := range appMap {
+		result = append(result, app)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"applications": apps})
+	_ = json.NewEncoder(w).Encode(map[string]any{"applications": result})
 }

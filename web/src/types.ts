@@ -35,7 +35,7 @@ export interface Application {
   url: string;
   iconName: string;
   description?: string;
-  sortOrder: number;
+  sortOrder?: number;
   enabled: boolean;
 }
 

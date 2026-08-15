@@ -32,55 +32,65 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
     return fallback;
   };
 
-  const defaultKyApps = [
+  const iconMap: Record<string, React.FC<{ size?: number; style?: React.CSSProperties; className?: string }>> = {
+    globe: Globe,
+    mail: Mail,
+    lock: Lock,
+    bookmark: Bookmark,
+    'file-text': FileText,
+  };
+
+  const defaultKyApps: Application[] = [
     {
       id: 'kydns',
       name: 'KyDNS',
       description: 'Homelab DNS server with subnet views & blackhole filtering',
-      icon: Globe,
+      iconName: 'globe',
       url: getDomainUrl('dns', 8053, 'https://dns.urlxl.com'),
-      color: '#4deeea',
+      enabled: true,
     },
     {
       id: 'kypost',
       name: 'KyPost',
       description: 'Encrypted IMAP webmail & identity communication',
-      icon: Mail,
+      iconName: 'mail',
       url: getDomainUrl('mail', 5866, 'https://mail.urlxl.com'),
-      color: '#4deeea',
+      enabled: true,
     },
     {
       id: 'kypasswords',
       name: 'KyPasswords',
       description: 'Zero-knowledge encrypted password vault',
-      icon: Lock,
+      iconName: 'lock',
       url: getDomainUrl('passwords', 5868, 'https://passwords.urlxl.com'),
-      color: '#4deeea',
+      enabled: true,
     },
     {
       id: 'kybookmarks',
       name: 'KyBookmarks',
       description: 'Privacy-focused secure bookmark organizer',
-      icon: Bookmark,
+      iconName: 'bookmark',
       url: getDomainUrl('bookmarks', 5869, 'https://bookmarks.urlxl.com'),
-      color: '#4deeea',
+      enabled: true,
     },
     {
       id: 'kynotes',
       name: 'KyNotes',
       description: 'End-to-end encrypted notes & documentation',
-      icon: FileText,
+      iconName: 'file-text',
       url: getDomainUrl('notes', 5870, 'https://notes.urlxl.com'),
-      color: '#4deeea',
+      enabled: true,
     },
   ];
+
+  const displayApps = apps.length > 0 ? apps : defaultKyApps;
 
   return (
     <div className="dashboard-container">
       <div className="dashboard-header">
         <div>
           <h1 className="page-title">Application Launcher</h1>
-          <p className="page-subtitle">Access your single sign-on enabled KySecurity Suite products</p>
+          <p className="page-subtitle">Access your single sign-on enabled KySecurity Suite and 3rd-party products</p>
         </div>
         <div className="security-status-card" onClick={onNavigateToDevices}>
           <div className="status-indicator-dot" />
@@ -95,8 +105,8 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       </div>
 
       <div className="app-grid">
-        {defaultKyApps.map((app) => {
-          const IconComp = app.icon;
+        {displayApps.map((app) => {
+          const IconComp = iconMap[app.iconName || ''] || ExternalLink;
           return (
             <a
               key={app.id}
@@ -107,13 +117,13 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
             >
               <div className="app-card-top">
                 <div className="app-icon-wrapper">
-                  <IconComp size={24} style={{ color: app.color }} />
+                  <IconComp size={24} className="icon-cyan" />
                 </div>
                 <ArrowUpRight size={18} className="app-launch-arrow" />
               </div>
               <div className="app-card-body">
                 <h3 className="app-name">{app.name}</h3>
-                <p className="app-desc">{app.description}</p>
+                <p className="app-desc">{app.description || 'Single Sign-On Application'}</p>
               </div>
               <div className="app-card-footer">
                 <span className="sso-badge">OIDC SSO Ready</span>
@@ -121,30 +131,6 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
             </a>
           );
         })}
-
-        {apps.map((app) => (
-          <a
-            key={app.id}
-            href={app.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="app-card"
-          >
-            <div className="app-card-top">
-              <div className="app-icon-wrapper">
-                <ExternalLink size={24} className="icon-cyan" />
-              </div>
-              <ArrowUpRight size={18} className="app-launch-arrow" />
-            </div>
-            <div className="app-card-body">
-              <h3 className="app-name">{app.name}</h3>
-              <p className="app-desc">{app.description || 'Connected service'}</p>
-            </div>
-            <div className="app-card-footer">
-              <span className="sso-badge">OAuth 2.0</span>
-            </div>
-          </a>
-        ))}
       </div>
 
       <div className="profile-overview-box">

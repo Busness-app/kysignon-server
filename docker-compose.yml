@@ -6,7 +6,7 @@ services:
     container_name: kysignon-server
     restart: unless-stopped
     ports:
-      - "${KYSIGNON_BIND:-127.0.0.1}:5867:5867"
+      - "${KYSIGNON_BIND:-0.0.0.0}:5867:5867"
     environment:
       - KYSIGNON_PORT=5867
       - KYSIGNON_ISSUER_URL=${KYSIGNON_ISSUER_URL:-http://localhost:5867}

@@ -402,7 +402,7 @@ The frontend follows the existing KySecurity visual system and conventions:
 - **Network**: Defaults to attaching to the shared `kypost-net` Docker network so that KySignOn and KyPost (and other KySecurity suite services) can communicate directly over internal Docker DNS (`http://kysignon-server:5867`).
 - **Data Persistence**: SQLite database and cryptographic keys stored on a dedicated Docker volume mounted at `/data`.
 - **Configuration**: Fully configurable via environment variables:
-  - `KYSIGNON_BIND`: Interface address to bind container port publishing to (default `127.0.0.1`).
+  - `KYSIGNON_BIND`: Interface address to bind container port publishing to (default `0.0.0.0` for network access, or `127.0.0.1` for loopback-only).
   - `KYSIGNON_ISSUER_URL`: Public canonical base URL (e.g., `https://auth.example.com`).
   - `KYSIGNON_DB_PATH`: Path to SQLite database file (default `/data/kysignon.db`).
   - `KYSIGNON_SECRET_KEY`: Master secret for session and cookie signing.

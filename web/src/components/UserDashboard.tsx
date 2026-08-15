@@ -19,13 +19,26 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       .catch(() => {});
   }, []);
 
+  const getDomainUrl = (subdomain: string, localPort: number, fallback: string) => {
+    const host = window.location.hostname;
+    const protocol = window.location.protocol;
+    if (host === 'localhost' || host === '127.0.0.1') {
+      return `http://localhost:${localPort}`;
+    }
+    if (host.startsWith('auth.')) {
+      const base = host.replace(/^auth\./, '');
+      return `${protocol}//${subdomain}.${base}`;
+    }
+    return fallback;
+  };
+
   const defaultKyApps = [
     {
       id: 'kydns',
       name: 'KyDNS',
       description: 'Homelab DNS server with subnet views & blackhole filtering',
       icon: Globe,
-      url: 'https://dns.local.kysecurity',
+      url: getDomainUrl('dns', 8053, 'https://dns.urlxl.com'),
       color: '#4deeea',
     },
     {
@@ -33,7 +46,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyPost',
       description: 'Encrypted IMAP webmail & identity communication',
       icon: Mail,
-      url: 'https://mail.local.kysecurity',
+      url: getDomainUrl('mail', 5866, 'https://mail.urlxl.com'),
       color: '#4deeea',
     },
     {
@@ -41,7 +54,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyPasswords',
       description: 'Zero-knowledge encrypted password vault',
       icon: Lock,
-      url: 'https://passwords.local.kysecurity',
+      url: getDomainUrl('passwords', 5868, 'https://passwords.urlxl.com'),
       color: '#4deeea',
     },
     {
@@ -49,7 +62,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyBookmarks',
       description: 'Privacy-focused secure bookmark organizer',
       icon: Bookmark,
-      url: 'https://bookmarks.local.kysecurity',
+      url: getDomainUrl('bookmarks', 5869, 'https://bookmarks.urlxl.com'),
       color: '#4deeea',
     },
     {
@@ -57,7 +70,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyNotes',
       description: 'End-to-end encrypted notes & documentation',
       icon: FileText,
-      url: 'https://notes.local.kysecurity',
+      url: getDomainUrl('notes', 5870, 'https://notes.urlxl.com'),
       color: '#4deeea',
     },
   ];

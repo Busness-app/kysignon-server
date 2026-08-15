@@ -1,0 +1,19 @@
+# Binaries
+kysignon
+kysignon.exe
+*.exe
+
+# Database and Secrets
+data/
+*.db
+*.db-wal
+*.db-shm
+*.key
+first-run-password.txt
+
+# Node
+web/node_modules/
+
+# Logs & OS
+*.log
+.DS_Store

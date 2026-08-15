@@ -1,0 +1,8 @@
+.git
+data/
+web/node_modules/
+kysignon
+*.key
+*.db
+*.db-wal
+*.db-shm

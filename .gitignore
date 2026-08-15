@@ -1,6 +1,6 @@
 # Binaries
-kysignon
-kysignon.exe
+/kysignon
+/kysignon.exe
 *.exe
 
 # Database and Secrets

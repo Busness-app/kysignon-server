@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
+	"github.com/google/uuid"
 )
 
 type Engine struct {

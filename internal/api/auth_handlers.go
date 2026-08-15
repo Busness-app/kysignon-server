@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
 	"github.com/Yoshiofthewire/kysignon-server/internal/auth"
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/mfa"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
+	"github.com/google/uuid"
 )
 
 type AuthHandler struct {

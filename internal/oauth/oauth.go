@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
+	"github.com/google/uuid"
 )
 
 type Engine struct {
@@ -195,9 +195,11 @@ func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redi
 			"exp":                exp.Unix(),
 			"iat":                now.Unix(),
 			"auth_time":          now.Unix(),
+			"username":           user.Username,
 			"preferred_username": user.Username,
 			"name":               user.DisplayName,
 			"email":              user.Email,
+			"role":               user.Role,
 		}
 		idToken, err = e.keyManager.SignJWT(idTokenClaims)
 		if err != nil {
@@ -233,10 +235,12 @@ func (e *Engine) GetUserinfo(tokenString string) (map[string]any, error) {
 
 	return map[string]any{
 		"sub":                user.ID,
+		"username":           user.Username,
 		"preferred_username": user.Username,
 		"name":               user.DisplayName,
 		"email":              user.Email,
 		"email_verified":     true,
+		"role":               user.Role,
 	}, nil
 }
 

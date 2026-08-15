@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/Yoshiofthewire/kysignon-server/internal/api"
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
 	"github.com/Yoshiofthewire/kysignon-server/internal/auth"
@@ -21,6 +20,7 @@ import (
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/Yoshiofthewire/kysignon-server/internal/sync"
 	"github.com/Yoshiofthewire/kysignon-server/web"
+	"github.com/google/uuid"
 )
 
 func main() {

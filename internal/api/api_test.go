@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
 	"github.com/Yoshiofthewire/kysignon-server/internal/auth"
 	"github.com/Yoshiofthewire/kysignon-server/internal/config"
@@ -23,6 +22,7 @@ import (
 	"github.com/Yoshiofthewire/kysignon-server/internal/oauth"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/Yoshiofthewire/kysignon-server/internal/sync"
+	"github.com/google/uuid"
 )
 
 func setupTestServer(t *testing.T) (*Server, *store.Store, *sync.Engine, *mfa.Engine, *oauth.Engine, func()) {

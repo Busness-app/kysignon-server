@@ -11,6 +11,7 @@ export const AdminClients: React.FC = () => {
   const [clientName, setClientName] = useState('');
   const [clientType, setClientType] = useState<'public' | 'confidential'>('public');
   const [redirectUris, setRedirectUris] = useState('');
+  const [launchUrl, setLaunchUrl] = useState('');
   const [createdSecret, setCreatedSecret] = useState<string | null>(null);
   const [createdClientId, setCreatedClientId] = useState<string | null>(null);
 
@@ -27,13 +28,18 @@ export const AdminClients: React.FC = () => {
     fetchClients();
   }, []);
 
-  const applyPreset = (presetId: string, presetName: string, defaultPath: string) => {
+  const applyPreset = (presetId: string, presetName: string, defaultPath: string, autoLoginPath?: string) => {
     setClientId(presetId);
     setClientName(presetName);
     setClientType('public');
     setRedirectUris(
       `https://${presetId}.urlxl.com${defaultPath}\nhttp://localhost:8053${defaultPath}\nhttp://127.0.0.1:8053${defaultPath}`
     );
+    if (autoLoginPath) {
+      setLaunchUrl(`https://${presetId}.urlxl.com${autoLoginPath}`);
+    } else {
+      setLaunchUrl('');
+    }
   };
 
   const handleCreateClient = async (e: React.FormEvent) => {
@@ -53,6 +59,7 @@ export const AdminClients: React.FC = () => {
           clientName,
           clientType,
           redirectUris: uris,
+          launchUrl: launchUrl.trim() || undefined,
           allowedScopes: ['openid', 'profile', 'email'],
         }),
       });
@@ -80,6 +87,7 @@ export const AdminClients: React.FC = () => {
     setClientName('');
     setClientType('public');
     setRedirectUris('');
+    setLaunchUrl('');
     setCreatedSecret(null);
     setCreatedClientId(null);
     setShowModal(false);
@@ -176,35 +184,35 @@ export const AdminClients: React.FC = () => {
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kydns', 'KyDNS Server', '/auth/sso/callback')}
+                      onClick={() => applyPreset('kydns', 'KyDNS Server', '/auth/sso/callback', '/auth/sso/login')}
                     >
                       + KyDNS
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kypost', 'KyPost Mail Server', '/api/auth/oidc/callback')}
+                      onClick={() => applyPreset('kypost', 'KyPost Mail Server', '/api/auth/oidc/callback', '/api/auth/oidc/login')}
                     >
                       + KyPost
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', '/auth/oidc/callback')}
+                      onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', '/auth/oidc/callback', '/auth/oidc/login')}
                     >
                       + KyPasswords
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kybookmarks', 'KyBookmarks', '/auth/oidc/callback')}
+                      onClick={() => applyPreset('kybookmarks', 'KyBookmarks', '/auth/oidc/callback', '/auth/oidc/login')}
                     >
                       + KyBookmarks
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kynotes', 'KyNotes', '/auth/oidc/callback')}
+                      onClick={() => applyPreset('kynotes', 'KyNotes', '/auth/oidc/callback', '/auth/oidc/login')}
                     >
                       + KyNotes
                     </button>
@@ -257,6 +265,20 @@ export const AdminClients: React.FC = () => {
                     onChange={(e) => setRedirectUris(e.target.value)}
                     required
                   />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Auto-Login / Launch URL (optional deep link for launcher)</label>
+                  <input
+                    type="url"
+                    className="form-input font-mono"
+                    placeholder="e.g. https://dns.urlxl.com/auth/sso/login or https://grafana.example.com/login/generic_oauth"
+                    value={launchUrl}
+                    onChange={(e) => setLaunchUrl(e.target.value)}
+                  />
+                  <span className="muted" style={{ fontSize: '0.75rem', marginTop: '0.25rem', display: 'block' }}>
+                    If provided, clicking the app tile in the KySignOn launcher will open this exact auto-login URL.
+                  </span>
                 </div>
 
                 <div className="modal-footer">

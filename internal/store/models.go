@@ -117,6 +117,7 @@ type OAuthClient struct {
 	ClientSecretHash  string    `json:"-"`
 	RedirectURIsJSON  string    `json:"redirectUrisJson"`
 	AllowedScopesJSON string    `json:"allowedScopesJson"`
+	LaunchURL         string    `json:"launchUrl,omitempty"`
 	Enabled           bool      `json:"enabled"`
 	CreatedAt         time.Time `json:"createdAt"`
 }

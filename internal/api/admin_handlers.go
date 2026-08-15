@@ -407,6 +407,7 @@ type CreateClientRequest struct {
 	ClientType    string   `json:"clientType"` // "public", "confidential"
 	RedirectURIs  []string `json:"redirectUris"`
 	AllowedScopes []string `json:"allowedScopes"`
+	LaunchURL     string   `json:"launchUrl"`
 }
 
 func (h *AdminHandler) CreateOAuthClient(w http.ResponseWriter, r *http.Request) {
@@ -446,6 +447,7 @@ func (h *AdminHandler) CreateOAuthClient(w http.ResponseWriter, r *http.Request)
 		ClientSecretHash:  secretHash,
 		RedirectURIsJSON:  string(redirectURIsJSON),
 		AllowedScopesJSON: string(scopesJSON),
+		LaunchURL:         strings.TrimSpace(req.LaunchURL),
 		Enabled:           true,
 	}
 

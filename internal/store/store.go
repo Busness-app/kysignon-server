@@ -207,7 +207,11 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 	`
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+	_, _ = s.db.Exec(`ALTER TABLE oauth_clients ADD COLUMN launch_url TEXT`)
+	return nil
 }
 
 // User CRUD
@@ -695,28 +699,32 @@ func (s *Store) MarkRecoveryCodeUsed(codeID string) error {
 
 // OAuth Clients
 func (s *Store) CreateOAuthClient(c *OAuthClient) error {
-	query := `INSERT INTO oauth_clients (id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO oauth_clients (id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, launch_url, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	c.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, c.ID, c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.Enabled, c.CreatedAt)
+	_, err := s.db.Exec(query, c.ID, c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.LaunchURL, c.Enabled, c.CreatedAt)
 	return err
 }
 
 func (s *Store) GetOAuthClientByID(id string) (*OAuthClient, error) {
-	query := `SELECT id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, enabled, created_at FROM oauth_clients WHERE id = ?`
+	query := `SELECT id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, launch_url, enabled, created_at FROM oauth_clients WHERE id = ?`
 	c := &OAuthClient{}
 	var secretHash sql.NullString
-	err := s.db.QueryRow(query, id).Scan(&c.ID, &c.ClientName, &c.ClientType, &secretHash, &c.RedirectURIsJSON, &c.AllowedScopesJSON, &c.Enabled, &c.CreatedAt)
+	var launchURL sql.NullString
+	err := s.db.QueryRow(query, id).Scan(&c.ID, &c.ClientName, &c.ClientType, &secretHash, &c.RedirectURIsJSON, &c.AllowedScopesJSON, &launchURL, &c.Enabled, &c.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if secretHash.Valid {
 		c.ClientSecretHash = secretHash.String
 	}
+	if launchURL.Valid {
+		c.LaunchURL = launchURL.String
+	}
 	return c, err
 }
 
 func (s *Store) ListOAuthClients() ([]OAuthClient, error) {
-	query := `SELECT id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, enabled, created_at FROM oauth_clients ORDER BY client_name ASC`
+	query := `SELECT id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, launch_url, enabled, created_at FROM oauth_clients ORDER BY client_name ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -727,11 +735,15 @@ func (s *Store) ListOAuthClients() ([]OAuthClient, error) {
 	for rows.Next() {
 		var c OAuthClient
 		var secretHash sql.NullString
-		if err := rows.Scan(&c.ID, &c.ClientName, &c.ClientType, &secretHash, &c.RedirectURIsJSON, &c.AllowedScopesJSON, &c.Enabled, &c.CreatedAt); err != nil {
+		var launchURL sql.NullString
+		if err := rows.Scan(&c.ID, &c.ClientName, &c.ClientType, &secretHash, &c.RedirectURIsJSON, &c.AllowedScopesJSON, &launchURL, &c.Enabled, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		if secretHash.Valid {
 			c.ClientSecretHash = secretHash.String
+		}
+		if launchURL.Valid {
+			c.LaunchURL = launchURL.String
 		}
 		clients = append(clients, c)
 	}
@@ -739,8 +751,8 @@ func (s *Store) ListOAuthClients() ([]OAuthClient, error) {
 }
 
 func (s *Store) UpdateOAuthClient(c *OAuthClient) error {
-	query := `UPDATE oauth_clients SET client_name = ?, client_type = ?, client_secret_hash = ?, redirect_uris_json = ?, allowed_scopes_json = ?, enabled = ? WHERE id = ?`
-	_, err := s.db.Exec(query, c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.Enabled, c.ID)
+	query := `UPDATE oauth_clients SET client_name = ?, client_type = ?, client_secret_hash = ?, redirect_uris_json = ?, allowed_scopes_json = ?, launch_url = ?, enabled = ? WHERE id = ?`
+	_, err := s.db.Exec(query, c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.LaunchURL, c.Enabled, c.ID)
 	return err
 }
 

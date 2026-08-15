@@ -45,6 +45,7 @@ export interface OAuthClient {
   clientType: 'public' | 'confidential';
   redirectUrisJson: string;
   allowedScopesJson: string;
+  launchUrl?: string;
   enabled: boolean;
   createdAt: string;
 }

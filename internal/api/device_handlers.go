@@ -280,20 +280,37 @@ func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 
-		var uris []string
-		_ = json.Unmarshal([]byte(client.RedirectURIsJSON), &uris)
-		launchURL := ""
-		for _, uStr := range uris {
-			if parsed, err := url.Parse(uStr); err == nil && parsed.Scheme != "" && parsed.Host != "" {
-				// Pick the first valid absolute URI origin as the launch URL
-				if launchURL == "" || (strings.Contains(launchURL, "localhost") && !strings.Contains(parsed.Host, "localhost")) {
-					launchURL = fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+		launchURL := strings.TrimSpace(client.LaunchURL)
+		if launchURL == "" {
+			var uris []string
+			_ = json.Unmarshal([]byte(client.RedirectURIsJSON), &uris)
+			origin := ""
+			for _, uStr := range uris {
+				if parsed, err := url.Parse(uStr); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+					if origin == "" || (strings.Contains(origin, "localhost") && !strings.Contains(parsed.Host, "localhost")) {
+						origin = fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+					}
 				}
 			}
-		}
 
-		if launchURL == "" && len(uris) > 0 {
-			launchURL = uris[0]
+			if origin != "" {
+				switch strings.ToLower(client.ID) {
+				case "kydns":
+					launchURL = origin + "/auth/sso/login"
+				case "kypost":
+					launchURL = origin + "/api/auth/oidc/login"
+				case "kypasswords":
+					launchURL = origin + "/auth/oidc/login"
+				case "kybookmarks":
+					launchURL = origin + "/auth/oidc/login"
+				case "kynotes":
+					launchURL = origin + "/auth/oidc/login"
+				default:
+					launchURL = origin
+				}
+			} else if len(uris) > 0 {
+				launchURL = uris[0]
+			}
 		}
 
 		if launchURL != "" {

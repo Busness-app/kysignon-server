@@ -7,6 +7,7 @@ export const AdminClients: React.FC = () => {
   const [clients, setClients] = useState<OAuthClient[]>([]);
   const [showModal, setShowModal] = useState(false);
 
+  const [clientId, setClientId] = useState('');
   const [clientName, setClientName] = useState('');
   const [clientType, setClientType] = useState<'public' | 'confidential'>('public');
   const [redirectUris, setRedirectUris] = useState('');
@@ -26,6 +27,15 @@ export const AdminClients: React.FC = () => {
     fetchClients();
   }, []);
 
+  const applyPreset = (presetId: string, presetName: string, defaultPath: string) => {
+    setClientId(presetId);
+    setClientName(presetName);
+    setClientType('public');
+    setRedirectUris(
+      `https://${presetId}.urlxl.com${defaultPath}\nhttp://localhost:8053${defaultPath}\nhttp://127.0.0.1:8053${defaultPath}`
+    );
+  };
+
   const handleCreateClient = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!clientName || !redirectUris) return;
@@ -39,6 +49,7 @@ export const AdminClients: React.FC = () => {
       const data = await apiRequest('/api/admin/clients', {
         method: 'POST',
         body: JSON.stringify({
+          clientId: clientId.trim() || undefined,
           clientName,
           clientType,
           redirectUris: uris,
@@ -65,6 +76,7 @@ export const AdminClients: React.FC = () => {
   };
 
   const resetForm = () => {
+    setClientId('');
     setClientName('');
     setClientType('public');
     setRedirectUris('');
@@ -159,11 +171,63 @@ export const AdminClients: React.FC = () => {
             {!createdClientId ? (
               <form onSubmit={handleCreateClient} className="modal-body">
                 <div className="form-group">
+                  <label className="form-label">Quick App Preset</label>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('kydns', 'KyDNS Server', '/auth/sso/callback')}
+                    >
+                      + KyDNS
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('kypost', 'KyPost Mail Server', '/api/auth/oidc/callback')}
+                    >
+                      + KyPost
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', '/auth/oidc/callback')}
+                    >
+                      + KyPasswords
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('kybookmarks', 'KyBookmarks', '/auth/oidc/callback')}
+                    >
+                      + KyBookmarks
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('kynotes', 'KyNotes', '/auth/oidc/callback')}
+                    >
+                      + KyNotes
+                    </button>
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Client ID (optional identifier)</label>
+                  <input
+                    type="text"
+                    className="form-input font-mono"
+                    placeholder="e.g. kydns (auto-generated if empty)"
+                    value={clientId}
+                    onChange={(e) => setClientId(e.target.value)}
+                  />
+                </div>
+
+                <div className="form-group">
                   <label className="form-label">Client Name</label>
                   <input
                     type="text"
                     className="form-input"
-                    placeholder="e.g. KyPost Web App"
+                    placeholder="e.g. KyDNS Server"
                     value={clientName}
                     onChange={(e) => setClientName(e.target.value)}
                     autoFocus
@@ -188,7 +252,7 @@ export const AdminClients: React.FC = () => {
                   <textarea
                     className="form-textarea font-mono"
                     rows={3}
-                    placeholder="https://app.example.com/callback"
+                    placeholder="https://dns.urlxl.com/auth/sso/callback"
                     value={redirectUris}
                     onChange={(e) => setRedirectUris(e.target.value)}
                     required

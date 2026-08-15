@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { User, Application } from '../types';
 import { apiRequest } from '../api';
-import { Mail, Lock, Bookmark, FileText, ExternalLink, ShieldCheck, Smartphone, ArrowUpRight } from 'lucide-react';
+import { Globe, Mail, Lock, Bookmark, FileText, ExternalLink, ShieldCheck, Smartphone, ArrowUpRight } from 'lucide-react';
 
 interface UserDashboardProps {
   user: User;
@@ -20,6 +20,14 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
   }, []);
 
   const defaultKyApps = [
+    {
+      id: 'kydns',
+      name: 'KyDNS',
+      description: 'Homelab DNS server with subnet views & blackhole filtering',
+      icon: Globe,
+      url: 'https://dns.local.kysecurity',
+      color: '#4deeea',
+    },
     {
       id: 'kypost',
       name: 'KyPost',

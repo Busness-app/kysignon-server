@@ -402,6 +402,7 @@ func (h *AdminHandler) ListOAuthClients(w http.ResponseWriter, r *http.Request) 
 }
 
 type CreateClientRequest struct {
+	ClientID      string   `json:"clientId"`
 	ClientName    string   `json:"clientName"`
 	ClientType    string   `json:"clientType"` // "public", "confidential"
 	RedirectURIs  []string `json:"redirectUris"`
@@ -433,8 +434,13 @@ func (h *AdminHandler) CreateOAuthClient(w http.ResponseWriter, r *http.Request)
 	redirectURIsJSON, _ := json.Marshal(req.RedirectURIs)
 	scopesJSON, _ := json.Marshal(req.AllowedScopes)
 
+	clientID := strings.TrimSpace(req.ClientID)
+	if clientID == "" {
+		clientID = uuid.New().String()
+	}
+
 	client := &store.OAuthClient{
-		ID:                uuid.New().String(),
+		ID:                clientID,
 		ClientName:        req.ClientName,
 		ClientType:        req.ClientType,
 		ClientSecretHash:  secretHash,

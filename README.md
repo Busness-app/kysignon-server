@@ -72,11 +72,14 @@ cp .env.example .env
 
 Review and adjust variables in `.env`:
 ```ini
-# Interface binding (0.0.0.0 for LAN access, 127.0.0.1 for local only)
-KYSIGNON_BIND=0.0.0.0
+# Interface binding (127.0.0.1 for local/proxy only, or 0.0.0.0 if not using proxy)
+KYSIGNON_BIND=127.0.0.1
 
-# Public URL used in issued tokens (use your LAN IP or domain in production)
-KYSIGNON_ISSUER_URL=http://localhost:5867
+# Static container IP on shared kypost-net network
+KYSIGNON_IP=10.89.0.2
+
+# Public URL used in issued tokens (use your public HTTPS domain in production)
+KYSIGNON_ISSUER_URL=https://auth.yourdomain.com
 
 # Optional: Pre-seed administrator credentials
 BOOTSTRAP_ADMIN_USER=admin

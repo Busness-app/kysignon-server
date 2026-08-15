@@ -6,7 +6,7 @@ services:
     container_name: kysignon-server
     restart: unless-stopped
     ports:
-      - "${KYSIGNON_BIND:-0.0.0.0}:5867:5867"
+      - "${KYSIGNON_BIND:-127.0.0.1}:5867:5867"
     environment:
       - KYSIGNON_PORT=5867
       - KYSIGNON_ISSUER_URL=${KYSIGNON_ISSUER_URL:-http://localhost:5867}
@@ -17,6 +17,9 @@ services:
       - BOOTSTRAP_ADMIN_PASS=${BOOTSTRAP_ADMIN_PASS:-}
     volumes:
       - kysignon-data:/data
+    networks:
+      kypost-net:
+        ipv4_address: ${KYSIGNON_IP:-10.89.0.2}
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:5867/healthz || exit 1"]
       interval: 30s
@@ -27,3 +30,8 @@ services:
 volumes:
   kysignon-data:
     driver: local
+
+networks:
+  kypost-net:
+    name: ${KYPOST_NETWORK:-kypost-net}
+    external: true

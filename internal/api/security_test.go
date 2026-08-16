@@ -681,3 +681,86 @@ func TestClientRedirectURIsCanBeUpdated(t *testing.T) {
 		t.Errorf("redirect URIs were not updated: %+v", stored)
 	}
 }
+
+// The suite services are all server-side backends. Registering one as a public client
+// discards the client secret factor for an application that can plainly hold one, so the
+// server refuses it rather than leaving it to whoever fills in the form.
+func TestSuiteClientCannotBeRegisteredPublic(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+
+	for _, id := range []string{"kypost", "kydns", "kypasswords", "kynotes", "kybookmarks", "KyPost"} {
+		body := `{"clientId":"` + id + `","clientName":"x","clientType":"public",` +
+			`"redirectUris":["https://x.urlxl.com/callback"]}`
+		rr := adminRequest(t, srv, "POST", "/api/admin/clients", cookie, body)
+		if rr.Code == http.StatusOK {
+			t.Errorf("suite client %q was registered as public", id)
+		}
+		if stored, _ := db.GetOAuthClientByID(id); stored != nil {
+			t.Errorf("suite client %q was persisted despite the rejection", id)
+		}
+	}
+}
+
+func TestSuiteClientRegistersAsConfidential(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+
+	rr := adminRequest(t, srv, "POST", "/api/admin/clients", cookie,
+		`{"clientId":"kypost","clientName":"KyPost","redirectUris":["https://mail.urlxl.com/callback"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("suite client registration returned %d: %s", rr.Code, rr.Body.String())
+	}
+	stored, _ := db.GetOAuthClientByID("kypost")
+	if stored == nil || stored.ClientType != "confidential" || stored.ClientSecretHash == "" {
+		t.Errorf("suite client did not get a secret: %+v", stored)
+	}
+}
+
+// Nor may one be demoted later; the rule has to hold on the edit path too, or it is only
+// a speed bump on the create form.
+func TestSuiteClientCannotBeDemotedToPublic(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+
+	create := adminRequest(t, srv, "POST", "/api/admin/clients", cookie,
+		`{"clientId":"kydns","clientName":"KyDNS","redirectUris":["https://dns.urlxl.com/callback"]}`)
+	if create.Code != http.StatusOK {
+		t.Fatalf("setup failed: %s", create.Body.String())
+	}
+
+	rr := adminRequest(t, srv, "PUT", "/api/admin/clients/kydns", cookie, `{"clientType":"public"}`)
+	if rr.Code == http.StatusOK {
+		t.Error("a suite client was demoted to public")
+	}
+	stored, _ := db.GetOAuthClientByID("kydns")
+	if stored == nil || stored.ClientType != "confidential" {
+		t.Errorf("suite client type is now %v", stored)
+	}
+}
+
+// A genuinely public client — an SPA or a native app — is still registrable. The rule is
+// about the suite backends, not a ban on the public client type.
+func TestNonSuiteClientMayStillBePublic(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+
+	rr := adminRequest(t, srv, "POST", "/api/admin/clients", cookie,
+		`{"clientId":"some-spa","clientName":"SPA","clientType":"public",`+
+			`"redirectUris":["https://spa.example.com/callback"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("a non-suite public client was rejected: %s", rr.Body.String())
+	}
+	stored, _ := db.GetOAuthClientByID("some-spa")
+	if stored == nil || stored.ClientType != "public" {
+		t.Errorf("expected a public client, got %+v", stored)
+	}
+}

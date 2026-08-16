@@ -46,7 +46,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyDNS',
       description: 'Homelab DNS server with subnet views & blackhole filtering',
       iconName: 'globe',
-      url: getDomainUrl('dns', 8053, 'https://dns.urlxl.com'),
+      url: getDomainUrl('dns', 8053, 'https://dns.example.com'),
       enabled: true,
     },
     {
@@ -54,7 +54,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyPost',
       description: 'Encrypted IMAP webmail & identity communication',
       iconName: 'mail',
-      url: getDomainUrl('mail', 5866, 'https://mail.urlxl.com'),
+      url: getDomainUrl('mail', 5866, 'https://mail.example.com'),
       enabled: true,
     },
     {
@@ -62,7 +62,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyPasswords',
       description: 'Zero-knowledge encrypted password vault',
       iconName: 'lock',
-      url: getDomainUrl('passwords', 5877, 'https://passwords.urlxl.com'),
+      url: getDomainUrl('passwords', 5877, 'https://passwords.example.com'),
       enabled: true,
     },
     {
@@ -70,7 +70,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyBookmarks',
       description: 'Privacy-focused secure bookmark organizer',
       iconName: 'bookmark',
-      url: getDomainUrl('bookmarks', 5869, 'https://bookmarks.urlxl.com'),
+      url: getDomainUrl('bookmarks', 5869, 'https://bookmarks.example.com'),
       enabled: true,
     },
     {
@@ -78,7 +78,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyNotes',
       description: 'End-to-end encrypted notes & documentation',
       iconName: 'file-text',
-      url: getDomainUrl('notes', 5870, 'https://notes.urlxl.com'),
+      url: getDomainUrl('notes', 5870, 'https://notes.example.com'),
       enabled: true,
     },
   ];

@@ -424,6 +424,29 @@ type CreateClientRequest struct {
 	LaunchURL     string   `json:"launchUrl"`
 }
 
+// suiteClientIDs are the KySecurity services, every one of which is a server-side backend
+// that can hold a secret. They may not be registered as public clients.
+//
+// This list lives in the registration path on purpose. It is admin-time configuration
+// policy, evaluated once when a client is created or edited. It must never migrate into
+// internal/oauth: client-specific branching in the authorization or token path is what
+// turned redirect URI validation into a suggestion, and this package is the boundary that
+// keeps that from happening again.
+var suiteClientIDs = map[string]bool{
+	"kypost":      true,
+	"kydns":       true,
+	"kypasswords": true,
+	"kynotes":     true,
+	"kybookmarks": true,
+}
+
+// requireConfidential reports whether a client ID names a suite service.
+func requireConfidential(clientID string) bool {
+	return suiteClientIDs[strings.ToLower(strings.TrimSpace(clientID))]
+}
+
+const suitePublicRejection = `{"error":"invalid_client_type","error_description":"This is a KySecurity suite service and must be registered as a confidential client. It runs server-side and can hold a client secret; a public client would drop that factor."}`
+
 // generateClientSecret mints a client secret and its stored hash. The secret is 32 random
 // bytes, so a plain SHA-256 is an appropriate one-way store: there is no low-entropy
 // guess space for an attacker with the database to search.
@@ -443,12 +466,18 @@ func (h *AdminHandler) CreateOAuthClient(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Confidential is the default. Every KySecurity suite service is a server-side
-	// application that can hold a secret, and for a public client PKCE is the only thing
-	// binding a code to its requester. "public" stays available for SPAs and native apps,
-	// which genuinely cannot keep a secret, but it has to be asked for.
+	// Confidential is the default. For a public client PKCE is the only thing binding a
+	// code to its requester; "public" stays available for SPAs and native apps, which
+	// genuinely cannot keep a secret, but it has to be asked for.
 	if req.ClientType != "public" {
 		req.ClientType = "confidential"
+	}
+	if req.ClientType == "public" && requireConfidential(req.ClientID) {
+		h.audit.Record("admin.oauth_client_created", admin.ID, admin.Username, req.ClientID, "client",
+			h.middleware.ClientIP(r), r.UserAgent(), "denied",
+			map[string]any{"reason": "suite_client_must_be_confidential"})
+		http.Error(w, suitePublicRejection, http.StatusBadRequest)
+		return
 	}
 	if len(req.AllowedScopes) == 0 {
 		req.AllowedScopes = []string{"openid", "profile", "email"}
@@ -584,6 +613,15 @@ func (h *AdminHandler) UpdateOAuthClient(w http.ResponseWriter, r *http.Request)
 			}
 			client.ClientType = "confidential"
 		case "public":
+			// The rule has to hold on the edit path too, or it is only a speed bump on
+			// the create form.
+			if requireConfidential(client.ID) {
+				h.audit.Record("admin.oauth_client_updated", admin.ID, admin.Username, client.ID, "client",
+					h.middleware.ClientIP(r), r.UserAgent(), "denied",
+					map[string]any{"reason": "suite_client_must_be_confidential"})
+				http.Error(w, suitePublicRejection, http.StatusBadRequest)
+				return
+			}
 			client.ClientType = "public"
 			client.ClientSecretHash = ""
 			rotate = false

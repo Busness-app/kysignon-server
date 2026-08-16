@@ -1,7 +1,13 @@
 import React, { useEffect, useState } from 'react';
+
+// Mirrors the server's registration policy. The server is the authority; this only keeps
+// the form from offering a choice the API will reject.
+const SUITE_CLIENT_IDS = ['kypost', 'kydns', 'kypasswords', 'kynotes', 'kybookmarks'];
+
+const isSuiteClient = (id: string) => SUITE_CLIENT_IDS.includes(id.trim().toLowerCase());
 import { OAuthClient } from '../types';
 import { apiRequest } from '../api';
-import { Plus, Trash2, CheckCircle } from 'lucide-react';
+import { Plus, Trash2, CheckCircle, AlertTriangle } from 'lucide-react';
 
 export const AdminClients: React.FC = () => {
   const [clients, setClients] = useState<OAuthClient[]>([]);
@@ -9,7 +15,7 @@ export const AdminClients: React.FC = () => {
 
   const [clientId, setClientId] = useState('');
   const [clientName, setClientName] = useState('');
-  const [clientType, setClientType] = useState<'public' | 'confidential'>('public');
+  const [clientType, setClientType] = useState<'public' | 'confidential'>('confidential');
   const [redirectUris, setRedirectUris] = useState('');
   const [launchUrl, setLaunchUrl] = useState('');
   const [createdSecret, setCreatedSecret] = useState<string | null>(null);
@@ -28,30 +34,32 @@ export const AdminClients: React.FC = () => {
     fetchClients();
   }, []);
 
-  const applyPreset = (presetId: string, presetName: string, defaultPath: string, autoLoginPath?: string, localPort?: number) => {
+  const applyPreset = (presetId: string, presetName: string, defaultPath: string, autoLoginPath?: string) => {
     setClientId(presetId);
     setClientName(presetName);
-    setClientType('public');
-    const port = localPort || 8053;
+    setClientType('confidential');
     const domainPrefix = presetId === 'kypasswords' ? 'passwords' : presetId === 'kypost' ? 'mail' : presetId === 'kydns' ? 'dns' : presetId === 'kybookmarks' ? 'bookmarks' : presetId === 'kynotes' ? 'notes' : presetId;
+    // HTTPS only, and no loopback. A registered redirect URI is a destination the server
+    // will hand an authorization code to, so pre-filling http://localhost:PORT means any
+    // process that can bind that port on the user's machine collects codes for this
+    // client. Add a loopback URI by hand for local development if you genuinely need one.
     const uris = [
-      `https://${domainPrefix}.urlxl.com${defaultPath}`,
-      `https://${presetId}.urlxl.com${defaultPath}`,
-      `http://localhost:${port}${defaultPath}`,
-      `http://127.0.0.1:${port}${defaultPath}`,
+      `https://${domainPrefix}.example.com${defaultPath}`,
+      `https://${presetId}.example.com${defaultPath}`,
     ];
     if (defaultPath !== '/api/auth/oidc/callback') {
-      uris.push(`https://${domainPrefix}.urlxl.com/api/auth/oidc/callback`);
-      uris.push(`http://localhost:${port}/api/auth/oidc/callback`);
-      uris.push(`http://127.0.0.1:${port}/api/auth/oidc/callback`);
+      uris.push(`https://${domainPrefix}.example.com/api/auth/oidc/callback`);
     }
     setRedirectUris(uris.join('\n'));
     if (autoLoginPath) {
-      setLaunchUrl(`https://${domainPrefix}.urlxl.com${autoLoginPath}`);
+      setLaunchUrl(`https://${domainPrefix}.example.com${autoLoginPath}`);
     } else {
       setLaunchUrl('');
     }
   };
+
+  // Typing a suite service ID pins the client type, matching the server's rule.
+  const suiteLocked = isSuiteClient(clientId);
 
   const handleCreateClient = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -68,7 +76,7 @@ export const AdminClients: React.FC = () => {
         body: JSON.stringify({
           clientId: clientId.trim() || undefined,
           clientName,
-          clientType,
+          clientType: suiteLocked ? 'confidential' : clientType,
           redirectUris: uris,
           launchUrl: launchUrl.trim() || undefined,
           allowedScopes: ['openid', 'profile', 'email'],
@@ -96,7 +104,7 @@ export const AdminClients: React.FC = () => {
   const resetForm = () => {
     setClientId('');
     setClientName('');
-    setClientType('public');
+    setClientType('confidential');
     setRedirectUris('');
     setLaunchUrl('');
     setCreatedSecret(null);
@@ -195,35 +203,35 @@ export const AdminClients: React.FC = () => {
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kydns', 'KyDNS Server', '/auth/sso/callback', '/auth/sso/login', 8053)}
+                      onClick={() => applyPreset('kydns', 'KyDNS Server', '/auth/sso/callback', '/auth/sso/login')}
                     >
                       + KyDNS
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kypost', 'KyPost Mail Server', '/api/auth/oidc/callback', '/api/auth/oidc/login', 5866)}
+                      onClick={() => applyPreset('kypost', 'KyPost Mail Server', '/api/auth/oidc/callback', '/api/auth/oidc/login')}
                     >
                       + KyPost
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', '/api/auth/oidc/callback', '/api/auth/oidc/login', 5877)}
+                      onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', '/api/auth/oidc/callback', '/api/auth/oidc/login')}
                     >
                       + KyPasswords
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kybookmarks', 'KyBookmarks', '/api/auth/oidc/callback', '/api/auth/oidc/login', 5869)}
+                      onClick={() => applyPreset('kybookmarks', 'KyBookmarks', '/api/auth/oidc/callback', '/api/auth/oidc/login')}
                     >
                       + KyBookmarks
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kynotes', 'KyNotes', '/api/auth/oidc/callback', '/api/auth/oidc/login', 5870)}
+                      onClick={() => applyPreset('kynotes', 'KyNotes', '/api/auth/oidc/callback', '/api/auth/oidc/login')}
                     >
                       + KyNotes
                     </button>
@@ -258,12 +266,35 @@ export const AdminClients: React.FC = () => {
                   <label className="form-label">Client Type</label>
                   <select
                     className="form-select"
-                    value={clientType}
+                    value={suiteLocked ? 'confidential' : clientType}
+                    disabled={suiteLocked}
                     onChange={(e: any) => setClientType(e.target.value)}
                   >
-                    <option value="public">Public (SPA, Mobile, PKCE)</option>
-                    <option value="confidential">Confidential (Server-Side with Secret)</option>
+                    <option value="confidential">Confidential — server-side, gets a client secret (recommended)</option>
+                    <option value="public">Public — no client secret, PKCE only</option>
                   </select>
+
+                  {suiteLocked && (
+                    <div className="alert-box sm" style={{ alignItems: 'flex-start' }}>
+                      <CheckCircle size={16} />
+                      <span>
+                        <strong>{clientId.trim()}</strong> is a KySecurity suite service. It runs
+                        server-side and can hold a secret, so it is always confidential.
+                      </span>
+                    </div>
+                  )}
+
+                  {!suiteLocked && clientType === 'public' && (
+                    <div className="alert-box warn" role="alert" style={{ alignItems: 'flex-start' }}>
+                      <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: '0.15rem' }} />
+                      <span>
+                        <strong>No client secret will be issued.</strong> Anyone who obtains an
+                        authorization code for this client can redeem it if they also have the PKCE
+                        verifier. Choose this only for a single-page app or a native app, which
+                        cannot keep a secret. Any server-side service should be confidential.
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="form-group">
@@ -271,7 +302,7 @@ export const AdminClients: React.FC = () => {
                   <textarea
                     className="form-textarea font-mono"
                     rows={3}
-                    placeholder="https://dns.urlxl.com/auth/sso/callback"
+                    placeholder="https://dns.example.com/auth/sso/callback"
                     value={redirectUris}
                     onChange={(e) => setRedirectUris(e.target.value)}
                     required

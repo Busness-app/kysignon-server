@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -103,7 +104,8 @@ func (s *Store) migrate() error {
 
 	CREATE TABLE IF NOT EXISTS account_sync_events (
 		id TEXT PRIMARY KEY,
-		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		-- Deletion events must remain deliverable after their user has been removed.
+		user_id TEXT NOT NULL,
 		system_id TEXT NOT NULL,
 		event_type TEXT NOT NULL,
 		payload_json TEXT NOT NULL,
@@ -255,8 +257,54 @@ func (s *Store) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 	`
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	return s.migrateSyncEventsUserReference()
+}
+
+// migrateSyncEventsUserReference removes the legacy foreign key that deleted a user's
+// queued deletion event with the user record. SQLite requires rebuilding a table to
+// change a foreign key definition.
+func (s *Store) migrateSyncEventsUserReference() error {
+	var definition string
+	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'account_sync_events'`).Scan(&definition); err != nil {
+		return err
+	}
+	if !strings.Contains(strings.ToUpper(definition), "REFERENCES USERS") {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+		CREATE TABLE account_sync_events_new (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			system_id TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			payload_json TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'failed')),
+			last_error TEXT,
+			next_attempt_at DATETIME,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		INSERT INTO account_sync_events_new
+			(id, user_id, system_id, event_type, payload_json, attempts, status, last_error, next_attempt_at, created_at, updated_at)
+			SELECT id, user_id, system_id, event_type, payload_json, attempts, status, last_error, next_attempt_at, created_at, updated_at
+			FROM account_sync_events;
+		DROP TABLE account_sync_events;
+		ALTER TABLE account_sync_events_new RENAME TO account_sync_events;
+		CREATE INDEX idx_sync_events_status ON account_sync_events(status);`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // User CRUD
@@ -348,6 +396,43 @@ func (s *Store) CountAdmins() (int, error) {
 func (s *Store) DeleteUser(userID string) error {
 	_, err := s.db.Exec(`DELETE FROM users WHERE id = ?`, userID)
 	return err
+}
+
+// DeleteUserWithSyncEvents atomically removes a user and queues its deletion for every
+// active paired system. Older queued user events are discarded so a downstream system
+// cannot receive stale updates after the deletion.
+func (s *Store) DeleteUserWithSyncEvents(userID string, events []AccountSyncEvent) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM account_sync_events WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`DELETE FROM users WHERE id = ?`, userID)
+	if err != nil {
+		return err
+	}
+	if deleted, err := result.RowsAffected(); err != nil {
+		return err
+	} else if deleted != 1 {
+		return sql.ErrNoRows
+	}
+
+	stmt, err := tx.Prepare(`INSERT INTO account_sync_events (id, user_id, system_id, event_type, payload_json, attempts, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := time.Now().UTC()
+	for _, event := range events {
+		if _, err := stmt.Exec(event.ID, event.UserID, event.SystemID, event.EventType, event.PayloadJSON, event.Attempts, event.Status, now, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // Session Management

@@ -14,6 +14,7 @@ import (
 	"github.com/Yoshiofthewire/kysignon-server/internal/config"
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
+	"github.com/Yoshiofthewire/kysignon-server/internal/sync"
 	"github.com/google/uuid"
 )
 
@@ -450,6 +451,45 @@ func TestDisablingUserRevokesOutstandingTokens(t *testing.T) {
 	srv.httpServer.Handler.ServeHTTP(rr, req)
 	if rr.Code == http.StatusOK {
 		t.Error("a disabled user's outstanding access token still worked")
+	}
+}
+
+// Deletion must reach every paired product even though the source user no longer exists.
+func TestDeletingUserQueuesDeletionSyncEvent(t *testing.T) {
+	srv, db, syncEngine, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+	victim := newUser(t, db, "user")
+
+	token, pin, _, err := syncEngine.GenerateSystemPairingToken("kypost", admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncEngine.RegisterPairedSystem(&sync.SystemRegistrationRequest{
+		PairingToken: token,
+		PINCode:      pin,
+		SystemName:   "KyPost",
+		SystemType:   "kypost",
+		CallbackURL:  "https://kypost.example.com/api/sso/sync",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := adminRequest(t, srv, "DELETE", "/api/admin/users/"+victim.ID, cookie, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("deleting user returned %d: %s", rr.Code, rr.Body.String())
+	}
+	if user, err := db.GetUserByID(victim.ID); err != nil || user != nil {
+		t.Fatalf("deleted user still present: user=%+v err=%v", user, err)
+	}
+	pending, err := db.GetPendingSyncEvents(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].UserID != victim.ID || pending[0].EventType != "user.deleted" {
+		t.Fatalf("expected one queued deletion event for %s, got %+v", victim.ID, pending)
 	}
 }
 

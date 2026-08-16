@@ -274,15 +274,13 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = h.store.RevokeUserTokens(userID)
-	if err := h.store.DeleteUser(userID); err != nil {
+	if err := h.syncEngine.DeleteUserAndQueueSyncEvents(userID, map[string]any{
+		"id":       userID,
+		"username": user.Username,
+	}); err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
-
-	_ = h.syncEngine.QueueAccountSyncEvent(userID, "user.deleted", map[string]any{
-		"id":       userID,
-		"username": user.Username,
-	})
 
 	h.audit.Record("admin.user_deleted", admin.ID, admin.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"username": user.Username,

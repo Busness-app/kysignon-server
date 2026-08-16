@@ -248,31 +248,53 @@ func (e *Engine) SigningSecret(sys *store.PairedSystem) (string, error) {
 // QueueAccountSyncEvent queues one event per active paired system. Fanning out at queue
 // time is what keeps a system's delivery state, and its retries, its own.
 func (e *Engine) QueueAccountSyncEvent(userID, eventType string, userPayload any) error {
-	systems, err := e.store.ListActivePairedSystems()
+	events, err := e.newAccountSyncEvents(userID, eventType, userPayload)
 	if err != nil {
 		return err
 	}
+	for i := range events {
+		if err := e.store.CreateAccountSyncEvent(&events[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteUserAndQueueSyncEvents removes a user and queues its deletion atomically, so a
+// downstream product cannot retain an account when the source deletion succeeds.
+func (e *Engine) DeleteUserAndQueueSyncEvents(userID string, userPayload any) error {
+	events, err := e.newAccountSyncEvents(userID, "user.deleted", userPayload)
+	if err != nil {
+		return err
+	}
+	return e.store.DeleteUserWithSyncEvents(userID, events)
+}
+
+func (e *Engine) newAccountSyncEvents(userID, eventType string, userPayload any) ([]store.AccountSyncEvent, error) {
+	systems, err := e.store.ListActivePairedSystems()
+	if err != nil {
+		return nil, err
+	}
 	if len(systems) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	payloadBytes, err := json.Marshal(userPayload)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	events := make([]store.AccountSyncEvent, 0, len(systems))
 	for _, sys := range systems {
-		if err := e.store.CreateAccountSyncEvent(&store.AccountSyncEvent{
+		events = append(events, store.AccountSyncEvent{
 			ID:          uuid.New().String(),
 			UserID:      userID,
 			SystemID:    sys.ID,
 			EventType:   eventType,
 			PayloadJSON: string(payloadBytes),
 			Status:      "pending",
-		}); err != nil {
-			return err
-		}
+		})
 	}
-	return nil
+	return events, nil
 }
 
 type SyncWebhookPayload struct {

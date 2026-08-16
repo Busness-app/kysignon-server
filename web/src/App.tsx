@@ -79,7 +79,7 @@ export const App: React.FC = () => {
         )}
 
         {activeTab === 'devices' && (
-          <DeviceSettings onUserUpdate={checkSession} />
+          <DeviceSettings user={currentUser} onUserUpdate={checkSession} />
         )}
 
         {currentUser.role === 'admin' && (

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { NativeDevice } from '../types';
+import { NativeDevice, User } from '../types';
 import { apiRequest } from '../api';
 import QRCode from 'qrcode';
 import {
@@ -15,10 +15,11 @@ import {
 } from 'lucide-react';
 
 interface DeviceSettingsProps {
+  user: User;
   onUserUpdate: () => void;
 }
 
-export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ onUserUpdate }) => {
+export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpdate }) => {
   const [devices, setDevices] = useState<NativeDevice[]>([]);
 
   // Device Pairing State
@@ -177,7 +178,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ onUserUpdate }) 
         </div>
 
         <p className="section-desc">
-          Paired devices receive push notifications for instantaneous sign-in approval with 2-digit number matching.
+          Paired devices receive push notifications for instantaneous sign-in approval with 2-digit number matching. Pairing a different device keeps the devices shown here; pairing the same device identifier updates that device.
         </p>
 
         <div className="device-list">
@@ -228,7 +229,9 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ onUserUpdate }) 
           </button>
         </div>
         <p className="section-desc">
-          Generate 6-digit codes using standard authenticator apps (e.g., KySecurity Authenticator, Aegis, 1Password).
+          {user.mfaMethods?.includes('totp')
+            ? 'One TOTP credential is configured for this account. Any authenticator app that scanned its QR code can generate codes; KySignOn cannot see those individual app copies. Configuring TOTP again replaces the current credential and invalidates its existing codes.'
+            : 'No TOTP credential is configured. Generate 6-digit codes using a standard authenticator app (e.g., KySecurity Authenticator, Aegis, 1Password).'}
         </p>
       </div>
 
@@ -260,6 +263,9 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ onUserUpdate }) 
             <div className="modal-body text-center">
               <p className="modal-desc">
                 Open the <strong>KySecurity Authenticator</strong> app on your mobile device and scan the QR code or enter the pairing PIN.
+              </p>
+              <p className="modal-desc">
+                This adds a different device without removing the paired devices listed above. Pairing the same device identifier updates that device.
               </p>
 
               <div className="qr-container">
@@ -305,7 +311,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ onUserUpdate }) 
             </div>
             <form onSubmit={handleEnableTOTP} className="modal-body">
               <p className="modal-desc">
-                Scan this QR code in your authenticator app, then enter the generated 6-digit verification code below:
+                Scan this QR code in your authenticator app, then enter the generated 6-digit verification code below. This replaces the account's current TOTP credential, if any.
               </p>
 
               <div className="qr-container">

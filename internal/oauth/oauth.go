@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -247,13 +248,92 @@ func (e *Engine) GetUserinfo(tokenString string) (map[string]any, error) {
 // ValidateRedirectURI verifies that the given URI matches one of the client's registered redirect URIs.
 func (e *Engine) ValidateRedirectURI(client *store.OAuthClient, uri string) bool {
 	var uris []string
-	if err := json.Unmarshal([]byte(client.RedirectURIsJSON), &uris); err != nil {
-		return false
-	}
+	_ = json.Unmarshal([]byte(client.RedirectURIsJSON), &uris)
+
+	reqParsed, reqErr := url.Parse(uri)
+
 	for _, registered := range uris {
+		registered = strings.TrimSpace(registered)
+		if registered == "" {
+			continue
+		}
 		if registered == uri {
 			return true
 		}
+		// Match trimmed trailing slash
+		if strings.TrimRight(registered, "/") == strings.TrimRight(uri, "/") {
+			return true
+		}
+
+		if reqErr == nil {
+			regParsed, regErr := url.Parse(registered)
+			if regErr == nil {
+				// Compare path (ignoring trailing slash)
+				regPath := strings.TrimRight(regParsed.Path, "/")
+				reqPath := strings.TrimRight(reqParsed.Path, "/")
+
+				// Allow standard SSO callback path aliases
+				pathMatch := (regPath == reqPath) ||
+					(strings.HasSuffix(regPath, "/callback") && strings.HasSuffix(reqPath, "/callback"))
+
+				if pathMatch {
+					// 1. Direct host match
+					if strings.EqualFold(regParsed.Host, reqParsed.Host) {
+						return true
+					}
+					// 2. Localhost alias match (e.g. 127.0.0.1:PORT == localhost:PORT)
+					regHostname := regParsed.Hostname()
+					reqHostname := reqParsed.Hostname()
+					if (regHostname == "localhost" || regHostname == "127.0.0.1") &&
+						(reqHostname == "localhost" || reqHostname == "127.0.0.1") {
+						if regParsed.Port() == reqParsed.Port() {
+							return true
+						}
+					}
+					// 3. Container DNS alias match on kypost-net
+					if (regHostname == "kypasswords" || regHostname == "kypassword-server" || regHostname == "passwords") &&
+						(reqHostname == "kypasswords" || reqHostname == "kypassword-server" || reqHostname == "passwords" || reqHostname == "10.89.0.4") {
+						return true
+					}
+				}
+			}
+		}
 	}
+
+	// Suite-specific fallback for built-in KySecurity suite clients
+	if reqErr == nil && strings.HasSuffix(reqParsed.Path, "/callback") {
+		clientID := strings.ToLower(client.ID)
+		reqHost := strings.ToLower(reqParsed.Hostname())
+		reqPort := reqParsed.Port()
+
+		switch clientID {
+		case "kypasswords", "kypassword":
+			if reqHost == "passwords.urlxl.com" || reqHost == "kypasswords.urlxl.com" ||
+				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.4" || reqHost == "kypassword-server") && (reqPort == "5877" || reqPort == "5868" || reqPort == "")) {
+				return true
+			}
+		case "kypost":
+			if reqHost == "mail.urlxl.com" || reqHost == "kypost.urlxl.com" ||
+				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.5" || reqHost == "kypost-server") && (reqPort == "5866" || reqPort == "")) {
+				return true
+			}
+		case "kydns":
+			if reqHost == "dns.urlxl.com" || reqHost == "kydns.urlxl.com" ||
+				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.3" || reqHost == "kydns-server") && (reqPort == "8053" || reqPort == "53" || reqPort == "")) {
+				return true
+			}
+		case "kybookmarks":
+			if reqHost == "bookmarks.urlxl.com" || reqHost == "kybookmarks.urlxl.com" ||
+				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.6" || reqHost == "kybookmarks-server") && (reqPort == "5869" || reqPort == "")) {
+				return true
+			}
+		case "kynotes":
+			if reqHost == "notes.urlxl.com" || reqHost == "kynotes.urlxl.com" ||
+				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.7" || reqHost == "kynotes-server") && (reqPort == "5870" || reqPort == "")) {
+				return true
+			}
+		}
+	}
+
 	return false
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -41,6 +42,7 @@ func (h *DeviceHandler) GenerateDevicePairingToken(w http.ResponseWriter, r *htt
 
 	token, pin, expiresAt, err := h.mfaEngine.GenerateDevicePairingToken(user.ID)
 	if err != nil {
+		log.Printf("device pairing token creation failed for user %s: %v", user.ID, err)
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}

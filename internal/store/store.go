@@ -3,6 +3,8 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"runtime"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -21,7 +23,12 @@ func New(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	db.SetMaxOpenConns(1) // SQLite single-writer pattern
+	// WAL supports one writer alongside many concurrent readers. Capping the whole pool at
+	// one connection serialised every request in the server behind the slowest handler,
+	// including outbound webhook delivery and Argon2 verification.
+	db.SetMaxOpenConns(runtime.NumCPU() + 4)
+	db.SetMaxIdleConns(4)
+	db.SetConnMaxLifetime(time.Hour)
 
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
@@ -62,6 +69,12 @@ func (s *Store) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(session_token_hash);
 	CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+
+	CREATE TABLE IF NOT EXISTS login_failures (
+		user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+		failures INTEGER NOT NULL DEFAULT 0,
+		last_failure_at DATETIME NOT NULL
+	);
 
 	CREATE TABLE IF NOT EXISTS paired_systems (
 		id TEXT PRIMARY KEY,
@@ -202,6 +215,20 @@ func (s *Store) migrate() error {
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
+	-- Every access token this server mints is registered here so it can be revoked before
+	-- it expires. Services that validate tokens offline against JWKS will not observe a
+	-- revocation until expiry; those needing immediate effect must call /oauth/userinfo.
+	CREATE TABLE IF NOT EXISTS issued_tokens (
+		jti TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		client_id TEXT NOT NULL,
+		expires_at DATETIME NOT NULL,
+		revoked_at DATETIME,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_issued_tokens_user ON issued_tokens(user_id);
+	CREATE INDEX IF NOT EXISTS idx_issued_tokens_expiry ON issued_tokens(expires_at);
+
 	CREATE TABLE IF NOT EXISTS audit_events (
 		id TEXT PRIMARY KEY,
 		actor_id TEXT,
@@ -221,7 +248,25 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return err
 	}
-	_, _ = s.db.Exec(`ALTER TABLE oauth_clients ADD COLUMN launch_url TEXT`)
+
+	// Additive column migrations. "duplicate column name" means the migration already ran;
+	// anything else is a real failure and must not be swallowed.
+	for _, stmt := range []string{
+		`ALTER TABLE oauth_clients ADD COLUMN launch_url TEXT`,
+		`ALTER TABLE authorization_codes ADD COLUMN nonce TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE system_pairing_tokens ADD COLUMN pin_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE system_pairing_tokens ADD COLUMN pin_attempts INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE device_pairing_tokens ADD COLUMN pin_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE mfa_tokens ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE mfa_methods ADD COLUMN last_totp_counter INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE account_sync_events ADD COLUMN system_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE account_sync_events ADD COLUMN next_attempt_at DATETIME`,
+		`ALTER TABLE paired_systems ADD COLUMN hmac_secret_encrypted TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("migration %q failed: %w", stmt, err)
+		}
+	}
 	return nil
 }
 
@@ -326,10 +371,12 @@ func (s *Store) CreateSession(sess *Session) error {
 	return err
 }
 
+// GetSessionByTokenHash returns a live session, or nil. Expiry is part of the query so no
+// caller can authenticate against a dead session by forgetting to check the timestamp.
 func (s *Store) GetSessionByTokenHash(tokenHash string) (*Session, error) {
-	query := `SELECT id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at FROM sessions WHERE session_token_hash = ?`
+	query := `SELECT id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at FROM sessions WHERE session_token_hash = ? AND expires_at > ?`
 	sess := &Session{}
-	err := s.db.QueryRow(query, tokenHash).Scan(&sess.ID, &sess.UserID, &sess.SessionTokenHash, &sess.IPAddress, &sess.UserAgent, &sess.ExpiresAt, &sess.CreatedAt, &sess.LastActiveAt)
+	err := s.db.QueryRow(query, tokenHash, time.Now().UTC()).Scan(&sess.ID, &sess.UserID, &sess.SessionTokenHash, &sess.IPAddress, &sess.UserAgent, &sess.ExpiresAt, &sess.CreatedAt, &sess.LastActiveAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -352,46 +399,148 @@ func (s *Store) DeleteUserSessions(userID string) error {
 	return err
 }
 
+// HasAnySession reports whether anyone has ever established a session, used to decide when
+// the first-run credentials file has served its purpose.
+func (s *Store) HasAnySession() (bool, error) {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (s *Store) CleanupExpiredSessions() error {
 	_, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at < ?`, time.Now().UTC())
 	return err
 }
 
-// System Pairing & Sync Management
-func (s *Store) CreateSystemPairingToken(token *SystemPairingToken) error {
-	query := `INSERT INTO system_pairing_tokens (id, token_hash, system_type, created_by_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`
-	token.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, token.ID, token.TokenHash, token.SystemType, token.CreatedByUserID, token.ExpiresAt, token.CreatedAt)
+// Account lockout
+//
+// MaxFailedLogins consecutive wrong passwords lock an account for LockoutDuration. This is
+// keyed on the account, not the source address, because a password spray distributed
+// across hosts never trips a per-IP limiter.
+const (
+	MaxFailedLogins = 10
+	LockoutDuration = 15 * time.Minute
+)
+
+// RecordFailedLogin increments the failure counter and returns the new count.
+func (s *Store) RecordFailedLogin(userID string) (int, error) {
+	now := time.Now().UTC()
+	if _, err := s.db.Exec(`
+		INSERT INTO login_failures (user_id, failures, last_failure_at)
+		VALUES (?, 1, ?)
+		ON CONFLICT(user_id) DO UPDATE SET
+			failures = login_failures.failures + 1,
+			last_failure_at = excluded.last_failure_at`, userID, now); err != nil {
+		return 0, err
+	}
+	var failures int
+	err := s.db.QueryRow(`SELECT failures FROM login_failures WHERE user_id = ?`, userID).Scan(&failures)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return failures, err
+}
+
+// IsAccountLocked reports whether the account is inside its lockout window.
+func (s *Store) IsAccountLocked(userID string) (bool, error) {
+	var failures int
+	var last time.Time
+	err := s.db.QueryRow(
+		`SELECT failures, last_failure_at FROM login_failures WHERE user_id = ?`, userID).
+		Scan(&failures, &last)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if failures < MaxFailedLogins {
+		return false, nil
+	}
+	return time.Since(last.UTC()) < LockoutDuration, nil
+}
+
+func (s *Store) ClearFailedLogins(userID string) error {
+	_, err := s.db.Exec(`DELETE FROM login_failures WHERE user_id = ?`, userID)
 	return err
 }
 
-func (s *Store) GetValidSystemPairingToken(tokenHash string) (*SystemPairingToken, error) {
-	query := `SELECT id, token_hash, system_type, created_by_user_id, expires_at, used_at, created_at FROM system_pairing_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`
+// System Pairing & Sync Management
+func (s *Store) CreateSystemPairingToken(token *SystemPairingToken) error {
+	query := `INSERT INTO system_pairing_tokens (id, token_hash, pin_hash, system_type, created_by_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	token.CreatedAt = time.Now().UTC()
+	_, err := s.db.Exec(query, token.ID, token.TokenHash, token.PINHash, token.SystemType, token.CreatedByUserID, token.ExpiresAt, token.CreatedAt)
+	return err
+}
+
+// GetValidSystemPairingToken returns an unspent, unexpired token that still has PIN
+// attempts left.
+func (s *Store) GetValidSystemPairingToken(tokenHash string, maxPINAttempts int) (*SystemPairingToken, error) {
+	query := `SELECT id, token_hash, pin_hash, pin_attempts, system_type, created_by_user_id, expires_at, used_at, created_at
+	          FROM system_pairing_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? AND pin_attempts < ?`
 	t := &SystemPairingToken{}
-	err := s.db.QueryRow(query, tokenHash, time.Now().UTC()).Scan(&t.ID, &t.TokenHash, &t.SystemType, &t.CreatedByUserID, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	err := s.db.QueryRow(query, tokenHash, time.Now().UTC(), maxPINAttempts).
+		Scan(&t.ID, &t.TokenHash, &t.PINHash, &t.PINAttempts, &t.SystemType, &t.CreatedByUserID, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	return t, err
 }
 
-func (s *Store) MarkSystemPairingTokenUsed(tokenID string) error {
-	now := time.Now().UTC()
-	_, err := s.db.Exec(`UPDATE system_pairing_tokens SET used_at = ? WHERE id = ?`, now, tokenID)
+// RecordSystemPairingPINFailure counts a wrong PIN against the token.
+func (s *Store) RecordSystemPairingPINFailure(tokenID string) (int, error) {
+	if _, err := s.db.Exec(`UPDATE system_pairing_tokens SET pin_attempts = pin_attempts + 1 WHERE id = ?`, tokenID); err != nil {
+		return 0, err
+	}
+	var attempts int
+	err := s.db.QueryRow(`SELECT pin_attempts FROM system_pairing_tokens WHERE id = ?`, tokenID).Scan(&attempts)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return attempts, err
+}
+
+// ConsumeSystemPairingToken atomically spends a pairing token.
+func (s *Store) ConsumeSystemPairingToken(tokenID string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE system_pairing_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+		time.Now().UTC(), tokenID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// ExpireSystemPairingTokens forces outstanding pairing tokens to expire.
+func (s *Store) ExpireSystemPairingTokens(at time.Time) error {
+	_, err := s.db.Exec(`UPDATE system_pairing_tokens SET expires_at = ?`, at)
+	return err
+}
+
+func (s *Store) DeleteExpiredSystemPairingTokens() error {
+	_, err := s.db.Exec(`DELETE FROM system_pairing_tokens WHERE expires_at < ?`, time.Now().UTC())
 	return err
 }
 
 func (s *Store) CreatePairedSystem(ps *PairedSystem) error {
-	query := `INSERT INTO paired_systems (id, name, system_type, callback_url, hmac_secret_hash, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO paired_systems (id, name, system_type, callback_url, hmac_secret_hash, hmac_secret_encrypted, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	ps.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, ps.ID, ps.Name, ps.SystemType, ps.CallbackURL, ps.HMACSecretHash, ps.Status, ps.CreatedAt)
+	// hmac_secret_hash is an empty placeholder for the legacy NOT NULL column; the usable
+	// secret lives encrypted in hmac_secret_encrypted.
+	_, err := s.db.Exec(query, ps.ID, ps.Name, ps.SystemType, ps.CallbackURL, "", ps.HMACSecretEncrypted, ps.Status, ps.CreatedAt)
 	return err
 }
 
 func (s *Store) GetPairedSystemByID(id string) (*PairedSystem, error) {
-	query := `SELECT id, name, system_type, callback_url, hmac_secret_hash, status, last_synced_at, created_at FROM paired_systems WHERE id = ?`
+	query := `SELECT id, name, system_type, callback_url, hmac_secret_hash, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE id = ?`
 	ps := &PairedSystem{}
-	err := s.db.QueryRow(query, id).Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretHash, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt)
+	err := s.db.QueryRow(query, id).Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretHash, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -399,7 +548,7 @@ func (s *Store) GetPairedSystemByID(id string) (*PairedSystem, error) {
 }
 
 func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
-	query := `SELECT id, name, system_type, callback_url, hmac_secret_hash, status, last_synced_at, created_at FROM paired_systems ORDER BY created_at ASC`
+	query := `SELECT id, name, system_type, callback_url, hmac_secret_hash, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems ORDER BY created_at ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -409,7 +558,7 @@ func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
 	var systems []PairedSystem
 	for rows.Next() {
 		var ps PairedSystem
-		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretHash, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretHash, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
 			return nil, err
 		}
 		systems = append(systems, ps)
@@ -418,7 +567,7 @@ func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
 }
 
 func (s *Store) ListActivePairedSystems() ([]PairedSystem, error) {
-	query := `SELECT id, name, system_type, callback_url, hmac_secret_hash, status, last_synced_at, created_at FROM paired_systems WHERE status != 'disabled' ORDER BY created_at ASC`
+	query := `SELECT id, name, system_type, callback_url, hmac_secret_hash, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE status != 'disabled' ORDER BY created_at ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -428,7 +577,7 @@ func (s *Store) ListActivePairedSystems() ([]PairedSystem, error) {
 	var systems []PairedSystem
 	for rows.Next() {
 		var ps PairedSystem
-		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretHash, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretHash, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
 			return nil, err
 		}
 		systems = append(systems, ps)
@@ -449,75 +598,139 @@ func (s *Store) DeletePairedSystem(systemID string) error {
 
 // Account Sync Events
 func (s *Store) CreateAccountSyncEvent(event *AccountSyncEvent) error {
-	query := `INSERT INTO account_sync_events (id, user_id, event_type, payload_json, attempts, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO account_sync_events (id, user_id, system_id, event_type, payload_json, attempts, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	now := time.Now().UTC()
 	event.CreatedAt = now
 	event.UpdatedAt = now
-	_, err := s.db.Exec(query, event.ID, event.UserID, event.EventType, event.PayloadJSON, event.Attempts, event.Status, event.CreatedAt, event.UpdatedAt)
+	_, err := s.db.Exec(query, event.ID, event.UserID, event.SystemID, event.EventType, event.PayloadJSON, event.Attempts, event.Status, event.CreatedAt, event.UpdatedAt)
 	return err
 }
 
-func (s *Store) GetPendingSyncEvents(limit int) ([]AccountSyncEvent, error) {
-	query := `SELECT id, user_id, event_type, payload_json, attempts, status, last_error, created_at, updated_at FROM account_sync_events WHERE status IN ('pending', 'failed') AND attempts < 5 ORDER BY created_at ASC LIMIT ?`
-	rows, err := s.db.Query(query, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+const syncEventColumns = `id, user_id, system_id, event_type, payload_json, attempts, status, last_error, next_attempt_at, created_at, updated_at`
 
+func scanSyncEvents(rows *sql.Rows) ([]AccountSyncEvent, error) {
+	defer rows.Close()
 	var events []AccountSyncEvent
 	for rows.Next() {
 		var ev AccountSyncEvent
 		var lastErr sql.NullString
-		if err := rows.Scan(&ev.ID, &ev.UserID, &ev.EventType, &ev.PayloadJSON, &ev.Attempts, &ev.Status, &lastErr, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
+		var next sql.NullTime
+		if err := rows.Scan(&ev.ID, &ev.UserID, &ev.SystemID, &ev.EventType, &ev.PayloadJSON,
+			&ev.Attempts, &ev.Status, &lastErr, &next, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if lastErr.Valid {
 			ev.LastError = lastErr.String
 		}
+		if next.Valid {
+			t := next.Time
+			ev.NextAttempt = &t
+		}
 		events = append(events, ev)
 	}
-	return events, nil
+	return events, rows.Err()
 }
 
-func (s *Store) UpdateSyncEventStatus(eventID, status, lastError string, attempts int) error {
-	query := `UPDATE account_sync_events SET status = ?, last_error = ?, attempts = ?, updated_at = ? WHERE id = ?`
-	_, err := s.db.Exec(query, status, lastError, attempts, time.Now().UTC(), eventID)
+// GetPendingSyncEvents returns undelivered events regardless of when they are next due.
+func (s *Store) GetPendingSyncEvents(limit int) ([]AccountSyncEvent, error) {
+	rows, err := s.db.Query(`SELECT `+syncEventColumns+` FROM account_sync_events
+		WHERE status IN ('pending', 'failed') AND attempts < 5 ORDER BY created_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanSyncEvents(rows)
+}
+
+// GetDueSyncEvents returns pending events whose backoff has elapsed.
+func (s *Store) GetDueSyncEvents(limit int) ([]AccountSyncEvent, error) {
+	rows, err := s.db.Query(`SELECT `+syncEventColumns+` FROM account_sync_events
+		WHERE status = 'pending' AND attempts < 5
+		  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+		ORDER BY created_at ASC LIMIT ?`, time.Now().UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanSyncEvents(rows)
+}
+
+func (s *Store) UpdateSyncEventStatus(eventID, status, lastError string, attempts int, nextAttempt *time.Time) error {
+	query := `UPDATE account_sync_events SET status = ?, last_error = ?, attempts = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?`
+	var next any
+	if nextAttempt != nil {
+		next = *nextAttempt
+	}
+	_, err := s.db.Exec(query, status, lastError, attempts, next, time.Now().UTC(), eventID)
+	return err
+}
+
+func (s *Store) DeleteDeliveredSyncEvents(olderThan time.Time) error {
+	_, err := s.db.Exec(`DELETE FROM account_sync_events WHERE status = 'delivered' AND updated_at < ?`, olderThan)
 	return err
 }
 
 // Native Device & MFA Methods
 func (s *Store) CreateDevicePairingToken(token *DevicePairingToken) error {
-	query := `INSERT INTO device_pairing_tokens (id, user_id, token_hash, pin_code, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO device_pairing_tokens (id, user_id, token_hash, pin_code, pin_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
 	token.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, token.ID, token.UserID, token.TokenHash, token.PINCode, token.ExpiresAt, token.CreatedAt)
+	// pin_code is retained only as an empty placeholder for the legacy NOT NULL column;
+	// the redeemable value lives in pin_hash.
+	_, err := s.db.Exec(query, token.ID, token.UserID, token.TokenHash, "", token.PINHash, token.ExpiresAt, token.CreatedAt)
 	return err
+}
+
+const devicePairingTokenColumns = `id, user_id, token_hash, pin_code, pin_hash, expires_at, used_at, created_at`
+
+func scanDevicePairingToken(row *sql.Row) (*DevicePairingToken, error) {
+	t := &DevicePairingToken{}
+	err := row.Scan(&t.ID, &t.UserID, &t.TokenHash, &t.PINCode, &t.PINHash, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return t, err
 }
 
 func (s *Store) GetValidDevicePairingToken(tokenHash string) (*DevicePairingToken, error) {
-	query := `SELECT id, user_id, token_hash, pin_code, expires_at, used_at, created_at FROM device_pairing_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`
-	t := &DevicePairingToken{}
-	err := s.db.QueryRow(query, tokenHash, time.Now().UTC()).Scan(&t.ID, &t.UserID, &t.TokenHash, &t.PINCode, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return t, err
+	return scanDevicePairingToken(s.db.QueryRow(
+		`SELECT `+devicePairingTokenColumns+` FROM device_pairing_tokens
+		 WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`,
+		tokenHash, time.Now().UTC()))
 }
 
-func (s *Store) GetValidDevicePairingTokenByPIN(pinCode string) (*DevicePairingToken, error) {
-	query := `SELECT id, user_id, token_hash, pin_code, expires_at, used_at, created_at FROM device_pairing_tokens WHERE pin_code = ? AND used_at IS NULL AND expires_at > ?`
-	t := &DevicePairingToken{}
-	err := s.db.QueryRow(query, pinCode, time.Now().UTC()).Scan(&t.ID, &t.UserID, &t.TokenHash, &t.PINCode, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return t, err
+// GetDevicePairingTokenByUserPIN resolves a PIN within a single user's pairing tokens.
+// A global PIN lookup would let any live 6-digit PIN in the deployment match, which turns
+// one user's pairing window into everyone's.
+func (s *Store) GetDevicePairingTokenByUserPIN(userID, pinHash string) (*DevicePairingToken, error) {
+	return scanDevicePairingToken(s.db.QueryRow(
+		`SELECT `+devicePairingTokenColumns+` FROM device_pairing_tokens
+		 WHERE user_id = ? AND pin_hash = ? AND pin_hash != '' AND used_at IS NULL AND expires_at > ?`,
+		userID, pinHash, time.Now().UTC()))
 }
 
-func (s *Store) MarkDevicePairingTokenUsed(tokenID string) error {
-	now := time.Now().UTC()
-	_, err := s.db.Exec(`UPDATE device_pairing_tokens SET used_at = ? WHERE id = ?`, now, tokenID)
+// ExpireDevicePairingTokens forces a user's outstanding pairing tokens to expire.
+func (s *Store) ExpireDevicePairingTokens(userID string, at time.Time) error {
+	_, err := s.db.Exec(`UPDATE device_pairing_tokens SET expires_at = ? WHERE user_id = ?`, at, userID)
 	return err
+}
+
+func (s *Store) DeleteExpiredDevicePairingTokens() error {
+	_, err := s.db.Exec(`DELETE FROM device_pairing_tokens WHERE expires_at < ?`, time.Now().UTC())
+	return err
+}
+
+// ConsumeDevicePairingToken atomically spends a pairing token, reporting false if another
+// registration spent it first.
+func (s *Store) ConsumeDevicePairingToken(tokenID string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE device_pairing_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+		time.Now().UTC(), tokenID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 func (s *Store) UpsertNativeDevice(dev *NativeDevice) error {
@@ -585,6 +798,24 @@ func (s *Store) SetMFAMethod(m *MFAMethod) error {
 	m.CreatedAt = time.Now().UTC()
 	_, err := s.db.Exec(query, m.ID, m.UserID, m.MethodType, m.EncryptedSecret, m.IsPrimary, m.CreatedAt)
 	return err
+}
+
+// ConsumeTOTPCounter records that a TOTP time-step has been used. It reports false if the
+// step was already spent, which is what stops a sniffed code being replayed inside its
+// validity window (RFC 6238 section 5.2).
+func (s *Store) ConsumeTOTPCounter(userID string, counter int64) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE mfa_methods SET last_totp_counter = ?
+		 WHERE user_id = ? AND method_type = 'totp' AND last_totp_counter < ?`,
+		counter, userID, counter)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 func (s *Store) GetMFAMethod(userID, methodType string) (*MFAMethod, error) {
@@ -670,6 +901,11 @@ func (s *Store) TransitionMFAChallengeStatus(challengeID, from, to string) (bool
 	return n == 1, nil
 }
 
+func (s *Store) DeleteExpiredMFAChallenges() error {
+	_, err := s.db.Exec(`DELETE FROM mfa_challenges WHERE expires_at < ?`, time.Now().UTC())
+	return err
+}
+
 // MFA Tokens
 func (s *Store) CreateMFAToken(t *MFAToken) error {
 	query := `INSERT INTO mfa_tokens (id, user_id, token_hash, challenge_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`
@@ -682,14 +918,14 @@ func (s *Store) CreateMFAToken(t *MFAToken) error {
 	return err
 }
 
-// GetValidMFAToken returns an unused, unexpired token by its hash, or nil.
-func (s *Store) GetValidMFAToken(tokenHash string) (*MFAToken, error) {
-	query := `SELECT id, user_id, token_hash, challenge_id, expires_at, used_at, created_at
-	          FROM mfa_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`
+// GetValidMFAToken returns an unused, unexpired token that still has attempts left.
+func (s *Store) GetValidMFAToken(tokenHash string, maxAttempts int) (*MFAToken, error) {
+	query := `SELECT id, user_id, token_hash, challenge_id, attempts, expires_at, used_at, created_at
+	          FROM mfa_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? AND attempts < ?`
 	t := &MFAToken{}
 	var challengeID sql.NullString
-	err := s.db.QueryRow(query, tokenHash, time.Now().UTC()).
-		Scan(&t.ID, &t.UserID, &t.TokenHash, &challengeID, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	err := s.db.QueryRow(query, tokenHash, time.Now().UTC(), maxAttempts).
+		Scan(&t.ID, &t.UserID, &t.TokenHash, &challengeID, &t.Attempts, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -700,6 +936,20 @@ func (s *Store) GetValidMFAToken(tokenHash string) (*MFAToken, error) {
 		t.ChallengeID = challengeID.String
 	}
 	return t, nil
+}
+
+// RecordMFAFailure counts a wrong second-factor guess against the token and returns the
+// new total. Without this one token funds unlimited guesses for its whole lifetime.
+func (s *Store) RecordMFAFailure(tokenID string) (int, error) {
+	if _, err := s.db.Exec(`UPDATE mfa_tokens SET attempts = attempts + 1 WHERE id = ?`, tokenID); err != nil {
+		return 0, err
+	}
+	var attempts int
+	err := s.db.QueryRow(`SELECT attempts FROM mfa_tokens WHERE id = ?`, tokenID).Scan(&attempts)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return attempts, err
 }
 
 // ConsumeMFAToken atomically marks a token used. It reports false if it was already consumed.
@@ -722,12 +972,19 @@ func (s *Store) DeleteExpiredMFATokens() error {
 }
 
 // Recovery Codes
-func (s *Store) SaveRecoveryCodes(codes []RecoveryCode) error {
+// ReplaceRecoveryCodes atomically swaps a user's recovery codes for a new set. Adding to
+// the old set instead would leave leaked codes valid forever, which is the opposite of
+// what a user pressing "regenerate" is asking for.
+func (s *Store) ReplaceRecoveryCodes(userID string, codes []RecoveryCode) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM recovery_codes WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
 
 	stmt, err := tx.Prepare(`INSERT INTO recovery_codes (id, user_id, code_hash, created_at) VALUES (?, ?, ?, ?)`)
 	if err != nil {
@@ -835,25 +1092,86 @@ func (s *Store) DeleteOAuthClient(id string) error {
 
 // Authorization Codes
 func (s *Store) CreateAuthorizationCode(code *AuthorizationCode) error {
-	query := `INSERT INTO authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	code.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, code.ID, code.CodeHash, code.ClientID, code.UserID, code.RedirectURI, code.Scope, code.CodeChallenge, code.CodeChallengeMethod, code.ExpiresAt, code.CreatedAt)
+	_, err := s.db.Exec(query, code.ID, code.CodeHash, code.ClientID, code.UserID, code.RedirectURI, code.Scope, code.CodeChallenge, code.CodeChallengeMethod, code.Nonce, code.ExpiresAt, code.CreatedAt)
 	return err
 }
 
 func (s *Store) GetValidAuthorizationCode(codeHash string) (*AuthorizationCode, error) {
-	query := `SELECT id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at, used_at, created_at FROM authorization_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`
+	query := `SELECT id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, used_at, created_at FROM authorization_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`
 	code := &AuthorizationCode{}
-	err := s.db.QueryRow(query, codeHash, time.Now().UTC()).Scan(&code.ID, &code.CodeHash, &code.ClientID, &code.UserID, &code.RedirectURI, &code.Scope, &code.CodeChallenge, &code.CodeChallengeMethod, &code.ExpiresAt, &code.UsedAt, &code.CreatedAt)
+	err := s.db.QueryRow(query, codeHash, time.Now().UTC()).Scan(&code.ID, &code.CodeHash, &code.ClientID, &code.UserID, &code.RedirectURI, &code.Scope, &code.CodeChallenge, &code.CodeChallengeMethod, &code.Nonce, &code.ExpiresAt, &code.UsedAt, &code.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	return code, err
 }
 
-func (s *Store) MarkAuthorizationCodeUsed(codeID string) error {
-	now := time.Now().UTC()
-	_, err := s.db.Exec(`UPDATE authorization_codes SET used_at = ? WHERE id = ?`, now, codeID)
+// ConsumeAuthorizationCode atomically spends a code. It reports false if another request
+// spent it first, which is what makes the code single-use under concurrency.
+func (s *Store) ConsumeAuthorizationCode(codeID string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE authorization_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+		time.Now().UTC(), codeID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+func (s *Store) DeleteExpiredAuthorizationCodes() error {
+	_, err := s.db.Exec(`DELETE FROM authorization_codes WHERE expires_at < ?`, time.Now().UTC())
+	return err
+}
+
+// Issued Tokens (revocation registry)
+func (s *Store) RecordIssuedToken(t *IssuedToken) error {
+	query := `INSERT INTO issued_tokens (jti, user_id, client_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`
+	t.CreatedAt = time.Now().UTC()
+	_, err := s.db.Exec(query, t.JTI, t.UserID, t.ClientID, t.ExpiresAt, t.CreatedAt)
+	return err
+}
+
+// IsTokenRevoked reports whether a token has been revoked. A jti that is not on the
+// registry at all is treated as revoked: it was either already cleaned up after expiry
+// or never issued by this server.
+func (s *Store) IsTokenRevoked(jti string) (bool, error) {
+	var revokedAt sql.NullTime
+	err := s.db.QueryRow(
+		`SELECT revoked_at FROM issued_tokens WHERE jti = ? AND expires_at > ?`,
+		jti, time.Now().UTC()).Scan(&revokedAt)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return revokedAt.Valid, nil
+}
+
+func (s *Store) RevokeToken(jti string) error {
+	_, err := s.db.Exec(
+		`UPDATE issued_tokens SET revoked_at = ? WHERE jti = ? AND revoked_at IS NULL`,
+		time.Now().UTC(), jti)
+	return err
+}
+
+// RevokeUserTokens revokes every outstanding token for a user. This is what makes
+// "revoke sessions", "disable user", and "delete user" actually deprovision.
+func (s *Store) RevokeUserTokens(userID string) error {
+	_, err := s.db.Exec(
+		`UPDATE issued_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`,
+		time.Now().UTC(), userID)
+	return err
+}
+
+func (s *Store) DeleteExpiredIssuedTokens() error {
+	_, err := s.db.Exec(`DELETE FROM issued_tokens WHERE expires_at < ?`, time.Now().UTC())
 	return err
 }
 
@@ -918,6 +1236,13 @@ func (s *Store) RecordAuditEvent(e *AuditEvent) error {
 	query := `INSERT INTO audit_events (id, actor_id, actor_username, action, target_id, target_type, ip_address, user_agent, outcome, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	e.CreatedAt = time.Now().UTC()
 	_, err := s.db.Exec(query, e.ID, e.ActorID, e.ActorUsername, e.Action, e.TargetID, e.TargetType, e.IPAddress, e.UserAgent, e.Outcome, e.DetailsJSON, e.CreatedAt)
+	return err
+}
+
+// DeleteAuditEventsOlderThan trims the audit trail. It is the fastest growing table here
+// and nothing else bounds it.
+func (s *Store) DeleteAuditEventsOlderThan(cutoff time.Time) error {
+	_, err := s.db.Exec(`DELETE FROM audit_events WHERE created_at < ?`, cutoff)
 	return err
 }
 

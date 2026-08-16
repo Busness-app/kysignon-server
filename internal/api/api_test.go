@@ -54,7 +54,7 @@ func setupTestServer(t *testing.T) (*Server, *store.Store, *sync.Engine, *mfa.En
 	}
 
 	auditLogger := audit.NewLogger(dbStore)
-	syncEngine := sync.NewEngine(dbStore)
+	syncEngine := sync.NewEngine(dbStore, encKey)
 	mfaEngine := mfa.NewEngine(dbStore, encKey)
 	oauthEngine := oauth.NewEngine(dbStore, km, cfg.IssuerURL)
 
@@ -237,7 +237,9 @@ func TestAdminSystemPairingHandshakeViaAPI(t *testing.T) {
 	adminCookie := &http.Cookie{Name: "kysignon_session", Value: adminSessionToken}
 
 	// Fetch CSRF
-	csrfToken, _ := crypto.GenerateRandomHex(32)
+	// The CSRF token is bound to the session it was issued for, so it must come from the
+	// server rather than be invented here.
+	csrfToken := server.middleware.IssueCSRFToken(adminSessionToken)
 	csrfCookie := &http.Cookie{Name: "kysignon_csrf", Value: csrfToken}
 
 	// 2. Admin calls POST /api/admin/systems/pairing-token
@@ -269,6 +271,7 @@ func TestAdminSystemPairingHandshakeViaAPI(t *testing.T) {
 	// 3. Downstream KyPost product registers via POST /api/systems/register (Unauthenticated with token)
 	regBody, _ := json.Marshal(map[string]string{
 		"pairingToken": pairResp.PairingToken,
+		"pinCode":      pairResp.PINCode,
 		"systemName":   "Production KyPost Cluster",
 		"systemType":   "kypost",
 		"callbackUrl":  "https://kypost.example.com/api/sso/sync",
@@ -435,3 +438,49 @@ var (
 	timeNowUTC = func() time.Time { return time.Now().UTC() }
 	timeHour   = 1 * time.Hour
 )
+
+// setupTestServerWith builds a test server after applying opts to the config, for
+// behaviour that is captured at construction time rather than read per request.
+func setupTestServerWith(t *testing.T, opts ...func(*config.Config)) (*Server, *store.Store, *sync.Engine, *mfa.Engine, *oauth.Engine, func()) {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "kysignon-api-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	dbStore, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("store.New failed: %v", err)
+	}
+
+	km, err := crypto.LoadOrCreateRSAKey(filepath.Join(tmpDir, "test_jwt.key"))
+	if err != nil {
+		t.Fatalf("crypto.LoadOrCreateRSAKey failed: %v", err)
+	}
+
+	encKey, _ := crypto.GenerateRandomBytes(32)
+	cfg := &config.Config{
+		Port:          "5867",
+		IssuerURL:     "http://localhost:5867",
+		DBPath:        dbPath,
+		DataDir:       tmpDir,
+		EncryptionKey: encKey,
+		SecretKey:     encKey,
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	auditLogger := audit.NewLogger(dbStore)
+	syncEngine := sync.NewEngine(dbStore, encKey)
+	mfaEngine := mfa.NewEngine(dbStore, encKey)
+	oauthEngine := oauth.NewEngine(dbStore, km, cfg.IssuerURL)
+
+	server := NewServer(cfg, dbStore, km, syncEngine, mfaEngine, oauthEngine, auditLogger, nil)
+
+	return server, dbStore, syncEngine, mfaEngine, oauthEngine, func() {
+		_ = dbStore.Close()
+		_ = os.RemoveAll(tmpDir)
+	}
+}

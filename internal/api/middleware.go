@@ -20,11 +20,24 @@ const (
 	sessionContextKey contextKey = "session"
 )
 
+// limiterIdleTTL is how long an unused rate limiter bucket is kept. Without eviction the
+// limiter map is an unbounded, remotely-driven allocation.
+const limiterIdleTTL = 10 * time.Minute
+
+// defaultMaxLimiters caps the bucket map so a stream of distinct clients cannot exhaust
+// memory. Reaching it forces a sweep, and buckets are dropped if the sweep frees nothing.
+const defaultMaxLimiters = 100_000
+
 type MiddlewareManager struct {
 	store             *store.Store
 	trustedCIDRs      []*net.IPNet
 	rateLimiters      map[string]*RateLimiter
-	rateLimitersMutex sync.RWMutex
+	rateLimitersMutex sync.Mutex
+	lastSweep         time.Time
+	maxLimiters       int
+	csrfKey           []byte
+	// now is injectable so eviction behaviour can be tested without waiting real minutes.
+	now func() time.Time
 }
 
 type RateLimiter struct {
@@ -35,11 +48,10 @@ type RateLimiter struct {
 	mu         sync.Mutex
 }
 
-func NewMiddlewareManager(s *store.Store, trustedCIDRs []string) *MiddlewareManager {
+func NewMiddlewareManager(s *store.Store, trustedCIDRs []string, csrfKey []byte) *MiddlewareManager {
 	var parsedCIDRs []*net.IPNet
 	for _, cidr := range trustedCIDRs {
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err == nil {
+		if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
 			parsedCIDRs = append(parsedCIDRs, ipNet)
 		}
 	}
@@ -48,48 +60,110 @@ func NewMiddlewareManager(s *store.Store, trustedCIDRs []string) *MiddlewareMana
 		store:        s,
 		trustedCIDRs: parsedCIDRs,
 		rateLimiters: make(map[string]*RateLimiter),
+		lastSweep:    time.Now(),
+		maxLimiters:  defaultMaxLimiters,
+		csrfKey:      csrfKey,
+		now:          time.Now,
 	}
 }
 
-// ClientIP extracts real client IP respecting trusted proxy CIDRs.
+// isTrustedProxy reports whether the request's immediate peer is a proxy the operator has
+// named. Only such a peer's forwarding headers are believed.
+func (m *MiddlewareManager) isTrustedProxy(r *http.Request) bool {
+	if len(m.trustedCIDRs) == 0 {
+		return false
+	}
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remoteHost = r.RemoteAddr
+	}
+	remoteIP := net.ParseIP(remoteHost)
+	if remoteIP == nil {
+		return false
+	}
+	for _, cidr := range m.trustedCIDRs {
+		if cidr.Contains(remoteIP) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClientIP returns the address the request should be attributed to. Forwarding headers are
+// only honoured from a configured proxy; otherwise any peer could pick its own rate-limit
+// bucket and its own entry in the audit log.
 func (m *MiddlewareManager) ClientIP(r *http.Request) string {
 	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		remoteHost = r.RemoteAddr
 	}
 
-	remoteIP := net.ParseIP(remoteHost)
-	if remoteIP == nil {
+	if !m.isTrustedProxy(r) {
 		return remoteHost
 	}
 
-	isTrusted := false
-	for _, cidr := range m.trustedCIDRs {
-		if cidr.Contains(remoteIP) {
-			isTrusted = true
-			break
-		}
-	}
-
-	if !isTrusted {
-		return remoteHost
-	}
-
-	// Read Cloudflare or XFF headers if upstream is trusted
 	if cfIP := r.Header.Get("CF-Connecting-IP"); cfIP != "" {
 		return strings.TrimSpace(cfIP)
 	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
+		if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
+			return strings.TrimSpace(first)
 		}
 	}
 	if xri := r.Header.Get("X-Real-IP"); xri != "" {
 		return strings.TrimSpace(xri)
 	}
-
 	return remoteHost
+}
+
+// IsHTTPS reports whether the request reached the user over TLS. X-Forwarded-Proto is only
+// believed from a configured proxy.
+func (m *MiddlewareManager) IsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if m.isTrustedProxy(r) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	return false
+}
+
+// TrackedLimiters reports how many rate limit buckets are currently held.
+func (m *MiddlewareManager) TrackedLimiters() int {
+	m.rateLimitersMutex.Lock()
+	defer m.rateLimitersMutex.Unlock()
+	return len(m.rateLimiters)
+}
+
+// sweepLimiters drops buckets that carry no state worth keeping. A bucket that has fully
+// refilled is indistinguishable from one that never existed, so dropping it loses nothing.
+// The caller must hold rateLimitersMutex.
+func (m *MiddlewareManager) sweepLimiters(now time.Time) {
+	atCapacity := len(m.rateLimiters) >= m.maxLimiters
+	if now.Sub(m.lastSweep) < time.Minute && !atCapacity {
+		return
+	}
+	m.lastSweep = now
+
+	for key, limiter := range m.rateLimiters {
+		limiter.mu.Lock()
+		idle := now.Sub(limiter.lastRefill)
+		refilled := limiter.tokens+idle.Seconds()*limiter.refillRate >= limiter.maxTokens
+		limiter.mu.Unlock()
+		if idle > limiterIdleTTL || (refilled && idle > time.Minute) {
+			delete(m.rateLimiters, key)
+		}
+	}
+
+	// If nothing aged out, the map is under active pressure. Shed arbitrary entries rather
+	// than grow without bound; a shed bucket only ever grants a client a fresh allowance,
+	// which is the same thing the cap-less version did for every request anyway.
+	for key := range m.rateLimiters {
+		if len(m.rateLimiters) < m.maxLimiters {
+			break
+		}
+		delete(m.rateLimiters, key)
+	}
 }
 
 // SecurityHeaders applies security and CSP headers.
@@ -115,21 +189,22 @@ func (m *MiddlewareManager) RateLimit(bucket string, maxTokens, refillRate float
 			ip := m.ClientIP(r)
 			key := bucket + ":" + ip
 
+			now := m.now()
 			m.rateLimitersMutex.Lock()
+			m.sweepLimiters(now)
 			limiter, exists := m.rateLimiters[key]
 			if !exists {
 				limiter = &RateLimiter{
 					tokens:     maxTokens,
 					maxTokens:  maxTokens,
 					refillRate: refillRate,
-					lastRefill: time.Now(),
+					lastRefill: now,
 				}
 				m.rateLimiters[key] = limiter
 			}
 			m.rateLimitersMutex.Unlock()
 
 			limiter.mu.Lock()
-			now := time.Now()
 			elapsed := now.Sub(limiter.lastRefill).Seconds()
 			limiter.tokens += elapsed * limiter.refillRate
 			if limiter.tokens > limiter.maxTokens {
@@ -151,40 +226,56 @@ func (m *MiddlewareManager) RateLimit(bucket string, maxTokens, refillRate float
 	}
 }
 
-// RequireAuth authenticates request via session cookie or Bearer token.
+// authenticate resolves the session cookie to a live session and active user, or returns
+// nil. This is the single definition of "logged in"; RequireAuth and OptionalAuth both
+// use it so no endpoint can accidentally apply a weaker rule.
+func (m *MiddlewareManager) authenticate(r *http.Request) (*store.User, *store.Session) {
+	cookie, err := r.Cookie("kysignon_session")
+	if err != nil || cookie.Value == "" {
+		return nil, nil
+	}
+
+	// GetSessionByTokenHash filters on expires_at, so an expired session is never returned.
+	sess, err := m.store.GetSessionByTokenHash(crypto.HashSHA256(cookie.Value))
+	if err != nil || sess == nil {
+		return nil, nil
+	}
+
+	user, err := m.store.GetUserByID(sess.UserID)
+	if err != nil || user == nil || user.Status != "active" {
+		return nil, nil
+	}
+
+	_ = m.store.TouchSession(sess.ID)
+	return user, sess
+}
+
+func withIdentity(r *http.Request, user *store.User, sess *store.Session) *http.Request {
+	ctx := context.WithValue(r.Context(), userContextKey, user)
+	ctx = context.WithValue(ctx, sessionContextKey, sess)
+	return r.WithContext(ctx)
+}
+
+// RequireAuth rejects the request unless it carries a live session.
 func (m *MiddlewareManager) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("kysignon_session")
-		if err != nil || cookie.Value == "" {
+		user, sess := m.authenticate(r)
+		if user == nil {
 			http.Error(w, `{"error":"unauthorized","error_description":"Authentication required"}`, http.StatusUnauthorized)
 			return
 		}
+		next.ServeHTTP(w, withIdentity(r, user, sess))
+	})
+}
 
-		tokenHash := crypto.HashSHA256(cookie.Value)
-		sess, err := m.store.GetSessionByTokenHash(tokenHash)
-		if err != nil || sess == nil {
-			http.Error(w, `{"error":"unauthorized","error_description":"Invalid session"}`, http.StatusUnauthorized)
-			return
+// OptionalAuth attaches the identity when one is present and proceeds either way. Used by
+// /oauth/authorize, which redirects anonymous callers to the login UI.
+func (m *MiddlewareManager) OptionalAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user, sess := m.authenticate(r); user != nil {
+			r = withIdentity(r, user, sess)
 		}
-
-		if time.Now().UTC().After(sess.ExpiresAt) {
-			_ = m.store.DeleteSession(sess.ID)
-			http.Error(w, `{"error":"unauthorized","error_description":"Session expired"}`, http.StatusUnauthorized)
-			return
-		}
-
-		user, err := m.store.GetUserByID(sess.UserID)
-		if err != nil || user == nil || user.Status != "active" {
-			http.Error(w, `{"error":"unauthorized","error_description":"User inactive or not found"}`, http.StatusUnauthorized)
-			return
-		}
-
-		// Touch session last active
-		_ = m.store.TouchSession(sess.ID)
-
-		ctx := context.WithValue(r.Context(), userContextKey, user)
-		ctx = context.WithValue(ctx, sessionContextKey, sess)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -235,8 +326,41 @@ func (m *MiddlewareManager) CSRFValidate(next http.Handler) http.Handler {
 			return
 		}
 
+		// Matching cookie and header alone proves only that the caller could set both,
+		// which any sibling subdomain or network attacker able to write a cookie for this
+		// domain can do. For a request that carries a session, the token must also be one
+		// this server issued to that session.
+		if sessionCookie, err := r.Cookie("kysignon_session"); err == nil && sessionCookie.Value != "" {
+			if !m.csrfTokenMatchesSession(sessionCookie.Value, csrfCookie.Value) {
+				http.Error(w, `{"error":"invalid_csrf","error_description":"CSRF token was not issued for this session"}`, http.StatusForbidden)
+				return
+			}
+		}
+
 		next.ServeHTTP(w, r)
 	})
+}
+
+// IssueCSRFToken mints a CSRF token bound to a session. The token is the session-scoped
+// HMAC itself, so validation needs no server-side storage and cannot be satisfied by a
+// value the caller invented.
+func (m *MiddlewareManager) IssueCSRFToken(sessionToken string) string {
+	if sessionToken == "" {
+		// Pre-login (the sign-in POST itself) there is no session to bind to. The token
+		// still blocks a blind cross-site POST, which is all it can do at this point.
+		random, err := crypto.GenerateRandomHex(32)
+		if err != nil {
+			return ""
+		}
+		return "u." + random
+	}
+	return "s." + crypto.SignHMACSHA256(m.csrfKey, []byte(crypto.HashSHA256(sessionToken)))
+}
+
+// csrfTokenMatchesSession reports whether a token was issued for this session.
+func (m *MiddlewareManager) csrfTokenMatchesSession(sessionToken, csrfToken string) bool {
+	expected := m.IssueCSRFToken(sessionToken)
+	return expected != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(csrfToken)) == 1
 }
 
 // GetUserFromContext retrieves authenticated user from context.

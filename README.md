@@ -129,10 +129,57 @@ You can verify the status of the server at any time:
 
 ## Command Line Utilities
 
-Reset or create an admin account directly within the running container:
+Create the first admin account directly within the running container:
 ```bash
 docker compose exec kysignon /usr/local/bin/kysignon bootstrap-admin --username admin --password "NewPassword123!"
 ```
+
+`bootstrap-admin` only creates a missing account. It will not overwrite the password of an
+account that already exists — change those from the admin UI, so the action is audited.
+
+---
+
+## Operator Notes: Enforcement That May Affect Existing Integrations
+
+These rules are enforced strictly. Each one closes a path that previously granted access.
+
+**Redirect URIs must match exactly.** There are no host aliases, port families, trailing
+slash tolerance, or per-client fallbacks. A client that needs three callback ports
+registers three URIs. This is the single control deciding who receives an authorization
+code; anything looser makes registration advisory.
+
+**PKCE (`S256`) is mandatory for public clients**, and `plain` is rejected everywhere. A
+public client presents no secret, so the verifier is the only thing binding a code to the
+party that requested it.
+
+**Confidential clients must have a secret configured.** One with an empty
+`client_secret_hash` is rejected rather than authenticated by existing.
+
+**Scopes are intersected with the client's `allowedScopes`.** Asking for more than a client
+is registered for narrows to the permitted set, or fails if nothing overlaps.
+
+**Access tokens live 15 minutes** and carry a `jti` recorded server-side.
+`POST /oauth/revoke` (RFC 7009, client authentication required) invalidates one;
+disabling a user, resetting their MFA, changing their password, or revoking their sessions
+invalidates all of theirs. Services that validate tokens offline against JWKS cannot see a
+revocation until expiry — call `/oauth/userinfo` where revocation must take effect at once.
+
+**System pairing requires the PIN** shown next to the token, and callback URLs must be
+`https` and resolve off-network unless `KYSIGNON_ALLOW_PRIVATE_CALLBACKS=true` (the
+compose file sets this, since services on `kypost-net` address each other privately).
+Sync events are queued per paired system; a system only receives what was queued for it.
+
+**Device pairing requires a P-256 public key.** A device without one can never approve a
+push, and pairing it previously enrolled push MFA that no response could satisfy.
+
+**`TRUSTED_PROXY_CIDRS` defaults to empty.** Forwarding headers, including
+`CF-Connecting-IP`, are ignored unless the immediate peer is a CIDR you named. Set it to
+your proxy's address and nothing wider: every host inside a listed range can choose its own
+rate-limit bucket and its own entry in your audit log.
+
+**`KYSIGNON_SECRET_KEY` and `KYSIGNON_ENCRYPTION_KEY` must be exactly 64 hex characters.**
+A malformed value is a startup error, never a silently weakened key. Generate with
+`openssl rand -hex 32`. Left unset, they are generated into the data directory and reused.
 
 ---
 

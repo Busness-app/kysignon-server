@@ -53,8 +53,13 @@ func TestPKCEValidation(t *testing.T) {
 		t.Fatal("S256 PKCE validation should have failed for invalid verifier")
 	}
 
-	if !ValidatePKCE("plain_verifier", "plain_verifier", "plain") {
-		t.Fatal("plain PKCE validation failed")
+	// The plain method leaves the challenge equal to the verifier, so observing the
+	// authorize request is enough to complete the exchange. It is not supported.
+	if ValidatePKCE("plain_verifier", "plain_verifier", "plain") {
+		t.Fatal("plain PKCE must be rejected")
+	}
+	if ValidatePKCE("plain_verifier", "plain_verifier", "") {
+		t.Fatal("an empty code_challenge_method must not fall back to plain")
 	}
 }
 

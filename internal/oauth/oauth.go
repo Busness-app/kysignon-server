@@ -2,11 +2,11 @@ package oauth
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -14,6 +14,15 @@ import (
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
+
+// AccessTokenTTL bounds how long an access token is honoured. Downstream services that
+// validate tokens offline against JWKS cannot observe a revocation until it elapses, so
+// this is deliberately short. Services that need immediate revocation must call
+// /oauth/userinfo, which consults the revocation list on every request.
+const AccessTokenTTL = 15 * time.Minute
+
+// AuthorizationCodeTTL bounds the window between the authorize redirect and the exchange.
+const AuthorizationCodeTTL = 60 * time.Second
 
 type Engine struct {
 	store      *store.Store
@@ -36,7 +45,7 @@ type OIDCConfiguration struct {
 	TokenEndpoint                    string   `json:"token_endpoint"`
 	UserinfoEndpoint                 string   `json:"userinfo_endpoint"`
 	JwksURI                          string   `json:"jwks_uri"`
-	RevocationEndpoint               string   `json:"revocation_endpoint"`
+	RevocationEndpoint               string   `json:"revocation_endpoint,omitempty"`
 	ResponseTypesSupported           []string `json:"response_types_supported"`
 	SubjectTypesSupported            []string `json:"subject_types_supported"`
 	IDTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported"`
@@ -46,66 +55,155 @@ type OIDCConfiguration struct {
 	ClaimsSupported                  []string `json:"claims_supported"`
 }
 
+// SupportsRevocation reports whether /oauth/revoke actually invalidates a token. Discovery
+// only advertises the endpoint when this is true.
+func (e *Engine) SupportsRevocation() bool { return true }
+
 func (e *Engine) GetOIDCConfiguration() OIDCConfiguration {
-	return OIDCConfiguration{
+	cfg := OIDCConfiguration{
 		Issuer:                           e.issuerURL,
 		AuthorizationEndpoint:            e.issuerURL + "/oauth/authorize",
 		TokenEndpoint:                    e.issuerURL + "/oauth/token",
 		UserinfoEndpoint:                 e.issuerURL + "/oauth/userinfo",
 		JwksURI:                          e.issuerURL + "/.well-known/jwks.json",
-		RevocationEndpoint:               e.issuerURL + "/oauth/revoke",
 		ResponseTypesSupported:           []string{"code"},
 		SubjectTypesSupported:            []string{"public"},
 		IDTokenSigningAlgValuesSupported: []string{"RS256"},
 		ScopesSupported:                  []string{"openid", "profile", "email"},
 		TokenEndpointAuthMethods:         []string{"client_secret_post", "client_secret_basic", "none"},
-		CodeChallengeMethodsSupported:    []string{"S256", "plain"},
-		ClaimsSupported:                  []string{"sub", "iss", "aud", "exp", "iat", "auth_time", "preferred_username", "name", "email"},
+		CodeChallengeMethodsSupported:    []string{"S256"},
+		ClaimsSupported: []string{"sub", "iss", "aud", "exp", "iat", "jti", "nonce", "auth_time",
+			"preferred_username", "name", "email", "role"},
 	}
+	if e.SupportsRevocation() {
+		cfg.RevocationEndpoint = e.issuerURL + "/oauth/revoke"
+	}
+	return cfg
 }
 
 func (e *Engine) GetJWKS() crypto.JWKS {
 	return e.keyManager.GetJWKS()
 }
 
-// ValidatePKCE checks code_verifier against the recorded code_challenge and code_challenge_method.
+// ValidatePKCE checks a code_verifier against the recorded challenge. Only S256 is
+// accepted: under "plain" the challenge is the verifier, so anyone who observes the
+// authorize request can complete the exchange.
 func ValidatePKCE(verifier, challenge, method string) bool {
-	switch method {
-	case "S256":
-		h := sha256.Sum256([]byte(verifier))
-		computed := base64.RawURLEncoding.EncodeToString(h[:])
-		return computed == challenge
-	case "plain", "":
-		return verifier == challenge
-	default:
+	if method != "S256" || verifier == "" || challenge == "" {
 		return false
 	}
+	h := sha256.Sum256([]byte(verifier))
+	computed := base64.RawURLEncoding.EncodeToString(h[:])
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
-// CreateAuthorizationCode creates a short-lived (5 min) authorization code for a user.
+// ValidateRedirectURI reports whether uri is byte-for-byte one of the client's registered
+// redirect URIs.
+//
+// There are deliberately no host aliases, no port families, no trailing-slash tolerance,
+// and no per-client fallbacks. Every one of those turns registration into a suggestion,
+// and a redirect URI is the only thing deciding who receives an authorization code. A
+// deployment that needs three ports registers three URIs.
+func (e *Engine) ValidateRedirectURI(client *store.OAuthClient, uri string) bool {
+	if uri == "" || client == nil {
+		return false
+	}
+	var registered []string
+	if err := json.Unmarshal([]byte(client.RedirectURIsJSON), &registered); err != nil {
+		return false
+	}
+	for _, candidate := range registered {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(candidate), []byte(uri)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// GrantedScope intersects the requested scope with the client's registered allowlist and
+// returns what may actually be granted. Requesting a scope a client is not entitled to
+// never widens the grant.
+func (e *Engine) GrantedScope(clientID, requested string) (string, error) {
+	client, err := e.store.GetOAuthClientByID(clientID)
+	if err != nil {
+		return "", err
+	}
+	if client == nil {
+		return "", errors.New("unknown client")
+	}
+
+	var allowed []string
+	if err := json.Unmarshal([]byte(client.AllowedScopesJSON), &allowed); err != nil {
+		return "", fmt.Errorf("client %s has a malformed scope allowlist: %w", clientID, err)
+	}
+	permitted := make(map[string]bool, len(allowed))
+	for _, s := range allowed {
+		permitted[strings.TrimSpace(s)] = true
+	}
+
+	var granted []string
+	seen := map[string]bool{}
+	for _, s := range strings.Fields(requested) {
+		if permitted[s] && !seen[s] {
+			seen[s] = true
+			granted = append(granted, s)
+		}
+	}
+	if len(granted) == 0 {
+		return "", errors.New("none of the requested scopes are permitted for this client")
+	}
+	return strings.Join(granted, " "), nil
+}
+
+// CreateAuthorizationCode creates a short-lived, single-use authorization code.
 func (e *Engine) CreateAuthorizationCode(clientID, userID, redirectURI, scope, challenge, method string) (string, error) {
+	return e.CreateAuthorizationCodeWithNonce(clientID, userID, redirectURI, scope, challenge, method, "")
+}
+
+// CreateAuthorizationCodeWithNonce is CreateAuthorizationCode plus the OIDC nonce, which
+// is echoed into the ID token so a client can detect replay.
+func (e *Engine) CreateAuthorizationCodeWithNonce(clientID, userID, redirectURI, scope, challenge, method, nonce string) (string, error) {
+	client, err := e.store.GetOAuthClientByID(clientID)
+	if err != nil {
+		return "", err
+	}
+	if client == nil || !client.Enabled {
+		return "", errors.New("invalid or disabled client")
+	}
+
+	// A public client presents no secret, so PKCE is the only thing binding this code to
+	// the party that requested it. Refuse to mint a code that nothing can bind.
+	if client.ClientType == "public" && challenge == "" {
+		return "", errors.New("PKCE is required for public clients")
+	}
+	if challenge != "" && method != "S256" {
+		return "", fmt.Errorf("unsupported code_challenge_method %q; only S256 is accepted", method)
+	}
+
 	rawCode, err := crypto.GenerateRandomHex(32)
 	if err != nil {
 		return "", err
 	}
 
-	codeHash := crypto.HashSHA256(rawCode)
 	item := &store.AuthorizationCode{
 		ID:                  uuid.New().String(),
-		CodeHash:            codeHash,
+		CodeHash:            crypto.HashSHA256(rawCode),
 		ClientID:            clientID,
 		UserID:              userID,
 		RedirectURI:         redirectURI,
 		Scope:               scope,
 		CodeChallenge:       challenge,
 		CodeChallengeMethod: method,
-		ExpiresAt:           time.Now().UTC().Add(5 * time.Minute),
+		Nonce:               nonce,
+		ExpiresAt:           time.Now().UTC().Add(AuthorizationCodeTTL),
 	}
-
 	if err := e.store.CreateAuthorizationCode(item); err != nil {
 		return "", err
 	}
-
 	return rawCode, nil
 }
 
@@ -117,10 +215,29 @@ type TokenResponse struct {
 	Scope       string `json:"scope,omitempty"`
 }
 
-// ExchangeAuthorizationCode validates code and PKCE verifier, issuing ID Token and Access Token.
+// authenticateClient verifies the caller is entitled to act as clientID.
+func (e *Engine) authenticateClient(client *store.OAuthClient, clientSecret string) error {
+	switch client.ClientType {
+	case "confidential":
+		if client.ClientSecretHash == "" {
+			return errors.New("confidential client has no secret configured; re-register it")
+		}
+		presented := crypto.HashSHA256(clientSecret)
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(client.ClientSecretHash)) != 1 {
+			return errors.New("invalid client secret")
+		}
+		return nil
+	case "public":
+		return nil
+	default:
+		return fmt.Errorf("unknown client type %q", client.ClientType)
+	}
+}
+
+// ExchangeAuthorizationCode validates the code, the client, the redirect URI and the PKCE
+// verifier, then issues an access token and, for the openid scope, an ID token.
 func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redirectURI, codeVerifier string) (*TokenResponse, error) {
-	codeHash := crypto.HashSHA256(codeStr)
-	authCode, err := e.store.GetValidAuthorizationCode(codeHash)
+	authCode, err := e.store.GetValidAuthorizationCode(crypto.HashSHA256(codeStr))
 	if err != nil {
 		return nil, err
 	}
@@ -128,81 +245,98 @@ func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redi
 		return nil, errors.New("invalid or expired authorization code")
 	}
 
-	// Invalidate code immediately (single-use)
-	if err := e.store.MarkAuthorizationCodeUsed(authCode.ID); err != nil {
+	// Spend the code before anything else can act on it. A compare-and-swap is what makes
+	// this single-use; a read followed by an unconditional write is a race that hands the
+	// same code to every concurrent caller.
+	spent, err := e.store.ConsumeAuthorizationCode(authCode.ID)
+	if err != nil {
 		return nil, err
 	}
+	if !spent {
+		return nil, errors.New("authorization code has already been redeemed")
+	}
 
-	// Validate client
-	if authCode.ClientID != clientID {
+	if subtle.ConstantTimeCompare([]byte(authCode.ClientID), []byte(clientID)) != 1 {
 		return nil, errors.New("client mismatch")
 	}
 
 	client, err := e.store.GetOAuthClientByID(clientID)
-	if err != nil || client == nil || !client.Enabled {
+	if err != nil {
+		return nil, err
+	}
+	if client == nil || !client.Enabled {
 		return nil, errors.New("invalid or disabled client")
 	}
-
-	// If confidential client, verify secret
-	if client.ClientType == "confidential" {
-		if client.ClientSecretHash != "" {
-			if crypto.HashSHA256(clientSecret) != client.ClientSecretHash {
-				return nil, errors.New("invalid client secret")
-			}
-		}
+	if err := e.authenticateClient(client, clientSecret); err != nil {
+		return nil, err
 	}
 
-	// Validate redirect URI
-	if authCode.RedirectURI != redirectURI {
+	if subtle.ConstantTimeCompare([]byte(authCode.RedirectURI), []byte(redirectURI)) != 1 {
 		return nil, errors.New("redirect uri mismatch")
 	}
 
-	// Validate PKCE
-	if authCode.CodeChallenge != "" {
+	// Public clients must always prove possession of the verifier; a stored challenge is
+	// always enforced regardless of client type.
+	if client.ClientType == "public" || authCode.CodeChallenge != "" {
 		if !ValidatePKCE(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod) {
 			return nil, errors.New("invalid PKCE code verifier")
 		}
 	}
 
 	user, err := e.store.GetUserByID(authCode.UserID)
-	if err != nil || user == nil || user.Status != "active" {
+	if err != nil {
+		return nil, err
+	}
+	if user == nil || user.Status != "active" {
 		return nil, errors.New("user not found or inactive")
 	}
 
 	now := time.Now().UTC()
-	exp := now.Add(1 * time.Hour)
+	exp := now.Add(AccessTokenTTL)
+	accessJTI := uuid.New().String()
 
-	// Access Token (RS256 JWT)
-	accessTokenClaims := map[string]any{
+	// Register the token before handing it out, so revocation has something to revoke.
+	if err := e.store.RecordIssuedToken(&store.IssuedToken{
+		JTI: accessJTI, UserID: user.ID, ClientID: clientID, ExpiresAt: exp,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to record issued token: %w", err)
+	}
+
+	accessToken, err := e.keyManager.SignJWT(map[string]any{
 		"iss":       e.issuerURL,
 		"sub":       user.ID,
 		"aud":       clientID,
 		"exp":       exp.Unix(),
 		"iat":       now.Unix(),
+		"jti":       accessJTI,
 		"scope":     authCode.Scope,
 		"token_use": "access_token",
-	}
-	accessToken, err := e.keyManager.SignJWT(accessTokenClaims)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign access token: %w", err)
 	}
 
 	var idToken string
-	if strings.Contains(authCode.Scope, "openid") {
-		idTokenClaims := map[string]any{
+	if hasScope(authCode.Scope, "openid") {
+		claims := map[string]any{
 			"iss":                e.issuerURL,
 			"sub":                user.ID,
 			"aud":                clientID,
 			"exp":                exp.Unix(),
 			"iat":                now.Unix(),
-			"auth_time":          now.Unix(),
+			"jti":                uuid.New().String(),
+			"auth_time":          authCode.CreatedAt.UTC().Unix(),
+			"token_use":          "id_token",
 			"username":           user.Username,
 			"preferred_username": user.Username,
 			"name":               user.DisplayName,
 			"email":              user.Email,
 			"role":               user.Role,
 		}
-		idToken, err = e.keyManager.SignJWT(idTokenClaims)
+		if authCode.Nonce != "" {
+			claims["nonce"] = authCode.Nonce
+		}
+		idToken, err = e.keyManager.SignJWT(claims)
 		if err != nil {
 			return nil, fmt.Errorf("failed to sign ID token: %w", err)
 		}
@@ -211,15 +345,54 @@ func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redi
 	return &TokenResponse{
 		AccessToken: accessToken,
 		TokenType:   "Bearer",
-		ExpiresIn:   3600,
+		ExpiresIn:   int(AccessTokenTTL.Seconds()),
 		IDToken:     idToken,
 		Scope:       authCode.Scope,
 	}, nil
 }
 
-// GetUserinfo returns standard OIDC userinfo profile claims from an access token.
-func (e *Engine) GetUserinfo(tokenString string) (map[string]any, error) {
+// hasScope reports whether scope contains the exact space-delimited value. A substring
+// test would match "not-openid-really".
+func hasScope(scope, want string) bool {
+	for _, s := range strings.Fields(scope) {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// verifyAccessToken validates a bearer token as an access token issued by this server and
+// still present on the revocation list.
+func (e *Engine) verifyAccessToken(tokenString string) (map[string]any, error) {
 	claims, err := e.keyManager.VerifyJWT(tokenString)
+	if err != nil {
+		return nil, err
+	}
+	if claims["token_use"] != "access_token" {
+		return nil, errors.New("token is not an access token")
+	}
+	if claims["iss"] != e.issuerURL {
+		return nil, errors.New("token was issued by a different issuer")
+	}
+
+	jti, _ := claims["jti"].(string)
+	if jti == "" {
+		return nil, errors.New("token has no jti claim")
+	}
+	revoked, err := e.store.IsTokenRevoked(jti)
+	if err != nil {
+		return nil, err
+	}
+	if revoked {
+		return nil, errors.New("token has been revoked")
+	}
+	return claims, nil
+}
+
+// GetUserinfo returns OIDC profile claims for a valid, unrevoked access token.
+func (e *Engine) GetUserinfo(tokenString string) (map[string]any, error) {
+	claims, err := e.verifyAccessToken(tokenString)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +403,10 @@ func (e *Engine) GetUserinfo(tokenString string) (map[string]any, error) {
 	}
 
 	user, err := e.store.GetUserByID(sub)
-	if err != nil || user == nil || user.Status != "active" {
+	if err != nil {
+		return nil, err
+	}
+	if user == nil || user.Status != "active" {
 		return nil, errors.New("user not found or inactive")
 	}
 
@@ -245,95 +421,32 @@ func (e *Engine) GetUserinfo(tokenString string) (map[string]any, error) {
 	}, nil
 }
 
-// ValidateRedirectURI verifies that the given URI matches one of the client's registered redirect URIs.
-func (e *Engine) ValidateRedirectURI(client *store.OAuthClient, uri string) bool {
-	var uris []string
-	_ = json.Unmarshal([]byte(client.RedirectURIsJSON), &uris)
-
-	reqParsed, reqErr := url.Parse(uri)
-
-	for _, registered := range uris {
-		registered = strings.TrimSpace(registered)
-		if registered == "" {
-			continue
-		}
-		if registered == uri {
-			return true
-		}
-		// Match trimmed trailing slash
-		if strings.TrimRight(registered, "/") == strings.TrimRight(uri, "/") {
-			return true
-		}
-
-		if reqErr == nil {
-			regParsed, regErr := url.Parse(registered)
-			if regErr == nil {
-				// Compare path (ignoring trailing slash)
-				regPath := strings.TrimRight(regParsed.Path, "/")
-				reqPath := strings.TrimRight(reqParsed.Path, "/")
-
-				// Allow standard SSO callback path aliases
-				pathMatch := (regPath == reqPath) ||
-					(strings.HasSuffix(regPath, "/callback") && strings.HasSuffix(reqPath, "/callback"))
-
-				if pathMatch {
-					// 1. Direct host match
-					if strings.EqualFold(regParsed.Host, reqParsed.Host) {
-						return true
-					}
-					// 2. Localhost alias match (e.g. 127.0.0.1:PORT == localhost:PORT)
-					regHostname := regParsed.Hostname()
-					reqHostname := reqParsed.Hostname()
-					if (regHostname == "localhost" || regHostname == "127.0.0.1") &&
-						(reqHostname == "localhost" || reqHostname == "127.0.0.1") {
-						if regParsed.Port() == reqParsed.Port() {
-							return true
-						}
-					}
-					// 3. Container DNS alias match on kypost-net
-					if (regHostname == "kypasswords" || regHostname == "kypassword-server" || regHostname == "passwords") &&
-						(reqHostname == "kypasswords" || reqHostname == "kypassword-server" || reqHostname == "passwords" || reqHostname == "10.89.0.4") {
-						return true
-					}
-				}
-			}
-		}
+// RevokeToken implements RFC 7009. The caller must authenticate as the client the token
+// was issued to; otherwise anyone could revoke anyone else's sessions.
+func (e *Engine) RevokeToken(tokenString, clientID, clientSecret string) error {
+	client, err := e.store.GetOAuthClientByID(clientID)
+	if err != nil {
+		return err
+	}
+	if client == nil || !client.Enabled {
+		return errors.New("invalid or disabled client")
+	}
+	if err := e.authenticateClient(client, clientSecret); err != nil {
+		return err
 	}
 
-	// Suite-specific fallback for built-in KySecurity suite clients
-	if reqErr == nil && strings.HasSuffix(reqParsed.Path, "/callback") {
-		clientID := strings.ToLower(client.ID)
-		reqHost := strings.ToLower(reqParsed.Hostname())
-		reqPort := reqParsed.Port()
-
-		switch clientID {
-		case "kypasswords", "kypassword":
-			if reqHost == "passwords.urlxl.com" || reqHost == "kypasswords.urlxl.com" ||
-				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.4" || reqHost == "kypassword-server") && (reqPort == "5877" || reqPort == "5868" || reqPort == "")) {
-				return true
-			}
-		case "kypost":
-			if reqHost == "mail.urlxl.com" || reqHost == "kypost.urlxl.com" ||
-				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.5" || reqHost == "kypost-server") && (reqPort == "5866" || reqPort == "")) {
-				return true
-			}
-		case "kydns":
-			if reqHost == "dns.urlxl.com" || reqHost == "kydns.urlxl.com" ||
-				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.3" || reqHost == "kydns-server") && (reqPort == "8053" || reqPort == "53" || reqPort == "")) {
-				return true
-			}
-		case "kybookmarks":
-			if reqHost == "bookmarks.urlxl.com" || reqHost == "kybookmarks.urlxl.com" ||
-				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.6" || reqHost == "kybookmarks-server") && (reqPort == "5869" || reqPort == "")) {
-				return true
-			}
-		case "kynotes":
-			if reqHost == "notes.urlxl.com" || reqHost == "kynotes.urlxl.com" ||
-				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.7" || reqHost == "kynotes-server") && (reqPort == "5870" || reqPort == "5868" || reqPort == "8080" || reqPort == "")) {
-				return true
-			}
-		}
+	// RFC 7009 §2.2: an invalid token is not an error, to avoid an oracle. Only an
+	// unauthenticated caller is rejected, and that already happened above.
+	claims, err := e.keyManager.VerifyJWT(tokenString)
+	if err != nil {
+		return nil
 	}
-
-	return false
+	if claims["aud"] != clientID {
+		return nil
+	}
+	jti, _ := claims["jti"].(string)
+	if jti == "" {
+		return nil
+	}
+	return e.store.RevokeToken(jti)
 }

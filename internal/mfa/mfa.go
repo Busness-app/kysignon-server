@@ -54,25 +54,30 @@ func (e *Engine) GenerateTOTPSecret(username, issuer string) (secretBase32, otpA
 	return secretBase32, uri, nil
 }
 
-// ValidateTOTP verifies a 6-digit TOTP code against a base32 secret with a +/- 1 step grace window.
+// ValidateTOTP verifies a 6-digit TOTP code against a base32 secret with a +/- 1 step
+// grace window.
 func ValidateTOTP(secretBase32, code string) bool {
+	_, ok := matchTOTP(secretBase32, code)
+	return ok
+}
+
+// matchTOTP returns the time step a code belongs to, so the caller can spend that step and
+// stop the same code being replayed inside its window.
+func matchTOTP(secretBase32, code string) (int64, bool) {
 	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(strings.TrimSpace(secretBase32)))
 	if err != nil {
-		return false
+		return 0, false
 	}
 
-	timeStep := int64(30)
-	now := time.Now().Unix()
-	currentCounter := now / timeStep
-
+	currentCounter := time.Now().Unix() / 30
+	trimmed := strings.TrimSpace(code)
 	for i := int64(-1); i <= 1; i++ {
 		counter := currentCounter + i
-		expected := calculateTOTPCode(secret, counter)
-		if expected == strings.TrimSpace(code) {
-			return true
+		if subtle.ConstantTimeCompare([]byte(calculateTOTPCode(secret, counter)), []byte(trimmed)) == 1 {
+			return counter, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 func calculateTOTPCode(secret []byte, counter int64) string {
@@ -123,7 +128,14 @@ func (e *Engine) VerifyUserTOTP(userID, code string) (bool, error) {
 		return false, fmt.Errorf("failed to decrypt TOTP secret: %w", err)
 	}
 
-	return ValidateTOTP(string(decrypted), code), nil
+	counter, ok := matchTOTP(string(decrypted), code)
+	if !ok {
+		return false, nil
+	}
+
+	// Spend the time step. A code that is merely "correct" is still a replay if it has
+	// already been used, and its window is up to 90 seconds wide.
+	return e.store.ConsumeTOTPCounter(userID, counter)
 }
 
 // GenerateRecoveryCodes creates 8 one-time recovery codes for a user.
@@ -132,7 +144,15 @@ func (e *Engine) GenerateRecoveryCodes(userID string) ([]string, error) {
 	var recoveryCodes []store.RecoveryCode
 
 	for i := 0; i < 8; i++ {
-		code := fmt.Sprintf("%s-%s", crypto.GenerateRandomAlphanumeric(4), crypto.GenerateRandomAlphanumeric(4))
+		left, err := crypto.GenerateRandomAlphanumeric(4)
+		if err != nil {
+			return nil, err
+		}
+		right, err := crypto.GenerateRandomAlphanumeric(4)
+		if err != nil {
+			return nil, err
+		}
+		code := fmt.Sprintf("%s-%s", left, right)
 		plainCodes = append(plainCodes, code)
 		recoveryCodes = append(recoveryCodes, store.RecoveryCode{
 			ID:       uuid.New().String(),
@@ -141,7 +161,7 @@ func (e *Engine) GenerateRecoveryCodes(userID string) ([]string, error) {
 		})
 	}
 
-	if err := e.store.SaveRecoveryCodes(recoveryCodes); err != nil {
+	if err := e.store.ReplaceRecoveryCodes(userID, recoveryCodes); err != nil {
 		return nil, err
 	}
 
@@ -174,7 +194,10 @@ func (e *Engine) GenerateDevicePairingToken(userID string) (token string, pin st
 		return "", "", time.Time{}, err
 	}
 
-	pin = crypto.GenerateRandomPIN(6)
+	pin, err = crypto.GenerateRandomPIN(6)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
 	tokenHash := crypto.HashSHA256(rawToken)
 	expiresAt = time.Now().UTC().Add(90 * time.Second)
 
@@ -182,7 +205,7 @@ func (e *Engine) GenerateDevicePairingToken(userID string) (token string, pin st
 		ID:        uuid.New().String(),
 		UserID:    userID,
 		TokenHash: tokenHash,
-		PINCode:   pin,
+		PINHash:   crypto.HashSHA256(pin),
 		ExpiresAt: expiresAt,
 	}
 
@@ -196,23 +219,37 @@ func (e *Engine) GenerateDevicePairingToken(userID string) (token string, pin st
 type NativeDeviceRegisterRequest struct {
 	PairingToken     string `json:"pairingToken,omitempty"`
 	PINCode          string `json:"pinCode,omitempty"`
+	UserID           string `json:"userId,omitempty"`
 	DeviceName       string `json:"deviceName"`
 	DeviceIdentifier string `json:"deviceIdentifier"`
 	PublicKey        string `json:"publicKey,omitempty"`
 	PushToken        string `json:"pushToken,omitempty"`
 }
 
-// RegisterNativeDevice registers a device presented with a valid 90s pairing token or PIN.
+// RegisterNativeDevice registers a device presented with a valid 90s pairing token, or a
+// PIN scoped to the user who generated it.
+//
+// A device must present a usable P-256 public key. Pairing one without a key enrols push
+// MFA that no response can ever satisfy, which locks the user out of every later login.
 func (e *Engine) RegisterNativeDevice(req *NativeDeviceRegisterRequest) (*store.NativeDevice, error) {
+	if req.PublicKey == "" {
+		return nil, errors.New("a device public key is required to pair an authenticator")
+	}
+	if _, err := crypto.ParseP256PublicKey(req.PublicKey); err != nil {
+		return nil, fmt.Errorf("device public key is not a valid P-256 key: %w", err)
+	}
+
 	var validToken *store.DevicePairingToken
 	var err error
 
-	if req.PairingToken != "" {
-		tokenHash := crypto.HashSHA256(req.PairingToken)
-		validToken, err = e.store.GetValidDevicePairingToken(tokenHash)
-	} else if req.PINCode != "" {
-		validToken, err = e.store.GetValidDevicePairingTokenByPIN(req.PINCode)
-	} else {
+	switch {
+	case req.PairingToken != "":
+		validToken, err = e.store.GetValidDevicePairingToken(crypto.HashSHA256(req.PairingToken))
+	case req.PINCode != "" && req.UserID != "":
+		validToken, err = e.store.GetDevicePairingTokenByUserPIN(req.UserID, crypto.HashSHA256(req.PINCode))
+	case req.PINCode != "":
+		return nil, errors.New("a userId is required when pairing with a PIN")
+	default:
 		return nil, errors.New("pairingToken or pinCode is required")
 	}
 
@@ -223,8 +260,14 @@ func (e *Engine) RegisterNativeDevice(req *NativeDeviceRegisterRequest) (*store.
 		return nil, errors.New("invalid or expired pairing token")
 	}
 
-	if err := e.store.MarkDevicePairingTokenUsed(validToken.ID); err != nil {
+	// Spend the token before creating anything, so two racing registrations cannot both
+	// redeem it.
+	spent, err := e.store.ConsumeDevicePairingToken(validToken.ID)
+	if err != nil {
 		return nil, err
+	}
+	if !spent {
+		return nil, errors.New("pairing token has already been redeemed")
 	}
 
 	name := req.DeviceName
@@ -445,13 +488,22 @@ func (e *Engine) IssueMFAToken(userID, challengeID string) (string, error) {
 	return raw, nil
 }
 
+// MaxMFAAttempts bounds how many wrong second factors a single login attempt may fund.
+// Without it, one token allows unlimited guesses for its whole five-minute lifetime.
+const MaxMFAAttempts = 5
+
+// RegisterMFAFailure counts a wrong second-factor guess against the token.
+func (e *Engine) RegisterMFAFailure(tokenID string) (int, error) {
+	return e.store.RecordMFAFailure(tokenID)
+}
+
 // ValidateMFAToken resolves a raw token to its stored record without consuming it.
 // The user identity comes from the record, never from the client-supplied string.
 func (e *Engine) ValidateMFAToken(rawToken string) (*store.MFAToken, error) {
 	if rawToken == "" || len(rawToken) > 256 {
 		return nil, errors.New("invalid mfa token")
 	}
-	token, err := e.store.GetValidMFAToken(crypto.HashSHA256(strings.TrimSpace(rawToken)))
+	token, err := e.store.GetValidMFAToken(crypto.HashSHA256(strings.TrimSpace(rawToken)), MaxMFAAttempts)
 	if err != nil {
 		return nil, err
 	}

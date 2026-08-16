@@ -15,25 +15,31 @@ import (
 )
 
 type AuthHandler struct {
-	store      *store.Store
-	mfaEngine  *mfa.Engine
-	audit      *audit.Logger
-	middleware *MiddlewareManager
+	store         *store.Store
+	mfaEngine     *mfa.Engine
+	audit         *audit.Logger
+	middleware    *MiddlewareManager
+	secureCookies bool
 }
 
-func NewAuthHandler(s *store.Store, mfaEngine *mfa.Engine, audit *audit.Logger, mm *MiddlewareManager) *AuthHandler {
+func NewAuthHandler(s *store.Store, mfaEngine *mfa.Engine, audit *audit.Logger, mm *MiddlewareManager, secureCookies bool) *AuthHandler {
 	return &AuthHandler{
-		store:      s,
-		mfaEngine:  mfaEngine,
-		audit:      audit,
-		middleware: mm,
+		store:         s,
+		mfaEngine:     mfaEngine,
+		audit:         audit,
+		middleware:    mm,
+		secureCookies: secureCookies,
 	}
 }
 
 // GetCSRFToken issues a random CSRF token cookie and returns it.
 func (h *AuthHandler) GetCSRFToken(w http.ResponseWriter, r *http.Request) {
-	csrfToken, err := crypto.GenerateRandomHex(32)
-	if err != nil {
+	var sessionToken string
+	if c, err := r.Cookie("kysignon_session"); err == nil {
+		sessionToken = c.Value
+	}
+	csrfToken := h.middleware.IssueCSRFToken(sessionToken)
+	if csrfToken == "" {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -44,7 +50,7 @@ func (h *AuthHandler) GetCSRFToken(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		SameSite: http.SameSiteLaxMode,
 		HttpOnly: false, // Accessible by frontend JavaScript for double-submit header
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   h.middleware.IsHTTPS(r) || h.secureCookies,
 	})
 
 	w.Header().Set("Content-Type", "application/json")
@@ -79,22 +85,51 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	ua := r.UserAgent()
 
 	user, err := h.store.GetUserByUsername(req.Username)
-	if err != nil || user == nil {
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// An unknown username must cost the same as a wrong password. Returning early here
+	// would answer in ~1 ms against ~100 ms for a real account, which enumerates users.
+	if user == nil {
+		auth.DummyVerify(req.Password)
 		h.audit.Record("auth.login", "", req.Username, "", "user", ip, ua, "failure", map[string]any{"reason": "user_not_found"})
 		http.Error(w, `{"error":"invalid_credentials","error_description":"Invalid username or password"}`, http.StatusUnauthorized)
 		return
 	}
 
 	if user.Status != "active" {
+		auth.DummyVerify(req.Password)
 		h.audit.Record("auth.login", user.ID, user.Username, user.ID, "user", ip, ua, "denied", map[string]any{"reason": "user_disabled"})
-		http.Error(w, `{"error":"account_disabled","error_description":"Account is disabled"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"invalid_credentials","error_description":"Invalid username or password"}`, http.StatusUnauthorized)
+		return
+	}
+
+	// Per-account lockout. The per-IP limiter cannot see a spray distributed across hosts.
+	locked, err := h.store.IsAccountLocked(user.ID)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if locked {
+		auth.DummyVerify(req.Password)
+		h.audit.Record("auth.login", user.ID, user.Username, user.ID, "user", ip, ua, "denied", map[string]any{"reason": "account_locked"})
+		http.Error(w, `{"error":"account_locked","error_description":"Too many failed attempts. Try again later."}`, http.StatusTooManyRequests)
 		return
 	}
 
 	validPass, err := auth.VerifyPassword(req.Password, user.PasswordHash)
 	if err != nil || !validPass {
-		h.audit.Record("auth.login", user.ID, user.Username, user.ID, "user", ip, ua, "failure", map[string]any{"reason": "invalid_password"})
+		attempts, _ := h.store.RecordFailedLogin(user.ID)
+		h.audit.Record("auth.login", user.ID, user.Username, user.ID, "user", ip, ua, "failure",
+			map[string]any{"reason": "invalid_password", "consecutiveFailures": attempts})
 		http.Error(w, `{"error":"invalid_credentials","error_description":"Invalid username or password"}`, http.StatusUnauthorized)
+		return
+	}
+
+	if err := h.store.ClearFailedLogins(user.ID); err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
 
@@ -186,7 +221,18 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 		Expires:  expiresAt,
 		SameSite: http.SameSiteLaxMode,
 		HttpOnly: true,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   h.middleware.IsHTTPS(r) || h.secureCookies,
+	})
+
+	// Rebind the CSRF token to the new session; one issued before login belongs to nobody.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "kysignon_csrf",
+		Value:    h.middleware.IssueCSRFToken(rawToken),
+		Path:     "/",
+		Expires:  expiresAt,
+		SameSite: http.SameSiteLaxMode,
+		HttpOnly: false, // read by the frontend for the double-submit header
+		Secure:   h.middleware.IsHTTPS(r) || h.secureCookies,
 	})
 
 	h.audit.Record("auth.login_success", user.ID, user.Username, user.ID, "user", ip, ua, "success", nil)
@@ -256,7 +302,11 @@ func (h *AuthHandler) VerifyTOTP(w http.ResponseWriter, r *http.Request) {
 
 	valid, err := h.mfaEngine.VerifyUserTOTP(user.ID, req.Code)
 	if err != nil || !valid {
-		h.audit.Record("auth.mfa_totp", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", nil)
+		// Count the miss against this login attempt. Without it, one token funds
+		// unlimited guesses for its whole lifetime.
+		attempts, _ := h.mfaEngine.RegisterMFAFailure(token.ID)
+		h.audit.Record("auth.mfa_totp", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure",
+			map[string]any{"attempts": attempts})
 		http.Error(w, `{"error":"invalid_totp_code","error_description":"Invalid 6-digit TOTP code"}`, http.StatusUnauthorized)
 		return
 	}
@@ -283,7 +333,9 @@ func (h *AuthHandler) VerifyRecoveryCode(w http.ResponseWriter, r *http.Request)
 
 	valid, err := h.mfaEngine.VerifyAndConsumeRecoveryCode(user.ID, req.Code)
 	if err != nil || !valid {
-		h.audit.Record("auth.mfa_recovery", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", nil)
+		attempts, _ := h.mfaEngine.RegisterMFAFailure(token.ID)
+		h.audit.Record("auth.mfa_recovery", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure",
+			map[string]any{"attempts": attempts})
 		http.Error(w, `{"error":"invalid_recovery_code","error_description":"Invalid or already used recovery code"}`, http.StatusUnauthorized)
 		return
 	}
@@ -293,6 +345,7 @@ func (h *AuthHandler) VerifyRecoveryCode(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.audit.Record("auth.mfa_recovery_consumed", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	_ = h.store.ClearFailedLogins(user.ID)
 	h.createSessionAndRespond(w, r, user)
 }
 
@@ -416,12 +469,6 @@ func (h *AuthHandler) RespondPush(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": approved})
-}
-
-// PullNotifications provides pull queue for clients without direct push relays.
-func (h *AuthHandler) PullNotifications(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"notifications": []any{}})
 }
 
 // Logout revokes active session.

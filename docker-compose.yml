@@ -22,7 +22,15 @@ services:
       KYSIGNON_ISSUER_URL: ${KYSIGNON_ISSUER_URL:-http://localhost:5867}
       KYSIGNON_DB_PATH: /data/kysignon.db
       KYSIGNON_DATA_DIR: /data
-      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,10.89.0.0/24,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      # Empty by default: no peer may forge its client IP. Set to your proxy's address only.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      KYSIGNON_SECURE_COOKIES: ${KYSIGNON_SECURE_COOKIES:-}
+      KYSIGNON_SECRET_KEY: ${KYSIGNON_SECRET_KEY:-}
+      KYSIGNON_ENCRYPTION_KEY: ${KYSIGNON_ENCRYPTION_KEY:-}
+      # Services on kypost-net address each other privately, so pairing callbacks there
+      # are internal by design. Set to false if KySignOn is reachable from the internet
+      # and paired systems live on public hostnames.
+      KYSIGNON_ALLOW_PRIVATE_CALLBACKS: ${KYSIGNON_ALLOW_PRIVATE_CALLBACKS:-true}
       BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
       BOOTSTRAP_ADMIN_PASS: ${BOOTSTRAP_ADMIN_PASS:-}
 

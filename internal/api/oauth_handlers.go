@@ -42,15 +42,37 @@ func (h *OAuthHandler) JWKS(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(h.oauthEngine.GetJWKS())
 }
 
+// redirectError returns an OAuth error to the client's registered redirect URI. It is only
+// safe to call once redirectURI has been validated against the client's registration.
+func redirectError(w http.ResponseWriter, r *http.Request, redirectURI, state, code, description string) {
+	target, err := url.Parse(redirectURI)
+	if err != nil {
+		http.Error(w, `{"error":"invalid_redirect_uri"}`, http.StatusBadRequest)
+		return
+	}
+	q := target.Query()
+	q.Set("error", code)
+	if description != "" {
+		q.Set("error_description", description)
+	}
+	if state != "" {
+		q.Set("state", state)
+	}
+	target.RawQuery = q.Encode()
+	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
 // Authorize handles OIDC/OAuth2 authorization request.
 func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
-	clientID := r.URL.Query().Get("client_id")
-	redirectURI := r.URL.Query().Get("redirect_uri")
-	responseType := r.URL.Query().Get("response_type")
-	scope := r.URL.Query().Get("scope")
-	state := r.URL.Query().Get("state")
-	codeChallenge := r.URL.Query().Get("code_challenge")
-	codeChallengeMethod := r.URL.Query().Get("code_challenge_method")
+	q := r.URL.Query()
+	clientID := q.Get("client_id")
+	redirectURI := q.Get("redirect_uri")
+	responseType := q.Get("response_type")
+	scope := q.Get("scope")
+	state := q.Get("state")
+	nonce := q.Get("nonce")
+	codeChallenge := q.Get("code_challenge")
+	codeChallengeMethod := q.Get("code_challenge_method")
 
 	if clientID == "" || redirectURI == "" || responseType != "code" {
 		http.Error(w, `{"error":"invalid_request","error_description":"Missing client_id, redirect_uri, or response_type=code"}`, http.StatusBadRequest)
@@ -63,44 +85,62 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Until this passes, the redirect URI is attacker-controlled and errors must not be
+	// sent to it.
 	if !h.oauthEngine.ValidateRedirectURI(client, redirectURI) {
-		http.Error(w, `{"error":"invalid_redirect_uri","error_description":"Redirect URI does not match registered URIs"}`, http.StatusBadRequest)
+		h.audit.Record("oauth.authorize", "", "", clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "denied",
+			map[string]any{"reason": "redirect_uri_not_registered", "redirectUri": redirectURI})
+		http.Error(w, `{"error":"invalid_redirect_uri","error_description":"Redirect URI does not match a registered URI for this client"}`, http.StatusBadRequest)
+		return
+	}
+
+	if codeChallenge == "" && client.ClientType == "public" {
+		redirectError(w, r, redirectURI, state, "invalid_request", "PKCE (S256) is required for public clients")
+		return
+	}
+	if codeChallenge != "" && codeChallengeMethod != "S256" {
+		redirectError(w, r, redirectURI, state, "invalid_request", "Only the S256 code_challenge_method is supported")
+		return
+	}
+
+	grantedScope, err := h.oauthEngine.GrantedScope(clientID, scope)
+	if err != nil {
+		redirectError(w, r, redirectURI, state, "invalid_scope", "No requested scope is permitted for this client")
 		return
 	}
 
 	// Check if user is logged in
 	user := GetUserFromContext(r.Context())
 	if user == nil {
-		// Redirect to login UI with return_to
-		loginURL := fmt.Sprintf("/login?return_to=%s", url.QueryEscape(r.RequestURI))
+		// return_to is a same-origin path; the login UI must not follow anything else.
+		loginURL := fmt.Sprintf("/login?return_to=%s", url.QueryEscape(r.URL.RequestURI()))
 		http.Redirect(w, r, loginURL, http.StatusFound)
 		return
 	}
 
-	// Issue authorization code
-	code, err := h.oauthEngine.CreateAuthorizationCode(clientID, user.ID, redirectURI, scope, codeChallenge, codeChallengeMethod)
+	code, err := h.oauthEngine.CreateAuthorizationCodeWithNonce(
+		clientID, user.ID, redirectURI, grantedScope, codeChallenge, codeChallengeMethod, nonce)
 	if err != nil {
-		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
+		redirectError(w, r, redirectURI, state, "server_error", "Could not issue an authorization code")
 		return
 	}
 
 	h.audit.Record("oauth.authorize", user.ID, user.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
-		"scope": scope,
+		"scope":          grantedScope,
+		"requestedScope": scope,
 	})
 
-	// Redirect back to client with code and state
 	targetURL, err := url.Parse(redirectURI)
 	if err != nil {
 		http.Error(w, `{"error":"invalid_redirect_uri"}`, http.StatusBadRequest)
 		return
 	}
-
-	q := targetURL.Query()
-	q.Set("code", code)
+	params := targetURL.Query()
+	params.Set("code", code)
 	if state != "" {
-		q.Set("state", state)
+		params.Set("state", state)
 	}
-	targetURL.RawQuery = q.Encode()
+	targetURL.RawQuery = params.Encode()
 
 	http.Redirect(w, r, targetURL.String(), http.StatusFound)
 }
@@ -132,14 +172,18 @@ func (h *OAuthHandler) Token(w http.ResponseWriter, r *http.Request) {
 
 	tokenResp, err := h.oauthEngine.ExchangeAuthorizationCode(code, clientID, clientSecret, redirectURI, codeVerifier)
 	if err != nil {
+		// The precise reason goes to the audit log, not to the caller: distinguishing
+		// "client mismatch" from "invalid PKCE verifier" tells an attacker which half of
+		// their guess was right.
 		h.audit.Record("oauth.token_exchange", "", "", clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
 			"error": err.Error(),
 		})
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error":             "invalid_grant",
-			"error_description": err.Error(),
+			"error_description": "The authorization code, client credentials, redirect URI, or PKCE verifier is invalid",
 		})
 		return
 	}
@@ -163,16 +207,50 @@ func (h *OAuthHandler) Userinfo(w http.ResponseWriter, r *http.Request) {
 	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 	claims, err := h.oauthEngine.GetUserinfo(tokenString)
 	if err != nil {
-		http.Error(w, `{"error":"invalid_token","error_description":"`+err.Error()+`"}`, http.StatusUnauthorized)
+		// err may name the exact failed check; echoing it back into the response would
+		// build an oracle out of the error string.
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+		http.Error(w, `{"error":"invalid_token","error_description":"The access token is invalid, expired, or revoked"}`, http.StatusUnauthorized)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(claims)
 }
 
-// Revoke revokes tokens.
+// Revoke implements RFC 7009 token revocation. The caller must authenticate as the client
+// the token was issued to.
 func (h *OAuthHandler) Revoke(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"revoked": true})
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"invalid_request","error_description":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	token := r.FormValue("token")
+	clientID := r.FormValue("client_id")
+	clientSecret := r.FormValue("client_secret")
+	if u, p, ok := r.BasicAuth(); ok {
+		clientID = u
+		clientSecret = p
+	}
+
+	if token == "" || clientID == "" {
+		http.Error(w, `{"error":"invalid_request","error_description":"token and client_id are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if err := h.oauthEngine.RevokeToken(token, clientID, clientSecret); err != nil {
+		h.audit.Record("oauth.revoke", "", "", clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "failure",
+			map[string]any{"error": err.Error()})
+		http.Error(w, `{"error":"invalid_client","error_description":"Client authentication failed"}`, http.StatusUnauthorized)
+		return
+	}
+
+	h.audit.Record("oauth.revoke", "", "", clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+
+	// RFC 7009 §2.2: 200 regardless of whether the token was live, so the response is
+	// not an oracle for token validity.
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
 }

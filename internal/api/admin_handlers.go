@@ -161,6 +161,9 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		user.Status = req.Status
 		if user.Status == "disabled" {
 			_ = h.store.DeleteUserSessions(user.ID)
+			// Sessions alone are not deprovisioning: access tokens already issued keep
+			// working until they expire unless they are revoked here.
+			_ = h.store.RevokeUserTokens(user.ID)
 		}
 	}
 
@@ -175,8 +178,13 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"password_policy","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
 			return
 		}
-		_ = h.store.UpdateUserPassword(user.ID, passHash)
+		if err := h.store.UpdateUserPassword(user.ID, passHash); err != nil {
+			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+			return
+		}
 		_ = h.store.DeleteUserSessions(user.ID)
+		_ = h.store.RevokeUserTokens(user.ID)
+		_ = h.store.ClearFailedLogins(user.ID)
 	}
 
 	// Queue account replication update
@@ -217,6 +225,7 @@ func (h *AdminHandler) ResetUserMFA(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = h.store.DeleteUserSessions(user.ID)
+	_ = h.store.RevokeUserTokens(user.ID)
 
 	_ = h.syncEngine.QueueAccountSyncEvent(user.ID, "user.mfa_reset", map[string]any{
 		"id":       user.ID,
@@ -237,6 +246,7 @@ func (h *AdminHandler) RevokeUserSessions(w http.ResponseWriter, r *http.Request
 	userID := r.PathValue("id")
 
 	_ = h.store.DeleteUserSessions(userID)
+	_ = h.store.RevokeUserTokens(userID)
 	h.audit.Record("admin.sessions_revoked", admin.ID, admin.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -263,7 +273,11 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	_ = h.store.DeleteUser(userID)
+	_ = h.store.RevokeUserTokens(userID)
+	if err := h.store.DeleteUser(userID); err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
 
 	_ = h.syncEngine.QueueAccountSyncEvent(userID, "user.deleted", map[string]any{
 		"id":       userID,
@@ -480,6 +494,20 @@ func (h *AdminHandler) DeleteOAuthClient(w http.ResponseWriter, r *http.Request)
 }
 
 // Applications Management
+func (h *AdminHandler) ListApplications(w http.ResponseWriter, r *http.Request) {
+	apps, err := h.store.ListApplications()
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if apps == nil {
+		apps = []store.Application{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"applications": apps})
+}
+
 func (h *AdminHandler) CreateApplication(w http.ResponseWriter, r *http.Request) {
 	admin := GetUserFromContext(r.Context())
 	var req struct {

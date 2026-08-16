@@ -3,10 +3,15 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// KeyLength is the required size, in bytes, of the secret and encryption keys.
+const KeyLength = 32
 
 // Config represents runtime application configuration.
 type Config struct {
@@ -20,9 +25,18 @@ type Config struct {
 	TrustedProxyCIDRs []string
 	BootstrapUser     string
 	BootstrapPass     string
+	// SecureCookies forces the Secure flag on session cookies. Needed when TLS terminates
+	// at a proxy that does not forward X-Forwarded-Proto.
+	SecureCookies bool
+	// AllowPrivateCallbacks permits paired systems to register loopback or private-range
+	// webhook callbacks. Needed for single-host deployments where every service shares a
+	// container network; it widens an attacker-chosen callback into a request forgery
+	// primitive aimed at the internal network, so it is off by default.
+	AllowPrivateCallbacks bool
 }
 
-// Load loads configuration from environment variables with safe defaults.
+// Load loads configuration from environment variables. Anything malformed is an error:
+// a server that silently downgrades a misconfigured key is worse than one that will not start.
 func Load() (*Config, error) {
 	dataDir := getEnv("KYSIGNON_DATA_DIR", "./data")
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
@@ -35,53 +49,34 @@ func Load() (*Config, error) {
 	port := getEnv("KYSIGNON_PORT", "5867")
 	issuerURL := strings.TrimRight(getEnv("KYSIGNON_ISSUER_URL", "http://localhost:"+port), "/")
 
-	// Secret key for cookie signing / session hashes
-	secretKeyHex := os.Getenv("KYSIGNON_SECRET_KEY")
-	var secretKey []byte
-	if secretKeyHex != "" {
-		var err error
-		secretKey, err = hex.DecodeString(secretKeyHex)
-		if err != nil || len(secretKey) < 32 {
-			secretKey = []byte(secretKeyHex)
-		}
-	} else {
-		secretKey = getOrGenerateSecret(filepath.Join(dataDir, "secret.key"), 32)
+	secretKey, err := loadKey("KYSIGNON_SECRET_KEY", filepath.Join(dataDir, "secret.key"))
+	if err != nil {
+		return nil, err
 	}
 
-	// 256-bit encryption key for TOTP secrets at rest
-	encKeyHex := os.Getenv("KYSIGNON_ENCRYPTION_KEY")
-	var encKey []byte
-	if encKeyHex != "" {
-		var err error
-		encKey, err = hex.DecodeString(encKeyHex)
-		if err != nil || len(encKey) != 32 {
-			encKey = padOrHashKey(encKeyHex)
-		}
-	} else {
-		encKey = getOrGenerateSecret(filepath.Join(dataDir, "encryption.key"), 32)
+	encKey, err := loadKey("KYSIGNON_ENCRYPTION_KEY", filepath.Join(dataDir, "encryption.key"))
+	if err != nil {
+		return nil, err
 	}
 
-	var trustedCIDRs []string
-	if rawCIDRs := os.Getenv("TRUSTED_PROXY_CIDRS"); rawCIDRs != "" {
-		for _, cidr := range strings.Split(rawCIDRs, ",") {
-			trimmed := strings.TrimSpace(cidr)
-			if trimmed != "" {
-				trustedCIDRs = append(trustedCIDRs, trimmed)
-			}
-		}
+	trustedCIDRs, err := loadTrustedProxies()
+	if err != nil {
+		return nil, err
 	}
 
 	return &Config{
-		Port:              port,
-		IssuerURL:         issuerURL,
-		DBPath:            dbPath,
-		DataDir:           dataDir,
-		SecretKey:         secretKey,
-		EncryptionKey:     encKey,
-		RSAKeyPath:        rsaKeyPath,
-		TrustedProxyCIDRs: trustedCIDRs,
-		BootstrapUser:     getEnv("BOOTSTRAP_ADMIN_USER", "admin"),
-		BootstrapPass:     os.Getenv("BOOTSTRAP_ADMIN_PASS"),
+		Port:                  port,
+		IssuerURL:             issuerURL,
+		DBPath:                dbPath,
+		DataDir:               dataDir,
+		SecretKey:             secretKey,
+		EncryptionKey:         encKey,
+		RSAKeyPath:            rsaKeyPath,
+		TrustedProxyCIDRs:     trustedCIDRs,
+		BootstrapUser:         getEnv("BOOTSTRAP_ADMIN_USER", "admin"),
+		BootstrapPass:         os.Getenv("BOOTSTRAP_ADMIN_PASS"),
+		SecureCookies:         strings.EqualFold(os.Getenv("KYSIGNON_SECURE_COOKIES"), "true"),
+		AllowPrivateCallbacks: strings.EqualFold(os.Getenv("KYSIGNON_ALLOW_PRIVATE_CALLBACKS"), "true"),
 	}, nil
 }
 
@@ -92,21 +87,76 @@ func getEnv(key, defaultVal string) string {
 	return defaultVal
 }
 
-func getOrGenerateSecret(path string, length int) []byte {
-	if data, err := os.ReadFile(path); err == nil && len(data) >= length {
-		return data[:length]
+// loadKey reads a 32-byte key from the environment as hex, falling back to a generated
+// file. Both paths are strict; there is no shortening, padding, or silent regeneration.
+func loadKey(envName, path string) ([]byte, error) {
+	if raw := os.Getenv(envName); raw != "" {
+		key, err := hex.DecodeString(strings.TrimSpace(raw))
+		if err != nil || len(key) != KeyLength {
+			return nil, fmt.Errorf(
+				"%s must be exactly %d hex characters (%d bytes); generate one with: openssl rand -hex %d",
+				envName, KeyLength*2, KeyLength, KeyLength)
+		}
+		return key, nil
 	}
-	buf := make([]byte, length)
-	if _, err := rand.Read(buf); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	_ = os.WriteFile(path, buf, 0600)
-	return buf
+	return loadOrGenerateKeyFile(path)
 }
 
-func padOrHashKey(input string) []byte {
-	b := []byte(input)
-	res := make([]byte, 32)
-	copy(res, b)
-	return res
+func loadOrGenerateKeyFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if len(data) != KeyLength {
+			return nil, fmt.Errorf(
+				"key file %s holds %d bytes, expected %d; refusing to overwrite it, "+
+					"since data encrypted under the original key would become unrecoverable",
+				path, len(data), KeyLength)
+		}
+		return data, nil
+	case !os.IsNotExist(err):
+		return nil, fmt.Errorf("failed to read key file %s: %w", path, err)
+	}
+
+	key := make([]byte, KeyLength)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("random source failed while generating %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, key, 0600); err != nil {
+		return nil, fmt.Errorf("failed to persist generated key to %s: %w", path, err)
+	}
+	return key, nil
+}
+
+// loadTrustedProxies parses TRUSTED_PROXY_CIDRS. It defaults to empty: forwarding headers
+// are only believed from peers an operator has explicitly named. Bare IPs are accepted
+// and treated as single-host ranges.
+func loadTrustedProxies() ([]string, error) {
+	raw := os.Getenv("TRUSTED_PROXY_CIDRS")
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+
+	var cidrs []string
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if !strings.Contains(entry, "/") {
+			ip := net.ParseIP(entry)
+			if ip == nil {
+				return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS entry %q is not a valid IP or CIDR", entry)
+			}
+			if ip.To4() != nil {
+				entry += "/32"
+			} else {
+				entry += "/128"
+			}
+		}
+		if _, _, err := net.ParseCIDR(entry); err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS entry %q is not a valid CIDR: %w", entry, err)
+		}
+		cidrs = append(cidrs, entry)
+	}
+	return cidrs, nil
 }

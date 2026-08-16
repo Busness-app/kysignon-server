@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
@@ -40,7 +41,15 @@ func setupTestSyncEngine(t *testing.T) (*Engine, *store.Store, *store.User, func
 		t.Fatalf("CreateUser failed: %v", err)
 	}
 
-	engine := NewEngine(dbStore)
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	engine := NewEngine(dbStore, key)
+
+	// Pairing callbacks in these tests point at httptest servers on loopback.
+	AllowPrivateCallbacks = true
+	t.Cleanup(func() { AllowPrivateCallbacks = false })
 
 	cleanup := func() {
 		_ = dbStore.Close()
@@ -70,6 +79,7 @@ func TestSystemPairingHandshakeAndTokenExpiry(t *testing.T) {
 	// 2. Register paired system using token
 	regReq := &SystemRegistrationRequest{
 		PairingToken: token,
+		PINCode:      pin,
 		SystemName:   "Production KyPost",
 		SystemType:   "kypost",
 		CallbackURL:  "https://kypost.local/api/sync",
@@ -125,12 +135,12 @@ func TestAccountSyncWebhookDispatch(t *testing.T) {
 
 	// Register paired system pointing to mock server
 	ps := &store.PairedSystem{
-		ID:             uuid.New().String(),
-		Name:           "Mock KyPost",
-		SystemType:     "kypost",
-		CallbackURL:    mockServer.URL,
-		HMACSecretHash: sharedSecret,
-		Status:         "active",
+		ID:                  uuid.New().String(),
+		Name:                "Mock KyPost",
+		SystemType:          "kypost",
+		CallbackURL:         mockServer.URL,
+		HMACSecretEncrypted: mustEncrypt(t, engine, sharedSecret),
+		Status:              "active",
 	}
 	if err := dbStore.CreatePairedSystem(ps); err != nil {
 		t.Fatalf("CreatePairedSystem failed: %v", err)
@@ -164,4 +174,15 @@ func TestAccountSyncWebhookDispatch(t *testing.T) {
 	if lastReceivedSignature == "" {
 		t.Fatal("missing HMAC signature on outbound sync webhook")
 	}
+}
+
+// mustEncrypt seals a webhook signing secret the way pairing does, so a hand-built
+// PairedSystem in a test carries a secret the engine can actually recover.
+func mustEncrypt(t *testing.T, e *Engine, secret string) string {
+	t.Helper()
+	sealed, err := crypto.EncryptAESGCM(e.encryptionKey, []byte(secret))
+	if err != nil {
+		t.Fatalf("EncryptAESGCM: %v", err)
+	}
+	return sealed
 }

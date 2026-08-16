@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
@@ -45,10 +46,13 @@ func (h *DeviceHandler) GenerateDevicePairingToken(w http.ResponseWriter, r *htt
 	}
 
 	qrPayload := map[string]any{
-		"type":         "kysignon_device_pairing",
-		"serverUrl":    h.issuerURL,
+		"type":      "kysignon_device_pairing",
+		"serverUrl": h.issuerURL,
+		// The token is the credential. userId is carried so a device pairing by PIN can
+		// scope its redemption to this account rather than matching any live PIN.
 		"pairingToken": token,
 		"pinCode":      pin,
+		"userId":       user.ID,
 		"username":     user.Username,
 		"expiresAt":    expiresAt.Unix(),
 	}
@@ -343,6 +347,14 @@ func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request)
 	for _, app := range appMap {
 		result = append(result, app)
 	}
+	// Map iteration order is randomised, so without this the launcher reshuffles on every
+	// page load despite sort_order existing.
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].SortOrder != result[j].SortOrder {
+			return result[i].SortOrder < result[j].SortOrder
+		}
+		return result[i].Name < result[j].Name
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"applications": result})

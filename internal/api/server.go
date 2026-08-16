@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
 	"github.com/Yoshiofthewire/kysignon-server/internal/config"
@@ -41,7 +42,7 @@ func NewServer(
 	auditLogger *audit.Logger,
 	staticFS fs.FS,
 ) *Server {
-	mm := NewMiddlewareManager(s, cfg.TrustedProxyCIDRs)
+	mm := NewMiddlewareManager(s, cfg.TrustedProxyCIDRs, cfg.SecretKey)
 
 	srv := &Server{
 		cfg:         cfg,
@@ -57,21 +58,39 @@ func NewServer(
 
 	mux := srv.routes()
 
-	// Wrap entire mux with security headers and CSRF validation
-	handler := mm.SecurityHeaders(mm.CSRFValidate(mux))
+	// Order matters: cap the body before any handler reads it, then headers, then CSRF.
+	handler := limitRequestBody(mm.SecurityHeaders(mm.CSRFValidate(mux)))
 
 	srv.httpServer = &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: handler,
+		// Without these a single idle connection can be held open indefinitely.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	return srv
 }
 
+// maxRequestBody caps any single request body. Every handler here decodes small JSON
+// documents; nothing legitimate approaches this.
+const maxRequestBody = 256 << 10 // 256 KiB
+
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	authH := NewAuthHandler(s.store, s.mfaEngine, s.audit, s.middleware)
+	authH := NewAuthHandler(s.store, s.mfaEngine, s.audit, s.middleware, s.cfg.SecureCookies)
 	devH := NewDeviceHandler(s.store, s.mfaEngine, s.audit, s.middleware, s.cfg.IssuerURL)
 	adminH := NewAdminHandler(s.store, s.syncEngine, s.audit, s.middleware, s.cfg.IssuerURL)
 	oauthH := NewOAuthHandler(s.store, s.oauthEngine, s.audit, s.middleware)
@@ -94,7 +113,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/auth/mfa/push/poll", s.middleware.RateLimit("push_poll", 120, 2.0)(http.HandlerFunc(authH.PollPushChallenge)))
 	mux.Handle("POST /api/auth/mfa/push/finish", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(authH.FinishPushLogin)))
 	mux.Handle("POST /api/mfa/push/respond", s.middleware.RateLimit("push_respond", 15, 0.5)(http.HandlerFunc(authH.RespondPush)))
-	mux.HandleFunc("GET /api/notifications/native/pull", authH.PullNotifications)
 
 	// System Pairing Redemption (Unauthenticated with 90s token)
 	mux.Handle("POST /api/systems/register", s.middleware.RateLimit("system_reg", 10, 0.2)(http.HandlerFunc(adminH.RegisterPairedSystem)))
@@ -117,24 +135,12 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/user/recovery-codes", authM(http.HandlerFunc(devH.GenerateRecoveryCodes)))
 	mux.Handle("GET /api/user/applications", authM(http.HandlerFunc(devH.ListApplications)))
 
-	// OAuth & OIDC
-	mux.HandleFunc("GET /oauth/authorize", func(w http.ResponseWriter, r *http.Request) {
-		// If session cookie exists, authenticate context; otherwise proceed unauthenticated
-		if cookie, err := r.Cookie("kysignon_session"); err == nil && cookie.Value != "" {
-			tokenHash := crypto.HashSHA256(cookie.Value)
-			if sess, _ := s.store.GetSessionByTokenHash(tokenHash); sess != nil {
-				if user, _ := s.store.GetUserByID(sess.UserID); user != nil && user.Status == "active" {
-					ctx := context.WithValue(r.Context(), userContextKey, user)
-					oauthH.Authorize(w, r.WithContext(ctx))
-					return
-				}
-			}
-		}
-		oauthH.Authorize(w, r)
-	})
+	// OAuth & OIDC. OptionalAuth is the same session check RequireAuth uses, so an
+	// expired session cannot authorise an SSO redirect.
+	mux.Handle("GET /oauth/authorize", s.middleware.OptionalAuth(http.HandlerFunc(oauthH.Authorize)))
 	mux.Handle("POST /oauth/token", s.middleware.RateLimit("oauth_token", 30, 1.0)(http.HandlerFunc(oauthH.Token)))
-	mux.HandleFunc("GET /oauth/userinfo", oauthH.Userinfo)
-	mux.HandleFunc("POST /oauth/revoke", oauthH.Revoke)
+	mux.Handle("GET /oauth/userinfo", s.middleware.RateLimit("oauth_userinfo", 120, 2.0)(http.HandlerFunc(oauthH.Userinfo)))
+	mux.Handle("POST /oauth/revoke", s.middleware.RateLimit("oauth_revoke", 30, 1.0)(http.HandlerFunc(oauthH.Revoke)))
 
 	// Admin Routes (Auth + Admin check)
 	adminM := func(h http.Handler) http.Handler {
@@ -157,7 +163,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/admin/clients", adminM(http.HandlerFunc(adminH.CreateOAuthClient)))
 	mux.Handle("DELETE /api/admin/clients/{id}", adminM(http.HandlerFunc(adminH.DeleteOAuthClient)))
 
-	mux.Handle("GET /api/admin/applications", adminM(http.HandlerFunc(adminH.CreateApplication)))
+	mux.Handle("GET /api/admin/applications", adminM(http.HandlerFunc(adminH.ListApplications)))
+	mux.Handle("POST /api/admin/applications", adminM(http.HandlerFunc(adminH.CreateApplication)))
 	mux.Handle("DELETE /api/admin/applications/{id}", adminM(http.HandlerFunc(adminH.DeleteApplication)))
 
 	mux.Handle("GET /api/admin/audit-events", adminM(http.HandlerFunc(adminH.ListAuditEvents)))

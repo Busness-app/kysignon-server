@@ -28,19 +28,24 @@ type Session struct {
 }
 
 type PairedSystem struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	SystemType     string     `json:"systemType"` // "kypost", "kypasswords", "kybookmarks", "kynotes", "custom"
-	CallbackURL    string     `json:"callbackUrl"`
-	HMACSecretHash string     `json:"-"`
-	Status         string     `json:"status"` // "active", "failing", "disabled"
-	LastSyncedAt   *time.Time `json:"lastSyncedAt,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	SystemType     string `json:"systemType"` // "kypost", "kypasswords", "kybookmarks", "kynotes", "custom"
+	CallbackURL    string `json:"callbackUrl"`
+	HMACSecretHash string `json:"-"` // legacy plaintext column, no longer written
+	// HMACSecretEncrypted holds the webhook signing secret under the deployment
+	// encryption key. It signs outbound webhooks, so it must be recoverable, not hashed.
+	HMACSecretEncrypted string     `json:"-"`
+	Status              string     `json:"status"` // "active", "failing", "disabled"
+	LastSyncedAt        *time.Time `json:"lastSyncedAt,omitempty"`
+	CreatedAt           time.Time  `json:"createdAt"`
 }
 
 type SystemPairingToken struct {
 	ID              string     `json:"id"`
 	TokenHash       string     `json:"-"`
+	PINHash         string     `json:"-"`
+	PINAttempts     int        `json:"-"`
 	SystemType      string     `json:"systemType"`
 	CreatedByUserID string     `json:"createdByUserId"`
 	ExpiresAt       time.Time  `json:"expiresAt"`
@@ -49,15 +54,17 @@ type SystemPairingToken struct {
 }
 
 type AccountSyncEvent struct {
-	ID          string    `json:"id"`
-	UserID      string    `json:"userId"`
-	EventType   string    `json:"eventType"` // "created", "updated", "status_changed", "mfa_reset"
-	PayloadJSON string    `json:"payloadJson"`
-	Attempts    int       `json:"attempts"`
-	Status      string    `json:"status"` // "pending", "delivered", "failed"
-	LastError   string    `json:"lastError,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID          string     `json:"id"`
+	UserID      string     `json:"userId"`
+	SystemID    string     `json:"systemId"`
+	EventType   string     `json:"eventType"` // "created", "updated", "status_changed", "mfa_reset"
+	PayloadJSON string     `json:"payloadJson"`
+	Attempts    int        `json:"attempts"`
+	Status      string     `json:"status"` // "pending", "delivered", "failed"
+	LastError   string     `json:"lastError,omitempty"`
+	NextAttempt *time.Time `json:"nextAttemptAt,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
 }
 
 type NativeDevice struct {
@@ -76,7 +83,8 @@ type DevicePairingToken struct {
 	ID        string     `json:"id"`
 	UserID    string     `json:"userId"`
 	TokenHash string     `json:"-"`
-	PINCode   string     `json:"pinCode"`
+	PINCode   string     `json:"-"` // legacy plaintext column, no longer written
+	PINHash   string     `json:"-"`
 	ExpiresAt time.Time  `json:"expiresAt"`
 	UsedAt    *time.Time `json:"usedAt,omitempty"`
 	CreatedAt time.Time  `json:"createdAt"`
@@ -109,6 +117,7 @@ type MFAToken struct {
 	UserID      string     `json:"userId"`
 	TokenHash   string     `json:"-"`
 	ChallengeID string     `json:"challengeId,omitempty"`
+	Attempts    int        `json:"-"`
 	ExpiresAt   time.Time  `json:"expiresAt"`
 	UsedAt      *time.Time `json:"usedAt,omitempty"`
 	CreatedAt   time.Time  `json:"createdAt"`
@@ -143,9 +152,20 @@ type AuthorizationCode struct {
 	Scope               string     `json:"scope"`
 	CodeChallenge       string     `json:"codeChallenge"`
 	CodeChallengeMethod string     `json:"codeChallengeMethod"`
+	Nonce               string     `json:"-"`
 	ExpiresAt           time.Time  `json:"expiresAt"`
 	UsedAt              *time.Time `json:"usedAt,omitempty"`
 	CreatedAt           time.Time  `json:"createdAt"`
+}
+
+// IssuedToken records an access token so it can be revoked before it expires.
+type IssuedToken struct {
+	JTI       string     `json:"jti"`
+	UserID    string     `json:"userId"`
+	ClientID  string     `json:"clientId"`
+	ExpiresAt time.Time  `json:"expiresAt"`
+	RevokedAt *time.Time `json:"revokedAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
 }
 
 type Application struct {

@@ -42,26 +42,39 @@ func GenerateRandomHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// GenerateRandomAlphanumeric returns an alphanumeric code of specified length.
-func GenerateRandomAlphanumeric(length int) string {
-	const charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	b := make([]byte, length)
-	_, _ = rand.Read(b)
-	for i := range b {
-		b[i] = charset[int(b[i])%len(charset)]
+// randomString draws length characters uniformly from charset. Rejection sampling keeps
+// every character equally likely for charsets whose size does not divide 256.
+func randomString(charset string, length int) (string, error) {
+	n := len(charset)
+	if n == 0 || n > 256 {
+		return "", errors.New("charset must hold between 1 and 256 characters")
 	}
-	return string(b)
+	limit := 256 - (256 % n) // largest multiple of n at or below 256; draws at or above it are rejected
+
+	out := make([]byte, length)
+	buf := make([]byte, 1)
+	for i := range out {
+		for {
+			if _, err := rand.Read(buf); err != nil {
+				return "", fmt.Errorf("random source failed: %w", err)
+			}
+			if int(buf[0]) < limit {
+				out[i] = charset[int(buf[0])%n]
+				break
+			}
+		}
+	}
+	return string(out), nil
+}
+
+// GenerateRandomAlphanumeric returns an alphanumeric code of specified length.
+func GenerateRandomAlphanumeric(length int) (string, error) {
+	return randomString("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", length)
 }
 
 // GenerateRandomPIN returns a numeric PIN of specified digits.
-func GenerateRandomPIN(digits int) string {
-	const digitsCharset = "0123456789"
-	b := make([]byte, digits)
-	_, _ = rand.Read(b)
-	for i := range b {
-		b[i] = digitsCharset[int(b[i])%len(digitsCharset)]
-	}
-	return string(b)
+func GenerateRandomPIN(digits int) (string, error) {
+	return randomString("0123456789", digits)
 }
 
 // HashSHA256 returns hex encoded SHA-256 hash of the input.
@@ -235,12 +248,20 @@ func LoadOrCreateRSAKey(keyPath string) (*JWTKeyManager, error) {
 			Type:  "RSA PRIVATE KEY",
 			Bytes: der,
 		})
-		_ = os.WriteFile(keyPath, pemData, 0600)
+		// A key that cannot be persisted is regenerated on every restart, silently
+		// invalidating every token the suite has issued. Refuse to run that way.
+		if err := os.WriteFile(keyPath, pemData, 0600); err != nil {
+			return nil, fmt.Errorf("failed to persist signing key to %s: %w", keyPath, err)
+		}
 	}
 
 	pubKey := &privKey.PublicKey
-	pubDER, _ := x509.MarshalPKIXPublicKey(pubKey)
-	kid := hex.EncodeToString(sha256.New().Sum(pubDER)[:8])
+	pubDER, err := x509.MarshalPKIXPublicKey(pubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal public key: %w", err)
+	}
+	sum := sha256.Sum256(pubDER)
+	kid := hex.EncodeToString(sum[:8])
 
 	return &JWTKeyManager{
 		PrivateKey: privKey,
@@ -343,10 +364,13 @@ func (m *JWTKeyManager) VerifyJWT(tokenString string) (map[string]any, error) {
 		return nil, errors.New("invalid claims json")
 	}
 
-	if exp, ok := claims["exp"].(float64); ok {
-		if time.Now().Unix() > int64(exp) {
-			return nil, errors.New("token expired")
-		}
+	// A missing exp is not "no expiry", it is a malformed token. Fail closed.
+	exp, ok := claims["exp"].(float64)
+	if !ok {
+		return nil, errors.New("token has no exp claim")
+	}
+	if time.Now().Unix() > int64(exp) {
+		return nil, errors.New("token expired")
 	}
 
 	return claims, nil

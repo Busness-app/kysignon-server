@@ -28,9 +28,16 @@ var DefaultParams = &Argon2Params{
 }
 
 // HashPassword generates an Argon2id hash with standard encoded representation.
+// MaxPasswordLength bounds the input to Argon2id, which allocates 64 MB per call. An
+// unbounded password turns every login into a memory amplifier.
+const MaxPasswordLength = 1024
+
 func HashPassword(password string) (string, error) {
 	if len(password) < 12 {
 		return "", errors.New("password must be at least 12 characters")
+	}
+	if len(password) > MaxPasswordLength {
+		return "", fmt.Errorf("password must be at most %d characters", MaxPasswordLength)
 	}
 
 	salt := make([]byte, DefaultParams.SaltLength)
@@ -61,6 +68,28 @@ func HashPassword(password string) (string, error) {
 	)
 
 	return encoded, nil
+}
+
+// dummyHash is a real Argon2id hash of a value nobody knows. Verifying against it costs
+// the same as verifying a real account, which is what keeps the unknown-username path
+// from answering faster than the known-username one.
+var dummyHash string
+
+func init() {
+	h, err := HashPassword("kysignon-timing-equaliser-not-a-real-password")
+	if err != nil {
+		panic("failed to build dummy password hash: " + err.Error())
+	}
+	dummyHash = h
+}
+
+// DummyVerify burns the same work a real verification costs. Call it on every path that
+// rejects a login before reaching VerifyPassword.
+func DummyVerify(password string) {
+	if len(password) > MaxPasswordLength {
+		password = password[:MaxPasswordLength]
+	}
+	_, _ = VerifyPassword(password, dummyHash)
 }
 
 // VerifyPassword verifies a plaintext password against an Argon2id encoded hash.

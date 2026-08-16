@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../api';
+import { sameOriginPath } from '../returnTo';
 import { Shield, Smartphone, KeyRound, ArrowRight, RefreshCw, AlertCircle } from 'lucide-react';
 
 interface LoginViewProps {
@@ -21,7 +22,10 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
   const [challengeId, setChallengeId] = useState('');
   const [matchDigits, setMatchDigits] = useState('');
 
-  const returnTo = new URLSearchParams(window.location.search).get('return_to');
+  // return_to is only ever a same-origin path (the server sends the /oauth/authorize URL
+  // it was asked for). Following anything else would bounce the user off the trusted
+  // sign-in origin the moment they authenticate, which is a phisher's ideal ending.
+  const returnTo = sameOriginPath(new URLSearchParams(window.location.search).get('return_to'));
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,7 +62,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
 
   const finishLogin = (user: any) => {
     if (returnTo) {
-      window.location.href = decodeURIComponent(returnTo);
+      window.location.href = returnTo;
     } else {
       onLoginSuccess(user);
     }

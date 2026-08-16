@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -22,6 +23,10 @@ import (
 	"github.com/Yoshiofthewire/kysignon-server/web"
 	"github.com/google/uuid"
 )
+
+// auditRetention bounds how long audit events are kept. On SQLite this is the table that
+// grows fastest and never stops.
+const auditRetention = 180 * 24 * time.Hour
 
 func main() {
 	bootstrapCmd := flag.NewFlagSet("bootstrap-admin", flag.ExitOnError)
@@ -51,26 +56,46 @@ func main() {
 		log.Fatalf("Failed to initialize RSA key manager: %v", err)
 	}
 
+	// Paired systems on a shared container network need private callbacks; on a public
+	// deployment allowing them turns an attacker-chosen callback into an SSRF primitive.
+	sync.AllowPrivateCallbacks = cfg.AllowPrivateCallbacks
+	if cfg.AllowPrivateCallbacks {
+		log.Println("WARNING: KYSIGNON_ALLOW_PRIVATE_CALLBACKS is on; paired systems may register internal callback URLs")
+	}
+
 	auditLogger := audit.NewLogger(dbStore)
-	syncEngine := sync.NewEngine(dbStore)
+	syncEngine := sync.NewEngine(dbStore, cfg.EncryptionKey)
 	mfaEngine := mfa.NewEngine(dbStore, cfg.EncryptionKey)
 	oauthEngine := oauth.NewEngine(dbStore, keyManager, cfg.IssuerURL)
 
-	// Check if initial admin bootstrap is requested via environment
-	if cfg.BootstrapPass != "" {
-		ensureBootstrapAdmin(dbStore, cfg.BootstrapUser, cfg.BootstrapPass)
-	} else {
-		// If no admin exists at all, generate a first-run password file
-		adminCount, _ := dbStore.CountAdmins()
-		if adminCount == 0 {
-			firstRunPass := crypto.GenerateRandomAlphanumeric(16)
-			passFile := cfg.DataDir + "/first-run-password.txt"
-			if err := os.WriteFile(passFile, []byte(fmt.Sprintf("User: %s\nPassword: %s\n", cfg.BootstrapUser, firstRunPass)), 0600); err != nil {
-				log.Printf("Warning: failed to write %s: %v", passFile, err)
-			}
-			ensureBootstrapAdmin(dbStore, cfg.BootstrapUser, firstRunPass)
-			log.Printf("Bootstrap admin created. Credentials written to %s", passFile)
+	adminCount, err := dbStore.CountAdmins()
+	if err != nil {
+		log.Fatalf("Failed to count administrators: %v", err)
+	}
+	switch {
+	case adminCount > 0:
+		if cfg.BootstrapPass != "" {
+			log.Println("BOOTSTRAP_ADMIN_PASS is set but an administrator already exists; ignoring it. " +
+				"Use the admin UI to change a password.")
 		}
+	case cfg.BootstrapPass != "":
+		if err := ensureBootstrapAdmin(dbStore, cfg.BootstrapUser, cfg.BootstrapPass); err != nil {
+			log.Fatalf("Bootstrap failed: %v", err)
+		}
+		log.Printf("Bootstrap administrator %q created from BOOTSTRAP_ADMIN_PASS.", cfg.BootstrapUser)
+	default:
+		firstRunPass, err := crypto.GenerateRandomAlphanumeric(16)
+		if err != nil {
+			log.Fatalf("Failed to generate first-run admin password: %v", err)
+		}
+		if err := ensureBootstrapAdmin(dbStore, cfg.BootstrapUser, firstRunPass); err != nil {
+			log.Fatalf("Bootstrap failed: %v", err)
+		}
+		passFile := filepath.Join(cfg.DataDir, "first-run-password.txt")
+		if err := os.WriteFile(passFile, []byte(fmt.Sprintf("User: %s\nPassword: %s\n", cfg.BootstrapUser, firstRunPass)), 0600); err != nil {
+			log.Fatalf("Created the bootstrap admin but could not write %s: %v", passFile, err)
+		}
+		log.Printf("Bootstrap admin created. Credentials written to %s (removed automatically after first sign-in).", passFile)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -79,17 +104,33 @@ func main() {
 	// Start background account sync dispatcher worker
 	go syncEngine.StartWorker(ctx)
 
-	// Background session cleanup worker
+	// Background housekeeping. Every table below is written by unauthenticated or
+	// per-request paths, so none of them may grow without bound.
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		housekeep := func() {
+			_ = dbStore.CleanupExpiredSessions()
+			_ = dbStore.DeleteExpiredMFATokens()
+			_ = dbStore.DeleteExpiredAuthorizationCodes()
+			_ = dbStore.DeleteExpiredIssuedTokens()
+			_ = dbStore.DeleteExpiredDevicePairingTokens()
+			_ = dbStore.DeleteExpiredSystemPairingTokens()
+			_ = dbStore.DeleteExpiredMFAChallenges()
+			_ = dbStore.DeleteDeliveredSyncEvents(time.Now().UTC().Add(-7 * 24 * time.Hour))
+			_ = dbStore.DeleteAuditEventsOlderThan(time.Now().UTC().Add(-auditRetention))
+			if err := clearFirstRunPasswordFile(dbStore, cfg.DataDir); err != nil {
+				log.Printf("Housekeeping: %v", err)
+			}
+		}
+		housekeep()
+
+		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_ = dbStore.CleanupExpiredSessions()
-				_ = dbStore.DeleteExpiredMFATokens()
+				housekeep()
 			}
 		}
 	}()
@@ -144,29 +185,35 @@ func runBootstrap(username, password, email string) {
 	defer dbStore.Close()
 
 	if password == "" {
-		password = crypto.GenerateRandomAlphanumeric(16)
+		password, err = crypto.GenerateRandomAlphanumeric(16)
+		if err != nil {
+			log.Fatalf("Failed to generate admin password: %v", err)
+		}
 		fmt.Printf("Generated admin password: %s\n", password)
 	}
 
-	ensureBootstrapAdmin(dbStore, username, password)
+	if err := ensureBootstrapAdmin(dbStore, username, password); err != nil {
+		log.Fatalf("Bootstrap failed: %v", err)
+	}
 	fmt.Printf("Admin user '%s' bootstrapped successfully.\n", username)
 }
 
-func ensureBootstrapAdmin(dbStore *store.Store, username, password string) {
-	passHash, err := auth.HashPassword(password)
-	if err != nil {
-		log.Printf("Failed to hash bootstrap password: %v", err)
-		return
-	}
-
+// ensureBootstrapAdmin creates the first administrator. It deliberately does NOT touch an
+// existing account: BOOTSTRAP_ADMIN_PASS usually lives in an .env file that stays set, and
+// re-applying it on every restart would silently revert any password rotation the admin
+// performed, with nothing in the audit log to explain it.
+func ensureBootstrapAdmin(dbStore *store.Store, username, password string) error {
 	existing, err := dbStore.GetUserByUsername(username)
 	if err != nil {
-		log.Printf("Failed to check existing user: %v", err)
-		return
+		return fmt.Errorf("failed to check for an existing %q account: %w", username, err)
 	}
 	if existing != nil {
-		_ = dbStore.UpdateUserPassword(existing.ID, passHash)
-		return
+		return nil
+	}
+
+	passHash, err := auth.HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("bootstrap password rejected: %w", err)
 	}
 
 	admin := &store.User{
@@ -178,6 +225,35 @@ func ensureBootstrapAdmin(dbStore *store.Store, username, password string) {
 		Role:         "admin",
 		Status:       "active",
 	}
+	if err := dbStore.CreateUser(admin); err != nil {
+		return fmt.Errorf("failed to create the bootstrap administrator: %w", err)
+	}
+	return nil
+}
 
-	_ = dbStore.CreateUser(admin)
+func adminSessionExpiry() time.Time {
+	return time.Now().UTC().Add(24 * time.Hour)
+}
+
+// clearFirstRunPasswordFile removes the generated credentials file once any session has
+// existed, meaning someone has logged in and no longer needs a plaintext password on disk.
+func clearFirstRunPasswordFile(dbStore *store.Store, dataDir string) error {
+	path := filepath.Join(dataDir, "first-run-password.txt")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+
+	loggedIn, err := dbStore.HasAnySession()
+	if err != nil {
+		return err
+	}
+	if !loggedIn {
+		return nil
+	}
+
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove %s: %w", path, err)
+	}
+	log.Printf("Removed %s; the first administrator has signed in.", path)
+	return nil
 }

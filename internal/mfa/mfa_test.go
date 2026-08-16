@@ -129,11 +129,15 @@ func TestDevicePairingAndRegistration(t *testing.T) {
 		t.Fatalf("TTL too short: %v", expiresAt)
 	}
 
-	// 2. Register native device using PIN
+	// 2. Register native device using PIN. The PIN is scoped to the user who generated
+	// it, and a device must present the P-256 key it will sign push responses with.
+	_, devicePub := signingKey(t)
 	regReq := &NativeDeviceRegisterRequest{
 		PINCode:          pin,
+		UserID:           user.ID,
 		DeviceName:       "Yoshi's Pixel Phone",
 		DeviceIdentifier: "pixel-9-pro-uuid",
+		PublicKey:        devicePub,
 		PushToken:        "fcm-mock-token-12345",
 	}
 

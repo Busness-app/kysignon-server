@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDeleteUserWithSyncEventsMigratesLegacyForeignKey(t *testing.T) {
@@ -95,5 +96,39 @@ func TestUpdateUserWithSyncEventsPreservesLastAdmin(t *testing.T) {
 	u.Role = "user"
 	if err := s.UpdateUserWithSyncEvents(u, false, nil); !errors.Is(err, ErrLastActiveAdmin) {
 		t.Fatalf("demoting final admin error = %v", err)
+	}
+}
+
+func TestLegacyDevicePairingTokensAreRebuiltWithoutPlaintextPINs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL, display_name TEXT NOT NULL, email TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+		CREATE TABLE device_pairing_tokens (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, pin_code TEXT NOT NULL, expires_at DATETIME NOT NULL, used_at DATETIME, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+		INSERT INTO users (id, username, display_name, email, password_hash, role, status) VALUES ('u1', 'user', 'User', 'user@example.test', 'hash', 'user', 'active');
+		INSERT INTO device_pairing_tokens (id, user_id, token_hash, pin_code, expires_at) VALUES ('old', 'u1', 'hash', '123456', CURRENT_TIMESTAMP);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var definition string
+	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'device_pairing_tokens'`).Scan(&definition); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToUpper(definition), "PIN_CODE") {
+		t.Fatal("legacy plaintext pairing PIN column survived migration")
+	}
+	if err := s.CreateDevicePairingToken(&DevicePairingToken{ID: "new", UserID: "u1", TokenHash: "new-hash", PINHash: "new-pin-hash", ExpiresAt: time.Now().UTC().Add(time.Minute)}); err != nil {
+		t.Fatalf("new pairing token failed after migration: %v", err)
 	}
 }

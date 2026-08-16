@@ -263,7 +263,36 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
-	return s.migrateSyncEventsUserReference()
+	if err := s.migrateSyncEventsUserReference(); err != nil {
+		return err
+	}
+	return s.migrateLegacyDevicePairingTokens()
+}
+
+// migrateLegacyDevicePairingTokens removes the pre-hash pin_code column. Pairing tokens
+// expire in 90 seconds, so preserving plaintext credentials during a schema migration is
+// strictly worse than forcing a fresh pairing attempt.
+func (s *Store) migrateLegacyDevicePairingTokens() error {
+	var definition string
+	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'device_pairing_tokens'`).Scan(&definition); err != nil {
+		return err
+	}
+	if !strings.Contains(strings.ToUpper(definition), "PIN_CODE") {
+		return nil
+	}
+	_, err := s.db.Exec(`
+		DROP TABLE device_pairing_tokens;
+		CREATE TABLE device_pairing_tokens (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			token_hash TEXT NOT NULL UNIQUE,
+			pin_hash TEXT NOT NULL,
+			expires_at DATETIME NOT NULL,
+			used_at DATETIME,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX idx_device_pairing_tokens_hash ON device_pairing_tokens(token_hash);`)
+	return err
 }
 
 // migrateSyncEventsUserReference removes the legacy foreign key that deleted a user's

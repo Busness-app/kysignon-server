@@ -28,13 +28,12 @@ type Session struct {
 }
 
 type PairedSystem struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	SystemType     string `json:"systemType"` // "kypost", "kypasswords", "kybookmarks", "kynotes", "custom"
-	CallbackURL    string `json:"callbackUrl"`
-	HMACSecretHash string `json:"-"` // legacy plaintext column, no longer written
-	// HMACSecretEncrypted holds the webhook signing secret under the deployment
-	// encryption key. It signs outbound webhooks, so it must be recoverable, not hashed.
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	SystemType  string `json:"systemType"` // "kypost", "kypasswords", "kybookmarks", "kynotes", "custom"
+	CallbackURL string `json:"callbackUrl"`
+	// HMACSecretEncrypted holds the webhook signing secret under the deployment encryption
+	// key. It signs outbound webhooks, so it must be recoverable, not hashed.
 	HMACSecretEncrypted string     `json:"-"`
 	Status              string     `json:"status"` // "active", "failing", "disabled"
 	LastSyncedAt        *time.Time `json:"lastSyncedAt,omitempty"`
@@ -83,7 +82,6 @@ type DevicePairingToken struct {
 	ID        string     `json:"id"`
 	UserID    string     `json:"userId"`
 	TokenHash string     `json:"-"`
-	PINCode   string     `json:"-"` // legacy plaintext column, no longer written
 	PINHash   string     `json:"-"`
 	ExpiresAt time.Time  `json:"expiresAt"`
 	UsedAt    *time.Time `json:"usedAt,omitempty"`

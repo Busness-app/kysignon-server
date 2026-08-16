@@ -217,11 +217,8 @@ func TestPairingPINIsHashedAndScopedToItsUser(t *testing.T) {
 	if stored.UserID != alice.ID {
 		t.Errorf("PIN resolved to user %s, want %s", stored.UserID, alice.ID)
 	}
-	if stored.PINCode != "" {
-		t.Errorf("the pairing PIN is still stored in plaintext as %q", stored.PINCode)
-	}
 	if stored.PINHash == alicePIN {
-		t.Error("pin_hash holds the raw PIN")
+		t.Error("the pairing PIN is stored in plaintext")
 	}
 
 	// Scoping is what stops any live PIN in the deployment matching any pairing attempt.

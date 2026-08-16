@@ -139,9 +139,9 @@ account that already exists — change those from the admin UI, so the action is
 
 ---
 
-## Operator Notes: Enforcement That May Affect Existing Integrations
+## Integration Requirements
 
-These rules are enforced strictly. Each one closes a path that previously granted access.
+These rules are enforced strictly. Each is a constraint on how a client integrates.
 
 **Redirect URIs must match exactly.** There are no host aliases, port families, trailing
 slash tolerance, or per-client fallbacks. A client that needs three callback ports
@@ -159,22 +159,11 @@ should be confidential; `public` exists for SPAs and native apps that genuinely 
 A confidential client with an empty `client_secret_hash` is rejected rather than
 authenticated by existing.
 
-**Existing clients registered before this change are public and have no secret.** The
-server logs a NOTICE for each at startup. Promote one in place, without breaking it, via:
-
-```bash
-curl -X PUT https://auth.example.com/api/admin/clients/kypost \
-  -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" \
-  --cookie "kysignon_session=$SESSION; kysignon_csrf=$CSRF" \
-  -d '{"clientType":"confidential"}'
-```
-
-The response carries `clientSecret` once. Configure it in that service before its next
-sign-in, since the client is confidential from that moment and unauthenticated exchanges
-stop working. `{"rotateSecret":true}` rotates an existing one the same way.
-
-**Scopes are intersected with the client's `allowedScopes`.** Asking for more than a client
-is registered for narrows to the permitted set, or fails if nothing overlaps.
+**Rotate or correct a client in place** with `PUT /api/admin/clients/{id}` —
+`{"clientType":"confidential"}` promotes a public client and returns a fresh secret,
+`{"rotateSecret":true}` rotates an existing one. The secret appears in that response only.
+This exists so a misregistration is recoverable; delete-and-recreate would break the
+integration it is meant to secure, which guarantees nobody ever does it.
 
 **Access tokens live 15 minutes** and carry a `jti` recorded server-side.
 `POST /oauth/revoke` (RFC 7009, client authentication required) invalidates one;

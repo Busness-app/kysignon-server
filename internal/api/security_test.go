@@ -632,8 +632,8 @@ func TestClientSecretCanBeRotated(t *testing.T) {
 	}
 }
 
-// Promoting a legacy public client to confidential is the migration path for suite apps
-// registered before secrets were the default.
+// A client registered as public can be corrected to confidential without deleting it,
+// which is what makes the mistake recoverable rather than permanent.
 func TestPublicClientCanBePromotedToConfidential(t *testing.T) {
 	srv, db, _, _, _, cleanup := setupTestServer(t)
 	defer cleanup()

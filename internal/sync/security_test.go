@@ -300,7 +300,7 @@ func TestHMACSecretIsNotStoredInPlaintext(t *testing.T) {
 		t.Fatalf("expected 1 system: %v", err)
 	}
 	for _, s := range systems {
-		if strings.Contains(s.HMACSecretHash, resp.HMACSecret) || strings.Contains(s.HMACSecretEncrypted, resp.HMACSecret) {
+		if strings.Contains(s.HMACSecretEncrypted, resp.HMACSecret) {
 			t.Error("the webhook signing secret is stored in plaintext")
 		}
 	}

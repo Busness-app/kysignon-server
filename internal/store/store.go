@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"runtime"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -14,7 +13,7 @@ type Store struct {
 	db *sql.DB
 }
 
-// New opens SQLite database and applies migrations.
+// New opens the SQLite database and creates the schema.
 func New(dbPath string) (*Store, error) {
 	// Enable WAL mode, busy timeout, and foreign keys in DSN
 	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", dbPath)
@@ -33,7 +32,7 @@ func New(dbPath string) (*Store, error) {
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("migration failed: %w", err)
+		return nil, fmt.Errorf("schema creation failed: %w", err)
 	}
 
 	return s, nil
@@ -76,12 +75,14 @@ func (s *Store) migrate() error {
 		last_failure_at DATETIME NOT NULL
 	);
 
+	-- hmac_secret_encrypted holds the webhook signing secret sealed under the deployment
+	-- encryption key. It signs outbound webhooks, so it must be recoverable, not hashed.
 	CREATE TABLE IF NOT EXISTS paired_systems (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
 		system_type TEXT NOT NULL,
 		callback_url TEXT NOT NULL,
-		hmac_secret_hash TEXT NOT NULL,
+		hmac_secret_encrypted TEXT NOT NULL,
 		status TEXT NOT NULL CHECK (status IN ('active', 'failing', 'disabled')),
 		last_synced_at DATETIME,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -90,6 +91,8 @@ func (s *Store) migrate() error {
 	CREATE TABLE IF NOT EXISTS system_pairing_tokens (
 		id TEXT PRIMARY KEY,
 		token_hash TEXT NOT NULL UNIQUE,
+		pin_hash TEXT NOT NULL,
+		pin_attempts INTEGER NOT NULL DEFAULT 0,
 		system_type TEXT NOT NULL,
 		created_by_user_id TEXT NOT NULL REFERENCES users(id),
 		expires_at DATETIME NOT NULL,
@@ -101,11 +104,13 @@ func (s *Store) migrate() error {
 	CREATE TABLE IF NOT EXISTS account_sync_events (
 		id TEXT PRIMARY KEY,
 		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		system_id TEXT NOT NULL,
 		event_type TEXT NOT NULL,
 		payload_json TEXT NOT NULL,
 		attempts INTEGER NOT NULL DEFAULT 0,
 		status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'failed')),
 		last_error TEXT,
+		next_attempt_at DATETIME,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
@@ -129,7 +134,7 @@ func (s *Store) migrate() error {
 		id TEXT PRIMARY KEY,
 		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 		token_hash TEXT NOT NULL UNIQUE,
-		pin_code TEXT NOT NULL,
+		pin_hash TEXT NOT NULL,
 		expires_at DATETIME NOT NULL,
 		used_at DATETIME,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -142,6 +147,9 @@ func (s *Store) migrate() error {
 		method_type TEXT NOT NULL CHECK (method_type IN ('totp', 'push')),
 		encrypted_secret TEXT,
 		is_primary BOOLEAN NOT NULL DEFAULT 0,
+		-- The highest TOTP time step accepted so far, so a code cannot be replayed inside
+		-- its validity window.
+		last_totp_counter INTEGER NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(user_id, method_type)
 	);
@@ -163,6 +171,7 @@ func (s *Store) migrate() error {
 		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 		token_hash TEXT NOT NULL UNIQUE,
 		challenge_id TEXT,
+		attempts INTEGER NOT NULL DEFAULT 0,
 		expires_at DATETIME NOT NULL,
 		used_at DATETIME,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -185,6 +194,7 @@ func (s *Store) migrate() error {
 		client_secret_hash TEXT,
 		redirect_uris_json TEXT NOT NULL,
 		allowed_scopes_json TEXT NOT NULL,
+		launch_url TEXT,
 		enabled BOOLEAN NOT NULL DEFAULT 1,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
@@ -198,6 +208,7 @@ func (s *Store) migrate() error {
 		scope TEXT NOT NULL,
 		code_challenge TEXT NOT NULL,
 		code_challenge_method TEXT NOT NULL,
+		nonce TEXT NOT NULL DEFAULT '',
 		expires_at DATETIME NOT NULL,
 		used_at DATETIME,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -245,29 +256,7 @@ func (s *Store) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
 	`
 	_, err := s.db.Exec(schema)
-	if err != nil {
-		return err
-	}
-
-	// Additive column migrations. "duplicate column name" means the migration already ran;
-	// anything else is a real failure and must not be swallowed.
-	for _, stmt := range []string{
-		`ALTER TABLE oauth_clients ADD COLUMN launch_url TEXT`,
-		`ALTER TABLE authorization_codes ADD COLUMN nonce TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE system_pairing_tokens ADD COLUMN pin_hash TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE system_pairing_tokens ADD COLUMN pin_attempts INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE device_pairing_tokens ADD COLUMN pin_hash TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE mfa_tokens ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE mfa_methods ADD COLUMN last_totp_counter INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE account_sync_events ADD COLUMN system_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE account_sync_events ADD COLUMN next_attempt_at DATETIME`,
-		`ALTER TABLE paired_systems ADD COLUMN hmac_secret_encrypted TEXT NOT NULL DEFAULT ''`,
-	} {
-		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("migration %q failed: %w", stmt, err)
-		}
-	}
-	return nil
+	return err
 }
 
 // User CRUD
@@ -529,18 +518,16 @@ func (s *Store) DeleteExpiredSystemPairingTokens() error {
 }
 
 func (s *Store) CreatePairedSystem(ps *PairedSystem) error {
-	query := `INSERT INTO paired_systems (id, name, system_type, callback_url, hmac_secret_hash, hmac_secret_encrypted, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO paired_systems (id, name, system_type, callback_url, hmac_secret_encrypted, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
 	ps.CreatedAt = time.Now().UTC()
-	// hmac_secret_hash is an empty placeholder for the legacy NOT NULL column; the usable
-	// secret lives encrypted in hmac_secret_encrypted.
-	_, err := s.db.Exec(query, ps.ID, ps.Name, ps.SystemType, ps.CallbackURL, "", ps.HMACSecretEncrypted, ps.Status, ps.CreatedAt)
+	_, err := s.db.Exec(query, ps.ID, ps.Name, ps.SystemType, ps.CallbackURL, ps.HMACSecretEncrypted, ps.Status, ps.CreatedAt)
 	return err
 }
 
 func (s *Store) GetPairedSystemByID(id string) (*PairedSystem, error) {
-	query := `SELECT id, name, system_type, callback_url, hmac_secret_hash, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE id = ?`
+	query := `SELECT id, name, system_type, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE id = ?`
 	ps := &PairedSystem{}
-	err := s.db.QueryRow(query, id).Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretHash, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt)
+	err := s.db.QueryRow(query, id).Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -548,7 +535,7 @@ func (s *Store) GetPairedSystemByID(id string) (*PairedSystem, error) {
 }
 
 func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
-	query := `SELECT id, name, system_type, callback_url, hmac_secret_hash, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems ORDER BY created_at ASC`
+	query := `SELECT id, name, system_type, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems ORDER BY created_at ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -558,7 +545,7 @@ func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
 	var systems []PairedSystem
 	for rows.Next() {
 		var ps PairedSystem
-		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretHash, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
 			return nil, err
 		}
 		systems = append(systems, ps)
@@ -567,7 +554,7 @@ func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
 }
 
 func (s *Store) ListActivePairedSystems() ([]PairedSystem, error) {
-	query := `SELECT id, name, system_type, callback_url, hmac_secret_hash, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE status != 'disabled' ORDER BY created_at ASC`
+	query := `SELECT id, name, system_type, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE status != 'disabled' ORDER BY created_at ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -577,7 +564,7 @@ func (s *Store) ListActivePairedSystems() ([]PairedSystem, error) {
 	var systems []PairedSystem
 	for rows.Next() {
 		var ps PairedSystem
-		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretHash, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
 			return nil, err
 		}
 		systems = append(systems, ps)
@@ -670,19 +657,17 @@ func (s *Store) DeleteDeliveredSyncEvents(olderThan time.Time) error {
 
 // Native Device & MFA Methods
 func (s *Store) CreateDevicePairingToken(token *DevicePairingToken) error {
-	query := `INSERT INTO device_pairing_tokens (id, user_id, token_hash, pin_code, pin_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO device_pairing_tokens (id, user_id, token_hash, pin_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`
 	token.CreatedAt = time.Now().UTC()
-	// pin_code is retained only as an empty placeholder for the legacy NOT NULL column;
-	// the redeemable value lives in pin_hash.
-	_, err := s.db.Exec(query, token.ID, token.UserID, token.TokenHash, "", token.PINHash, token.ExpiresAt, token.CreatedAt)
+	_, err := s.db.Exec(query, token.ID, token.UserID, token.TokenHash, token.PINHash, token.ExpiresAt, token.CreatedAt)
 	return err
 }
 
-const devicePairingTokenColumns = `id, user_id, token_hash, pin_code, pin_hash, expires_at, used_at, created_at`
+const devicePairingTokenColumns = `id, user_id, token_hash, pin_hash, expires_at, used_at, created_at`
 
 func scanDevicePairingToken(row *sql.Row) (*DevicePairingToken, error) {
 	t := &DevicePairingToken{}
-	err := row.Scan(&t.ID, &t.UserID, &t.TokenHash, &t.PINCode, &t.PINHash, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	err := row.Scan(&t.ID, &t.UserID, &t.TokenHash, &t.PINHash, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

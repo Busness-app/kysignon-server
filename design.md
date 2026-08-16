@@ -408,6 +408,7 @@ The frontend follows the existing KySecurity visual system and conventions:
   - `KYSIGNON_SECRET_KEY`: Master secret for session and cookie signing.
   - `KYSIGNON_ENCRYPTION_KEY`: Master key for AES-GCM secret encryption at rest.
   - `KYSIGNON_RSA_KEY_PATH`: Path to private RSA signing key for OIDC JWTs.
+  - `KYSIGNON_SESSION_TTL` / `KYSIGNON_SESSION_IDLE_TTL`: Absolute and inactivity limits for browser sessions (defaults: `24h` / `30m`).
   - `TRUSTED_PROXY_CIDRS`: Trusted upstream reverse proxy CIDRs for real client IP extraction.
 - **Bootstrap CLI**: Initial administrator account created via CLI flag (e.g., `kysignon bootstrap-admin --username admin`) or environment variables on first start without logging credentials.
 

@@ -16,6 +16,7 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 - Account creation and updates write their replication outbox events in the same database transaction. The final active administrator cannot be deleted, disabled, or demoted.
 - Sensitive API and OAuth responses are `no-store`; registered redirect and launcher URLs must be HTTPS, except loopback HTTP for development.
 - Legacy device-pairing tables containing plaintext PINs are rebuilt on startup; their 90-second tokens are intentionally invalidated.
+- Sessions have both a configurable absolute lifetime (24h default) and inactivity lifetime (30m default); both are enforced in the store lookup.
 
 # Ponytail, lazy senior dev mode
 

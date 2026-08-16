@@ -36,6 +36,7 @@ type MiddlewareManager struct {
 	lastSweep         time.Time
 	maxLimiters       int
 	csrfKey           []byte
+	sessionIdleTTL    time.Duration
 	// now is injectable so eviction behaviour can be tested without waiting real minutes.
 	now func() time.Time
 }
@@ -57,13 +58,14 @@ func NewMiddlewareManager(s *store.Store, trustedCIDRs []string, csrfKey []byte)
 	}
 
 	return &MiddlewareManager{
-		store:        s,
-		trustedCIDRs: parsedCIDRs,
-		rateLimiters: make(map[string]*RateLimiter),
-		lastSweep:    time.Now(),
-		maxLimiters:  defaultMaxLimiters,
-		csrfKey:      csrfKey,
-		now:          time.Now,
+		store:          s,
+		trustedCIDRs:   parsedCIDRs,
+		rateLimiters:   make(map[string]*RateLimiter),
+		lastSweep:      time.Now(),
+		maxLimiters:    defaultMaxLimiters,
+		csrfKey:        csrfKey,
+		sessionIdleTTL: 30 * time.Minute,
+		now:            time.Now,
 	}
 }
 
@@ -239,7 +241,7 @@ func (m *MiddlewareManager) authenticate(r *http.Request) (*store.User, *store.S
 	}
 
 	// GetSessionByTokenHash filters on expires_at, so an expired session is never returned.
-	sess, err := m.store.GetSessionByTokenHash(crypto.HashSHA256(cookie.Value))
+	sess, err := m.store.GetSessionByTokenHash(crypto.HashSHA256(cookie.Value), m.sessionIdleTTL)
 	if err != nil || sess == nil {
 		return nil, nil
 	}

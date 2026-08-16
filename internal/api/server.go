@@ -43,6 +43,9 @@ func NewServer(
 	staticFS fs.FS,
 ) *Server {
 	mm := NewMiddlewareManager(s, cfg.TrustedProxyCIDRs, cfg.SecretKey)
+	if cfg.SessionIdleTTL > 0 {
+		mm.sessionIdleTTL = cfg.SessionIdleTTL
+	}
 
 	srv := &Server{
 		cfg:         cfg,
@@ -91,6 +94,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	authH := NewAuthHandler(s.store, s.mfaEngine, s.audit, s.middleware, s.cfg.SecureCookies)
+	if s.cfg.SessionTTL > 0 {
+		authH.sessionTTL = s.cfg.SessionTTL
+	}
 	devH := NewDeviceHandler(s.store, s.mfaEngine, s.audit, s.middleware, s.cfg.IssuerURL)
 	adminH := NewAdminHandler(s.store, s.syncEngine, s.audit, s.middleware, s.cfg.IssuerURL)
 	oauthH := NewOAuthHandler(s.store, s.oauthEngine, s.audit, s.middleware)

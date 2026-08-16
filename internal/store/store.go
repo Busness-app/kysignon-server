@@ -554,12 +554,14 @@ func (s *Store) CreateSession(sess *Session) error {
 	return err
 }
 
-// GetSessionByTokenHash returns a live session, or nil. Expiry is part of the query so no
-// caller can authenticate against a dead session by forgetting to check the timestamp.
-func (s *Store) GetSessionByTokenHash(tokenHash string) (*Session, error) {
-	query := `SELECT id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at FROM sessions WHERE session_token_hash = ? AND expires_at > ?`
+// GetSessionByTokenHash returns a session within both its absolute and idle lifetime, or
+// nil. Both limits live in the query so callers cannot accidentally authenticate a stale
+// session by forgetting either check.
+func (s *Store) GetSessionByTokenHash(tokenHash string, idleTTL time.Duration) (*Session, error) {
+	now := time.Now().UTC()
+	query := `SELECT id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at FROM sessions WHERE session_token_hash = ? AND expires_at > ? AND last_active_at > ?`
 	sess := &Session{}
-	err := s.db.QueryRow(query, tokenHash, time.Now().UTC()).Scan(&sess.ID, &sess.UserID, &sess.SessionTokenHash, &sess.IPAddress, &sess.UserAgent, &sess.ExpiresAt, &sess.CreatedAt, &sess.LastActiveAt)
+	err := s.db.QueryRow(query, tokenHash, now, now.Add(-idleTTL)).Scan(&sess.ID, &sess.UserID, &sess.SessionTokenHash, &sess.IPAddress, &sess.UserAgent, &sess.ExpiresAt, &sess.CreatedAt, &sess.LastActiveAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

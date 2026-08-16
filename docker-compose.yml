@@ -25,6 +25,8 @@ services:
       # Empty by default: no peer may forge its client IP. Set to your proxy's address only.
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       KYSIGNON_SECURE_COOKIES: ${KYSIGNON_SECURE_COOKIES:-}
+      KYSIGNON_SESSION_TTL: ${KYSIGNON_SESSION_TTL:-24h}
+      KYSIGNON_SESSION_IDLE_TTL: ${KYSIGNON_SESSION_IDLE_TTL:-30m}
       KYSIGNON_SECRET_KEY: ${KYSIGNON_SECRET_KEY:-}
       KYSIGNON_ENCRYPTION_KEY: ${KYSIGNON_ENCRYPTION_KEY:-}
       # Services on kypost-net address each other privately, so pairing callbacks there

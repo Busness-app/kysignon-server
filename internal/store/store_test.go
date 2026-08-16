@@ -99,6 +99,31 @@ func TestUpdateUserWithSyncEventsPreservesLastAdmin(t *testing.T) {
 	}
 }
 
+func TestIdleSessionIsRejectedBeforeAbsoluteExpiry(t *testing.T) {
+	s, err := New(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	user := &User{ID: "user", Username: "user", DisplayName: "User", Email: "user@example.test", PasswordHash: "hash", Role: "user", Status: "active"}
+	if err := s.CreateUser(user); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(&Session{ID: "session", UserID: user.ID, SessionTokenHash: "token", IPAddress: "127.0.0.1", UserAgent: "test", ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET last_active_at = ? WHERE id = ?`, time.Now().UTC().Add(-31*time.Minute), "session"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.GetSessionByTokenHash("token", 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session != nil {
+		t.Fatal("idle session remained valid before its absolute expiry")
+	}
+}
+
 func TestLegacyDevicePairingTokensAreRebuiltWithoutPlaintextPINs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	legacy, err := sql.Open("sqlite", path)

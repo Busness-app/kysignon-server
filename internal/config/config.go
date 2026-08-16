@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // KeyLength is the required size, in bytes, of the secret and encryption keys.
@@ -29,6 +30,10 @@ type Config struct {
 	// SecureCookies forces the Secure flag on session cookies. Needed when TLS terminates
 	// at a proxy that does not forward X-Forwarded-Proto.
 	SecureCookies bool
+	// SessionTTL caps a browser login even if it remains active.
+	SessionTTL time.Duration
+	// SessionIdleTTL requires a fresh login after inactivity.
+	SessionIdleTTL time.Duration
 	// AllowPrivateCallbacks permits paired systems to register loopback or private-range
 	// webhook callbacks. Needed for single-host deployments where every service shares a
 	// container network; it widens an attacker-chosen callback into a request forgery
@@ -68,6 +73,17 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	sessionTTL, err := loadPositiveDuration("KYSIGNON_SESSION_TTL", 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	sessionIdleTTL, err := loadPositiveDuration("KYSIGNON_SESSION_IDLE_TTL", 30*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	if sessionIdleTTL > sessionTTL {
+		return nil, fmt.Errorf("KYSIGNON_SESSION_IDLE_TTL must not exceed KYSIGNON_SESSION_TTL")
+	}
 
 	return &Config{
 		Port:                  port,
@@ -81,8 +97,22 @@ func Load() (*Config, error) {
 		BootstrapUser:         getEnv("BOOTSTRAP_ADMIN_USER", "admin"),
 		BootstrapPass:         os.Getenv("BOOTSTRAP_ADMIN_PASS"),
 		SecureCookies:         issuer.Scheme == "https" || strings.EqualFold(os.Getenv("KYSIGNON_SECURE_COOKIES"), "true"),
+		SessionTTL:            sessionTTL,
+		SessionIdleTTL:        sessionIdleTTL,
 		AllowPrivateCallbacks: strings.EqualFold(os.Getenv("KYSIGNON_ALLOW_PRIVATE_CALLBACKS"), "true"),
 	}, nil
+}
+
+func loadPositiveDuration(name string, defaultValue time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return defaultValue, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive Go duration (for example 24h or 30m)", name)
+	}
+	return value, nil
 }
 
 func issuerIsLocal(u *url.URL) bool {

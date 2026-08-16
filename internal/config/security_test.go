@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func withEnv(t *testing.T, kv map[string]string) {
@@ -144,6 +145,30 @@ func TestMalformedTrustedProxyCIDRIsRejected(t *testing.T) {
 	})
 	if _, err := Load(); err == nil {
 		t.Error("a malformed entry in TRUSTED_PROXY_CIDRS was silently ignored")
+	}
+}
+
+func TestSessionTimeoutConfiguration(t *testing.T) {
+	withEnv(t, map[string]string{
+		"KYSIGNON_DATA_DIR":         t.TempDir(),
+		"KYSIGNON_SESSION_TTL":      "8h",
+		"KYSIGNON_SESSION_IDLE_TTL": "20m",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SessionTTL != 8*time.Hour || cfg.SessionIdleTTL != 20*time.Minute {
+		t.Fatalf("session timeouts = %v / %v", cfg.SessionTTL, cfg.SessionIdleTTL)
+	}
+
+	withEnv(t, map[string]string{
+		"KYSIGNON_DATA_DIR":         t.TempDir(),
+		"KYSIGNON_SESSION_TTL":      "30m",
+		"KYSIGNON_SESSION_IDLE_TTL": "1h",
+	})
+	if _, err := Load(); err == nil {
+		t.Fatal("idle timeout longer than absolute timeout was accepted")
 	}
 }
 

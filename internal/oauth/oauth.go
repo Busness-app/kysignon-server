@@ -329,7 +329,7 @@ func (e *Engine) ValidateRedirectURI(client *store.OAuthClient, uri string) bool
 			}
 		case "kynotes":
 			if reqHost == "notes.urlxl.com" || reqHost == "kynotes.urlxl.com" ||
-				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.7" || reqHost == "kynotes-server") && (reqPort == "5870" || reqPort == "")) {
+				((reqHost == "localhost" || reqHost == "127.0.0.1" || reqHost == "10.89.0.7" || reqHost == "kynotes-server") && (reqPort == "5870" || reqPort == "5868" || reqPort == "8080" || reqPort == "")) {
 				return true
 			}
 		}

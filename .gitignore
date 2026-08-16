@@ -10,6 +10,7 @@ data/
 *.db-shm
 *.key
 first-run-password.txt
+wrangler.toml
 
 # Node
 web/node_modules/

@@ -300,11 +300,11 @@ func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request)
 				case "kypost":
 					launchURL = origin + "/api/auth/oidc/login"
 				case "kypasswords":
-					launchURL = origin + "/auth/oidc/login"
+					launchURL = origin + "/api/auth/oidc/login"
 				case "kybookmarks":
-					launchURL = origin + "/auth/oidc/login"
+					launchURL = origin + "/api/auth/oidc/login"
 				case "kynotes":
-					launchURL = origin + "/auth/oidc/login"
+					launchURL = origin + "/api/auth/oidc/login"
 				default:
 					launchURL = origin
 				}

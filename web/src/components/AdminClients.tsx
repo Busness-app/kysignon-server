@@ -28,15 +28,26 @@ export const AdminClients: React.FC = () => {
     fetchClients();
   }, []);
 
-  const applyPreset = (presetId: string, presetName: string, defaultPath: string, autoLoginPath?: string) => {
+  const applyPreset = (presetId: string, presetName: string, defaultPath: string, autoLoginPath?: string, localPort?: number) => {
     setClientId(presetId);
     setClientName(presetName);
     setClientType('public');
-    setRedirectUris(
-      `https://${presetId}.urlxl.com${defaultPath}\nhttp://localhost:8053${defaultPath}\nhttp://127.0.0.1:8053${defaultPath}`
-    );
+    const port = localPort || 8053;
+    const domainPrefix = presetId === 'kypasswords' ? 'passwords' : presetId === 'kypost' ? 'mail' : presetId === 'kydns' ? 'dns' : presetId === 'kybookmarks' ? 'bookmarks' : presetId === 'kynotes' ? 'notes' : presetId;
+    const uris = [
+      `https://${domainPrefix}.urlxl.com${defaultPath}`,
+      `https://${presetId}.urlxl.com${defaultPath}`,
+      `http://localhost:${port}${defaultPath}`,
+      `http://127.0.0.1:${port}${defaultPath}`,
+    ];
+    if (defaultPath !== '/api/auth/oidc/callback') {
+      uris.push(`https://${domainPrefix}.urlxl.com/api/auth/oidc/callback`);
+      uris.push(`http://localhost:${port}/api/auth/oidc/callback`);
+      uris.push(`http://127.0.0.1:${port}/api/auth/oidc/callback`);
+    }
+    setRedirectUris(uris.join('\n'));
     if (autoLoginPath) {
-      setLaunchUrl(`https://${presetId}.urlxl.com${autoLoginPath}`);
+      setLaunchUrl(`https://${domainPrefix}.urlxl.com${autoLoginPath}`);
     } else {
       setLaunchUrl('');
     }
@@ -184,35 +195,35 @@ export const AdminClients: React.FC = () => {
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kydns', 'KyDNS Server', '/auth/sso/callback', '/auth/sso/login')}
+                      onClick={() => applyPreset('kydns', 'KyDNS Server', '/auth/sso/callback', '/auth/sso/login', 8053)}
                     >
                       + KyDNS
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kypost', 'KyPost Mail Server', '/api/auth/oidc/callback', '/api/auth/oidc/login')}
+                      onClick={() => applyPreset('kypost', 'KyPost Mail Server', '/api/auth/oidc/callback', '/api/auth/oidc/login', 5866)}
                     >
                       + KyPost
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', '/auth/oidc/callback', '/auth/oidc/login')}
+                      onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', '/api/auth/oidc/callback', '/api/auth/oidc/login', 5877)}
                     >
                       + KyPasswords
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kybookmarks', 'KyBookmarks', '/auth/oidc/callback', '/auth/oidc/login')}
+                      onClick={() => applyPreset('kybookmarks', 'KyBookmarks', '/api/auth/oidc/callback', '/api/auth/oidc/login', 5869)}
                     >
                       + KyBookmarks
                     </button>
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('kynotes', 'KyNotes', '/auth/oidc/callback', '/auth/oidc/login')}
+                      onClick={() => applyPreset('kynotes', 'KyNotes', '/api/auth/oidc/callback', '/api/auth/oidc/login', 5870)}
                     >
                       + KyNotes
                     </button>

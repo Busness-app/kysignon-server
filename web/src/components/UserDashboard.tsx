@@ -62,7 +62,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       name: 'KyPasswords',
       description: 'Zero-knowledge encrypted password vault',
       iconName: 'lock',
-      url: getDomainUrl('passwords', 5868, 'https://passwords.urlxl.com'),
+      url: getDomainUrl('passwords', 5877, 'https://passwords.urlxl.com'),
       enabled: true,
     },
     {

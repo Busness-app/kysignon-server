@@ -249,16 +249,6 @@ func (e *Engine) RegisterNativeDevice(req *NativeDeviceRegisterRequest) (*store.
 		return nil, errors.New("invalid or expired pairing token")
 	}
 
-	// Spend the token before creating anything, so two racing registrations cannot both
-	// redeem it.
-	spent, err := e.store.ConsumeDevicePairingToken(validToken.ID)
-	if err != nil {
-		return nil, err
-	}
-	if !spent {
-		return nil, errors.New("pairing token has already been redeemed")
-	}
-
 	name := req.DeviceName
 	if name == "" {
 		name = "KySecurity Authenticator Device"
@@ -274,17 +264,18 @@ func (e *Engine) RegisterNativeDevice(req *NativeDeviceRegisterRequest) (*store.
 		IsMFAApprover:    true, // Enrolled devices are default approvers
 	}
 
-	if err := e.store.UpsertNativeDevice(device); err != nil {
-		return nil, err
-	}
-
-	// Also record push MFA method for user
-	_ = e.store.SetMFAMethod(&store.MFAMethod{
+	enrolled, err := e.store.RegisterNativeDeviceWithPairingToken(validToken.ID, device, &store.MFAMethod{
 		ID:         uuid.New().String(),
 		UserID:     validToken.UserID,
 		MethodType: "push",
 		IsPrimary:  false,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if !enrolled {
+		return nil, errors.New("pairing token has already been redeemed or expired")
+	}
 
 	return device, nil
 }

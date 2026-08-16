@@ -314,3 +314,54 @@ func TestExpiredPairingTokenIsRejected(t *testing.T) {
 		t.Error("an expired pairing token was accepted")
 	}
 }
+
+func TestMFAResetExpiresPendingDevicePairingTokens(t *testing.T) {
+	e, db, _, cleanup := setupTestMFAEngine(t)
+	defer cleanup()
+	u := mfaUser(t, db)
+
+	_, pub := signingKey(t)
+	token, _, _, err := e.GenerateDevicePairingToken(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteUserMFAMethods(u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.RegisterNativeDevice(&NativeDeviceRegisterRequest{
+		PairingToken: token, DeviceName: "after-reset", DeviceIdentifier: "dev-reset", PublicKey: pub,
+	}); err == nil {
+		t.Error("a pending pairing token was accepted after MFA reset")
+	}
+	if devices, _ := db.ListUserNativeDevices(u.ID); len(devices) != 0 {
+		t.Fatalf("expected no device to be enrolled after reset, got %d", len(devices))
+	}
+}
+
+func TestPairingTokenCannotBeConsumedAfterExpiry(t *testing.T) {
+	e, db, _, cleanup := setupTestMFAEngine(t)
+	defer cleanup()
+	u := mfaUser(t, db)
+
+	token, _, _, err := e.GenerateDevicePairingToken(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validToken, err := db.GetValidDevicePairingToken(crypto.HashSHA256(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validToken == nil {
+		t.Fatal("generated token was not valid")
+	}
+	if err := db.ExpireDevicePairingTokens(u.ID, time.Now().UTC().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	spent, err := db.ConsumeDevicePairingToken(validToken.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spent {
+		t.Error("an expired pairing token was consumed after a stale lookup")
+	}
+}

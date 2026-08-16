@@ -901,9 +901,10 @@ func (s *Store) DeleteExpiredDevicePairingTokens() error {
 // ConsumeDevicePairingToken atomically spends a pairing token, reporting false if another
 // registration spent it first.
 func (s *Store) ConsumeDevicePairingToken(tokenID string) (bool, error) {
+	now := time.Now().UTC()
 	res, err := s.db.Exec(
-		`UPDATE device_pairing_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL`,
-		time.Now().UTC(), tokenID)
+		`UPDATE device_pairing_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?`,
+		now, tokenID, now)
 	if err != nil {
 		return false, err
 	}
@@ -912,6 +913,59 @@ func (s *Store) ConsumeDevicePairingToken(tokenID string) (bool, error) {
 		return false, err
 	}
 	return n == 1, nil
+}
+
+// RegisterNativeDeviceWithPairingToken atomically spends a live pairing token and
+// enrols the device as a push MFA approver.
+func (s *Store) RegisterNativeDeviceWithPairingToken(tokenID string, dev *NativeDevice, method *MFAMethod) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	res, err := tx.Exec(
+		`UPDATE device_pairing_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?`,
+		now, tokenID, now)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n != 1 {
+		return false, nil
+	}
+
+	dev.CreatedAt = now
+	dev.LastSeenAt = &now
+	if _, err := tx.Exec(`
+		INSERT INTO native_devices (id, user_id, device_name, device_identifier, public_key, push_token, is_mfa_approver, last_seen_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, device_identifier) DO UPDATE SET
+			device_name = excluded.device_name,
+			public_key = excluded.public_key,
+			push_token = excluded.push_token,
+			is_mfa_approver = excluded.is_mfa_approver,
+			last_seen_at = excluded.last_seen_at
+	`, dev.ID, dev.UserID, dev.DeviceName, dev.DeviceIdentifier, dev.PublicKey, dev.PushToken, dev.IsMFAApprover, dev.LastSeenAt, dev.CreatedAt); err != nil {
+		return false, err
+	}
+
+	method.CreatedAt = now
+	if _, err := tx.Exec(`
+		INSERT INTO mfa_methods (id, user_id, method_type, encrypted_secret, is_primary, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, method_type) DO UPDATE SET
+			encrypted_secret = excluded.encrypted_secret,
+			is_primary = excluded.is_primary
+	`, method.ID, method.UserID, method.MethodType, method.EncryptedSecret, method.IsPrimary, method.CreatedAt); err != nil {
+		return false, err
+	}
+
+	return true, tx.Commit()
 }
 
 func (s *Store) UpsertNativeDevice(dev *NativeDevice) error {
@@ -1037,16 +1091,25 @@ func (s *Store) ListUserMFAMethods(userID string) ([]MFAMethod, error) {
 }
 
 func (s *Store) DeleteUserMFAMethods(userID string) error {
-	_, err := s.db.Exec(`DELETE FROM mfa_methods WHERE user_id = ?`, userID)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`DELETE FROM recovery_codes WHERE user_id = ?`, userID)
-	if err != nil {
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM mfa_methods WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE native_devices SET is_mfa_approver = 0 WHERE user_id = ?`, userID)
-	return err
+	if _, err := tx.Exec(`DELETE FROM recovery_codes WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE native_devices SET is_mfa_approver = 0 WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE device_pairing_tokens SET expires_at = ? WHERE user_id = ? AND used_at IS NULL`, time.Now().UTC(), userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // MFA Challenges

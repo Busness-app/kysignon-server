@@ -4,11 +4,13 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/url"
 	"strconv"
 	"strings"
@@ -255,26 +257,46 @@ func (e *Engine) RegisterNativeDevice(req *NativeDeviceRegisterRequest) (*store.
 	return device, nil
 }
 
+// randomMatchNumber returns a uniformly distributed number in [10, 99].
+func randomMatchNumber() (int, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(90))
+	if err != nil {
+		return 0, err
+	}
+	return int(n.Int64()) + 10, nil
+}
+
 // CreatePushChallenge creates a push challenge with a 2-digit match and 3 decoys.
 func (e *Engine) CreatePushChallenge(userID string) (*store.MFAChallenge, error) {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	matchNum := int(b[0]%90) + 10 // 10-99
+	matchNum, err := randomMatchNumber()
+	if err != nil {
+		return nil, err
+	}
 	matchDigits := strconv.Itoa(matchNum)
 
-	// Generate 3 unique decoys
-	decoysMap := map[int]bool{matchNum: true}
-	var decoys []string
-	for idx := 1; len(decoys) < 3; idx++ {
-		decoyNum := int(b[idx%4]%90) + 10
-		if !decoysMap[decoyNum] {
-			decoysMap[decoyNum] = true
-			decoys = append(decoys, strconv.Itoa(decoyNum))
+	// Generate 3 unique decoys. The attempt cap keeps this bounded even if the
+	// entropy source misbehaves; 90 candidates for 3 slots makes 200 tries ample.
+	seen := map[int]bool{matchNum: true}
+	decoys := make([]string, 0, 3)
+	for attempts := 0; len(decoys) < 3; attempts++ {
+		if attempts > 200 {
+			return nil, errors.New("failed to generate distinct decoy digits")
 		}
-		_, _ = rand.Read(b)
+		decoyNum, err := randomMatchNumber()
+		if err != nil {
+			return nil, err
+		}
+		if seen[decoyNum] {
+			continue
+		}
+		seen[decoyNum] = true
+		decoys = append(decoys, strconv.Itoa(decoyNum))
 	}
 
-	decoysJSON, _ := json.Marshal(decoys)
+	decoysJSON, err := json.Marshal(decoys)
+	if err != nil {
+		return nil, err
+	}
 
 	challenge := &store.MFAChallenge{
 		ID:              uuid.New().String(),
@@ -293,48 +315,153 @@ func (e *Engine) CreatePushChallenge(userID string) (*store.MFAChallenge, error)
 	return challenge, nil
 }
 
-// RespondPushChallenge processes the match number submitted by a paired mobile client.
-func (e *Engine) RespondPushChallenge(challengeID, selectedDigits string, approve bool) (bool, error) {
-	ch, err := e.store.GetMFAChallenge(challengeID)
-	if err != nil {
-		return false, err
-	}
-	if ch == nil {
-		return false, errors.New("challenge not found")
-	}
+// ErrUnsignedDevice reports that no paired device is able to sign push responses, so no
+// response can be authenticated. The user must re-pair an authenticator.
+var ErrUnsignedDevice = errors.New("no paired device is enrolled for response signing")
 
-	if ch.Status != "pending" {
-		return false, errors.New("challenge is no longer pending")
+// PushResponseMessage builds the exact byte string a device must sign to answer a challenge.
+// The version prefix domain-separates this from future payloads that carry key material.
+func PushResponseMessage(challengeID string, approve bool, selectedDigits string) []byte {
+	verb := "deny"
+	if approve {
+		verb = "approve"
 	}
-
-	if time.Now().UTC().After(ch.ExpiresAt) {
-		_ = e.store.UpdateMFAChallengeStatus(ch.ID, "expired")
-		return false, errors.New("challenge expired")
-	}
-
-	if !approve || selectedDigits != ch.MatchDigits {
-		_ = e.store.UpdateMFAChallengeStatus(ch.ID, "denied")
-		return false, nil
-	}
-
-	_ = e.store.UpdateMFAChallengeStatus(ch.ID, "approved")
-	return true, nil
+	return []byte(strings.Join([]string{"kysignon-push-v1", challengeID, verb, selectedDigits}, "|"))
 }
 
-// CheckPushChallenge checks the current status of a push challenge.
-func (e *Engine) CheckPushChallenge(challengeID string) (status string, err error) {
+// verifyDeviceSignature finds the paired approver device whose key signed this response.
+// A response that no enrolled device signed is not a response.
+func (e *Engine) verifyDeviceSignature(userID string, message []byte, signature string) (*store.NativeDevice, error) {
+	devices, err := e.store.ListUserNativeDevices(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	enrolled := false
+	for i := range devices {
+		dev := &devices[i]
+		if !dev.IsMFAApprover || dev.PublicKey == "" {
+			continue
+		}
+		enrolled = true
+		if crypto.VerifyECDSAP256(dev.PublicKey, message, signature) {
+			return dev, nil
+		}
+	}
+
+	if !enrolled {
+		return nil, ErrUnsignedDevice
+	}
+	return nil, errors.New("signature does not match any paired device")
+}
+
+// RespondPushChallenge processes a signed response from a paired mobile authenticator.
+// The signature is the authentication for this endpoint: it is verified before the
+// challenge is touched, and an unsigned response is always rejected.
+func (e *Engine) RespondPushChallenge(challengeID, selectedDigits string, approve bool, signature string) (approved bool, deviceID string, err error) {
 	ch, err := e.store.GetMFAChallenge(challengeID)
 	if err != nil {
-		return "", err
+		return false, "", err
 	}
 	if ch == nil {
-		return "", errors.New("challenge not found")
+		return false, "", errors.New("challenge not found")
+	}
+	if ch.Status != "pending" {
+		return false, "", errors.New("challenge is no longer pending")
+	}
+	if time.Now().UTC().After(ch.ExpiresAt) {
+		_, _ = e.store.TransitionMFAChallengeStatus(ch.ID, "pending", "expired")
+		return false, "", errors.New("challenge expired")
+	}
+
+	device, err := e.verifyDeviceSignature(ch.UserID, PushResponseMessage(challengeID, approve, selectedDigits), signature)
+	if err != nil {
+		return false, "", err
+	}
+
+	if !approve || subtle.ConstantTimeCompare([]byte(selectedDigits), []byte(ch.MatchDigits)) != 1 {
+		ok, err := e.store.TransitionMFAChallengeStatus(ch.ID, "pending", "denied")
+		if err != nil {
+			return false, device.ID, err
+		}
+		if !ok {
+			return false, device.ID, errors.New("challenge is no longer pending")
+		}
+		return false, device.ID, nil
+	}
+
+	ok, err := e.store.TransitionMFAChallengeStatus(ch.ID, "pending", "approved")
+	if err != nil {
+		return false, device.ID, err
+	}
+	if !ok {
+		return false, device.ID, errors.New("challenge is no longer pending")
+	}
+	return true, device.ID, nil
+}
+
+// CheckPushChallenge returns the current status of a push challenge along with its owner,
+// so callers can confirm the challenge belongs to the user they think it does.
+func (e *Engine) CheckPushChallenge(challengeID string) (status, userID string, err error) {
+	ch, err := e.store.GetMFAChallenge(challengeID)
+	if err != nil {
+		return "", "", err
+	}
+	if ch == nil {
+		return "", "", errors.New("challenge not found")
 	}
 
 	if ch.Status == "pending" && time.Now().UTC().After(ch.ExpiresAt) {
-		_ = e.store.UpdateMFAChallengeStatus(ch.ID, "expired")
-		return "expired", nil
+		if ok, err := e.store.TransitionMFAChallengeStatus(ch.ID, "pending", "expired"); err == nil && ok {
+			return "expired", ch.UserID, nil
+		}
 	}
 
-	return ch.Status, nil
+	return ch.Status, ch.UserID, nil
+}
+
+// MFATokenTTL bounds how long a second factor may be completed after the password step.
+const MFATokenTTL = 5 * time.Minute
+
+// IssueMFAToken mints a single-use token recording that the primary factor passed for this
+// user. Only the hash is stored, so a leaked database cannot be used to complete a login.
+func (e *Engine) IssueMFAToken(userID, challengeID string) (string, error) {
+	raw, err := crypto.GenerateRandomHex(32)
+	if err != nil {
+		return "", err
+	}
+
+	token := &store.MFAToken{
+		ID:          uuid.New().String(),
+		UserID:      userID,
+		TokenHash:   crypto.HashSHA256(raw),
+		ChallengeID: challengeID,
+		ExpiresAt:   time.Now().UTC().Add(MFATokenTTL),
+	}
+	if err := e.store.CreateMFAToken(token); err != nil {
+		return "", err
+	}
+
+	return raw, nil
+}
+
+// ValidateMFAToken resolves a raw token to its stored record without consuming it.
+// The user identity comes from the record, never from the client-supplied string.
+func (e *Engine) ValidateMFAToken(rawToken string) (*store.MFAToken, error) {
+	if rawToken == "" || len(rawToken) > 256 {
+		return nil, errors.New("invalid mfa token")
+	}
+	token, err := e.store.GetValidMFAToken(crypto.HashSHA256(strings.TrimSpace(rawToken)))
+	if err != nil {
+		return nil, err
+	}
+	if token == nil {
+		return nil, errors.New("invalid or expired mfa token")
+	}
+	return token, nil
+}
+
+// ConsumeMFAToken spends a token. It reports false if another request spent it first.
+func (e *Engine) ConsumeMFAToken(tokenID string) (bool, error) {
+	return e.store.ConsumeMFAToken(tokenID)
 }

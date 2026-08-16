@@ -66,14 +66,14 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
 
   // Push Challenge Poller
   useEffect(() => {
-    if (!mfaRequired || mfaMode !== 'push' || !challengeId) return;
+    if (!mfaRequired || mfaMode !== 'push' || !challengeId || !mfaToken) return;
 
     let isMounted = true;
     const interval = setInterval(async () => {
       try {
         const poll = await apiRequest('/api/auth/mfa/push/poll', {
           method: 'POST',
-          body: JSON.stringify({ challengeId }),
+          body: JSON.stringify({ mfaToken, challengeId }),
         });
 
         if (!isMounted) return;

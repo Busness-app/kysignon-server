@@ -145,6 +145,17 @@ func (s *Store) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_mfa_challenges_user ON mfa_challenges(user_id);
 
+	CREATE TABLE IF NOT EXISTS mfa_tokens (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		token_hash TEXT NOT NULL UNIQUE,
+		challenge_id TEXT,
+		expires_at DATETIME NOT NULL,
+		used_at DATETIME,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_mfa_tokens_hash ON mfa_tokens(token_hash);
+
 	CREATE TABLE IF NOT EXISTS recovery_codes (
 		id TEXT PRIMARY KEY,
 		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -644,8 +655,69 @@ func (s *Store) GetMFAChallenge(challengeID string) (*MFAChallenge, error) {
 	return ch, err
 }
 
-func (s *Store) UpdateMFAChallengeStatus(challengeID, status string) error {
-	_, err := s.db.Exec(`UPDATE mfa_challenges SET status = ? WHERE id = ?`, status, challengeID)
+// TransitionMFAChallengeStatus atomically moves a challenge from one status to another.
+// It reports false when the challenge was not in the expected starting status, so concurrent
+// responders cannot both observe a successful transition.
+func (s *Store) TransitionMFAChallengeStatus(challengeID, from, to string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE mfa_challenges SET status = ? WHERE id = ? AND status = ?`, to, challengeID, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// MFA Tokens
+func (s *Store) CreateMFAToken(t *MFAToken) error {
+	query := `INSERT INTO mfa_tokens (id, user_id, token_hash, challenge_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+	t.CreatedAt = time.Now().UTC()
+	var challengeID any
+	if t.ChallengeID != "" {
+		challengeID = t.ChallengeID
+	}
+	_, err := s.db.Exec(query, t.ID, t.UserID, t.TokenHash, challengeID, t.ExpiresAt, t.CreatedAt)
+	return err
+}
+
+// GetValidMFAToken returns an unused, unexpired token by its hash, or nil.
+func (s *Store) GetValidMFAToken(tokenHash string) (*MFAToken, error) {
+	query := `SELECT id, user_id, token_hash, challenge_id, expires_at, used_at, created_at
+	          FROM mfa_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`
+	t := &MFAToken{}
+	var challengeID sql.NullString
+	err := s.db.QueryRow(query, tokenHash, time.Now().UTC()).
+		Scan(&t.ID, &t.UserID, &t.TokenHash, &challengeID, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if challengeID.Valid {
+		t.ChallengeID = challengeID.String
+	}
+	return t, nil
+}
+
+// ConsumeMFAToken atomically marks a token used. It reports false if it was already consumed.
+func (s *Store) ConsumeMFAToken(tokenID string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE mfa_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL`, time.Now().UTC(), tokenID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// DeleteExpiredMFATokens removes spent and expired tokens.
+func (s *Store) DeleteExpiredMFATokens() error {
+	_, err := s.db.Exec(`DELETE FROM mfa_tokens WHERE expires_at < ?`, time.Now().UTC())
 	return err
 }
 

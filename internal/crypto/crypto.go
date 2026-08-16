@@ -4,6 +4,9 @@ import (
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -129,6 +132,67 @@ func DecryptAESGCM(key []byte, ciphertextBase64 string) ([]byte, error) {
 	}
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
+// decodeBase64Any decodes standard, raw-standard, or raw-URL base64.
+// Mobile SDKs disagree about padding and alphabet; the server should not care.
+func decodeBase64Any(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		if b, err := enc.DecodeString(s); err == nil {
+			return b, nil
+		}
+	}
+	return nil, errors.New("value is not valid base64")
+}
+
+// ParseP256PublicKey parses a base64 P-256 public key in either SPKI DER or uncompressed
+// SEC1 point form. The point is validated as on-curve and non-identity; an invalid encoding
+// is always an error and never a usable key.
+func ParseP256PublicKey(encoded string) (*ecdsa.PublicKey, error) {
+	raw, err := decodeBase64Any(encoded)
+	if err != nil {
+		return nil, err
+	}
+
+	if parsed, err := x509.ParsePKIXPublicKey(raw); err == nil {
+		pub, ok := parsed.(*ecdsa.PublicKey)
+		if !ok || pub.Curve != elliptic.P256() {
+			return nil, errors.New("public key is not P-256")
+		}
+		return pub, nil
+	}
+
+	// crypto/ecdh rejects off-curve points, the identity, and wrong lengths.
+	if _, err := ecdh.P256().NewPublicKey(raw); err != nil {
+		return nil, fmt.Errorf("invalid P-256 public key: %w", err)
+	}
+
+	return &ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     new(big.Int).SetBytes(raw[1:33]),
+		Y:     new(big.Int).SetBytes(raw[33:65]),
+	}, nil
+}
+
+// VerifyECDSAP256 verifies an ASN.1 DER ECDSA signature over SHA-256(message) against a
+// base64-encoded P-256 public key. Any parse failure is a verification failure.
+func VerifyECDSAP256(publicKey string, message []byte, signature string) bool {
+	pub, err := ParseP256PublicKey(publicKey)
+	if err != nil {
+		return false
+	}
+	sig, err := decodeBase64Any(signature)
+	if err != nil {
+		return false
+	}
+	digest := sha256.Sum256(message)
+	return ecdsa.VerifyASN1(pub, digest[:], sig)
 }
 
 // JWTKeyManager manages RSA keys for OIDC ID Token signing and JWKS.

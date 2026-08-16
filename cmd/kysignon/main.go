@@ -89,6 +89,7 @@ func main() {
 				return
 			case <-ticker.C:
 				_ = dbStore.CleanupExpiredSessions()
+				_ = dbStore.DeleteExpiredMFATokens()
 			}
 		}
 	}()

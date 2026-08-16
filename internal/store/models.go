@@ -102,6 +102,18 @@ type MFAChallenge struct {
 	CreatedAt       time.Time `json:"createdAt"`
 }
 
+// MFAToken is a single-use, server-side bearer token issued after primary password
+// verification and redeemed by exactly one second-factor completion.
+type MFAToken struct {
+	ID          string     `json:"id"`
+	UserID      string     `json:"userId"`
+	TokenHash   string     `json:"-"`
+	ChallengeID string     `json:"challengeId,omitempty"`
+	ExpiresAt   time.Time  `json:"expiresAt"`
+	UsedAt      *time.Time `json:"usedAt,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+}
+
 type RecoveryCode struct {
 	ID        string     `json:"id"`
 	UserID    string     `json:"userId"`

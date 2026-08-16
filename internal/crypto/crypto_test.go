@@ -1,6 +1,12 @@
 package crypto
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,5 +85,74 @@ func TestRSAKeyAndJWTSigning(t *testing.T) {
 
 	if parsedClaims["sub"] != "user-uuid-123" {
 		t.Fatalf("claims sub mismatch: got %v", parsedClaims["sub"])
+	}
+}
+
+func TestParseP256PublicKeyRejectsInvalidPoints(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey failed: %v", err)
+	}
+
+	spki, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	sec1 := elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y)
+
+	for name, encoded := range map[string]string{
+		"spki der":            base64.StdEncoding.EncodeToString(spki),
+		"uncompressed sec1":   base64.StdEncoding.EncodeToString(sec1),
+		"raw url without pad": base64.RawURLEncoding.EncodeToString(spki),
+	} {
+		if _, err := ParseP256PublicKey(encoded); err != nil {
+			t.Fatalf("%s should parse, got %v", name, err)
+		}
+	}
+
+	offCurve := append([]byte{}, sec1...)
+	offCurve[len(offCurve)-1] ^= 0x01
+
+	for name, encoded := range map[string]string{
+		"empty":           "",
+		"not base64":      "!!!!",
+		"truncated":       base64.StdEncoding.EncodeToString(sec1[:32]),
+		"identity":        base64.StdEncoding.EncodeToString(make([]byte, 65)),
+		"off-curve point": base64.StdEncoding.EncodeToString(offCurve),
+		"random garbage":  base64.StdEncoding.EncodeToString([]byte("this is not a public key at all")),
+	} {
+		if _, err := ParseP256PublicKey(encoded); err == nil {
+			t.Fatalf("%s must be rejected, but parsed successfully", name)
+		}
+	}
+}
+
+func TestVerifyECDSAP256(t *testing.T) {
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	spki, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	pub := base64.StdEncoding.EncodeToString(spki)
+
+	msg := []byte("kysignon-push-v1|challenge|approve|42")
+	digest := sha256.Sum256(msg)
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	if err != nil {
+		t.Fatalf("SignASN1 failed: %v", err)
+	}
+	sigB64 := base64.StdEncoding.EncodeToString(sig)
+
+	if !VerifyECDSAP256(pub, msg, sigB64) {
+		t.Fatal("a valid signature failed to verify")
+	}
+	if VerifyECDSAP256(pub, []byte("kysignon-push-v1|challenge|deny|42"), sigB64) {
+		t.Fatal("signature verified against a different message")
+	}
+	if VerifyECDSAP256(pub, msg, "") {
+		t.Fatal("empty signature verified")
+	}
+	if VerifyECDSAP256("", msg, sigB64) {
+		t.Fatal("empty public key verified")
+	}
+
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	otherSPKI, _ := x509.MarshalPKIXPublicKey(&other.PublicKey)
+	if VerifyECDSAP256(base64.StdEncoding.EncodeToString(otherSPKI), msg, sigB64) {
+		t.Fatal("signature verified against the wrong public key")
 	}
 }

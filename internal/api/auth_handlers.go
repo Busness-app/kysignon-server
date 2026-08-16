@@ -2,8 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
@@ -115,22 +115,17 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(methodTypes) > 0 {
-		mfaToken, err := crypto.GenerateRandomHex(32)
-		if err != nil {
-			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
-			return
-		}
-
 		resp := LoginResponse{
 			Success:     false,
 			MFARequired: true,
-			MFAToken:    mfaToken + ":" + user.ID, // ephemeral token for second-factor completion
 			MFAMethods:  methodTypes,
 		}
 
+		var challengeID string
 		if hasPush {
 			challenge, err := h.mfaEngine.CreatePushChallenge(user.ID)
 			if err == nil && challenge != nil {
+				challengeID = challenge.ID
 				resp.ChallengeID = challenge.ID
 				resp.MatchDigits = challenge.MatchDigits
 				var decoys []string
@@ -138,6 +133,15 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 				resp.DecoyDigits = decoys
 			}
 		}
+
+		// The token is persisted and bound to this user and challenge. The user identity is
+		// read back from that record on completion; it is never parsed from client input.
+		mfaToken, err := h.mfaEngine.IssueMFAToken(user.ID, challengeID)
+		if err != nil {
+			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+			return
+		}
+		resp.MFAToken = mfaToken
 
 		h.audit.Record("auth.mfa_challenge", user.ID, user.Username, user.ID, "user", ip, ua, "success", map[string]any{"methods": methodTypes})
 		w.Header().Set("Content-Type", "application/json")
@@ -205,6 +209,38 @@ type MFAVerifyRequest struct {
 	Code     string `json:"code"`
 }
 
+// resolveMFAToken exchanges a raw second-factor token for the user it was issued to.
+// The identity comes from the stored record, so a forged token resolves to nothing.
+func (h *AuthHandler) resolveMFAToken(w http.ResponseWriter, rawToken string) (*store.MFAToken, *store.User, bool) {
+	token, err := h.mfaEngine.ValidateMFAToken(rawToken)
+	if err != nil {
+		http.Error(w, `{"error":"invalid_mfa_token","error_description":"Second-factor token is invalid or expired"}`, http.StatusUnauthorized)
+		return nil, nil, false
+	}
+
+	user, err := h.store.GetUserByID(token.UserID)
+	if err != nil || user == nil || user.Status != "active" {
+		http.Error(w, `{"error":"invalid_user"}`, http.StatusUnauthorized)
+		return nil, nil, false
+	}
+
+	return token, user, true
+}
+
+// spendMFAToken consumes the token exactly once. A losing racer gets no session.
+func (h *AuthHandler) spendMFAToken(w http.ResponseWriter, token *store.MFAToken) bool {
+	spent, err := h.mfaEngine.ConsumeMFAToken(token.ID)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return false
+	}
+	if !spent {
+		http.Error(w, `{"error":"invalid_mfa_token","error_description":"Second-factor token already used"}`, http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 // VerifyTOTP verifies a TOTP code and finishes login.
 func (h *AuthHandler) VerifyTOTP(w http.ResponseWriter, r *http.Request) {
 	var req MFAVerifyRequest
@@ -213,23 +249,19 @@ func (h *AuthHandler) VerifyTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parts := strings.Split(req.MFAToken, ":")
-	if len(parts) != 2 {
-		http.Error(w, `{"error":"invalid_mfa_token"}`, http.StatusUnauthorized)
-		return
-	}
-	userID := parts[1]
-
-	user, err := h.store.GetUserByID(userID)
-	if err != nil || user == nil || user.Status != "active" {
-		http.Error(w, `{"error":"invalid_user"}`, http.StatusUnauthorized)
+	token, user, ok := h.resolveMFAToken(w, req.MFAToken)
+	if !ok {
 		return
 	}
 
-	valid, err := h.mfaEngine.VerifyUserTOTP(userID, req.Code)
+	valid, err := h.mfaEngine.VerifyUserTOTP(user.ID, req.Code)
 	if err != nil || !valid {
-		h.audit.Record("auth.mfa_totp", userID, user.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", nil)
+		h.audit.Record("auth.mfa_totp", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", nil)
 		http.Error(w, `{"error":"invalid_totp_code","error_description":"Invalid 6-digit TOTP code"}`, http.StatusUnauthorized)
+		return
+	}
+
+	if !h.spendMFAToken(w, token) {
 		return
 	}
 
@@ -244,43 +276,50 @@ func (h *AuthHandler) VerifyRecoveryCode(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	parts := strings.Split(req.MFAToken, ":")
-	if len(parts) != 2 {
-		http.Error(w, `{"error":"invalid_mfa_token"}`, http.StatusUnauthorized)
-		return
-	}
-	userID := parts[1]
-
-	user, err := h.store.GetUserByID(userID)
-	if err != nil || user == nil || user.Status != "active" {
-		http.Error(w, `{"error":"invalid_user"}`, http.StatusUnauthorized)
+	token, user, ok := h.resolveMFAToken(w, req.MFAToken)
+	if !ok {
 		return
 	}
 
-	valid, err := h.mfaEngine.VerifyAndConsumeRecoveryCode(userID, req.Code)
+	valid, err := h.mfaEngine.VerifyAndConsumeRecoveryCode(user.ID, req.Code)
 	if err != nil || !valid {
-		h.audit.Record("auth.mfa_recovery", userID, user.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", nil)
+		h.audit.Record("auth.mfa_recovery", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", nil)
 		http.Error(w, `{"error":"invalid_recovery_code","error_description":"Invalid or already used recovery code"}`, http.StatusUnauthorized)
 		return
 	}
 
-	h.audit.Record("auth.mfa_recovery_consumed", userID, user.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	if !h.spendMFAToken(w, token) {
+		return
+	}
+
+	h.audit.Record("auth.mfa_recovery_consumed", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 	h.createSessionAndRespond(w, r, user)
 }
 
 type PushPollRequest struct {
+	MFAToken    string `json:"mfaToken"`
 	ChallengeID string `json:"challengeId"`
 }
 
-// PollPushChallenge checks the status of a pending push challenge.
+// PollPushChallenge checks the status of a pending push challenge. It requires the token
+// issued alongside that challenge, so a challenge ID alone reveals nothing.
 func (h *AuthHandler) PollPushChallenge(w http.ResponseWriter, r *http.Request) {
 	var req PushPollRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChallengeID == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChallengeID == "" || req.MFAToken == "" {
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
 
-	status, err := h.mfaEngine.CheckPushChallenge(req.ChallengeID)
+	token, _, ok := h.resolveMFAToken(w, req.MFAToken)
+	if !ok {
+		return
+	}
+	if token.ChallengeID == "" || token.ChallengeID != req.ChallengeID {
+		http.Error(w, `{"error":"challenge_mismatch","error_description":"Token was not issued for this challenge"}`, http.StatusUnauthorized)
+		return
+	}
+
+	status, _, err := h.mfaEngine.CheckPushChallenge(req.ChallengeID)
 	if err != nil {
 		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
 		return
@@ -295,7 +334,8 @@ type PushFinishRequest struct {
 	ChallengeID string `json:"challengeId"`
 }
 
-// FinishPushLogin establishes session after push challenge is approved.
+// FinishPushLogin establishes a session after a push challenge is approved. The token, the
+// challenge, and the user must all agree before anything is issued.
 func (h *AuthHandler) FinishPushLogin(w http.ResponseWriter, r *http.Request) {
 	var req PushFinishRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.MFAToken == "" || req.ChallengeID == "" {
@@ -303,26 +343,32 @@ func (h *AuthHandler) FinishPushLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parts := strings.Split(req.MFAToken, ":")
-	if len(parts) != 2 {
-		http.Error(w, `{"error":"invalid_mfa_token"}`, http.StatusUnauthorized)
+	token, user, ok := h.resolveMFAToken(w, req.MFAToken)
+	if !ok {
 		return
 	}
-	userID := parts[1]
-
-	user, err := h.store.GetUserByID(userID)
-	if err != nil || user == nil || user.Status != "active" {
-		http.Error(w, `{"error":"invalid_user"}`, http.StatusUnauthorized)
+	if token.ChallengeID == "" || token.ChallengeID != req.ChallengeID {
+		http.Error(w, `{"error":"challenge_mismatch","error_description":"Token was not issued for this challenge"}`, http.StatusUnauthorized)
 		return
 	}
 
-	status, err := h.mfaEngine.CheckPushChallenge(req.ChallengeID)
+	status, challengeUserID, err := h.mfaEngine.CheckPushChallenge(req.ChallengeID)
 	if err != nil || status != "approved" {
 		http.Error(w, `{"error":"mfa_not_approved","error_description":"Push challenge is not approved"}`, http.StatusUnauthorized)
 		return
 	}
+	if challengeUserID != user.ID {
+		h.audit.Record("auth.mfa_push_mismatch", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "denied",
+			map[string]any{"reason": "challenge_owner_mismatch", "challengeId": req.ChallengeID})
+		http.Error(w, `{"error":"mfa_not_approved","error_description":"Push challenge is not approved"}`, http.StatusUnauthorized)
+		return
+	}
 
-	h.audit.Record("auth.mfa_push_approved", userID, user.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	if !h.spendMFAToken(w, token) {
+		return
+	}
+
+	h.audit.Record("auth.mfa_push_approved", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 	h.createSessionAndRespond(w, r, user)
 }
 
@@ -330,24 +376,46 @@ type PushRespondRequest struct {
 	ChallengeID    string `json:"challengeId"`
 	SelectedDigits string `json:"selectedDigits"`
 	Approve        bool   `json:"approve"`
+	Signature      string `json:"signature"`
 }
 
-// RespondPush handles incoming match digits response from paired mobile authenticator.
+// RespondPush handles a signed response from a paired mobile authenticator. This endpoint has
+// no session; the device signature over the challenge is what authenticates it.
 func (h *AuthHandler) RespondPush(w http.ResponseWriter, r *http.Request) {
 	var req PushRespondRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChallengeID == "" {
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
-
-	ok, err := h.mfaEngine.RespondPushChallenge(req.ChallengeID, req.SelectedDigits, req.Approve)
-	if err != nil {
-		http.Error(w, `{"error":"challenge_error","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
+	if req.Signature == "" {
+		http.Error(w, `{"error":"signature_required","error_description":"Push responses must be signed by a paired device"}`, http.StatusUnauthorized)
 		return
 	}
 
+	approved, deviceID, err := h.mfaEngine.RespondPushChallenge(req.ChallengeID, req.SelectedDigits, req.Approve, req.Signature)
+	if err != nil {
+		ip := h.middleware.ClientIP(r)
+		if errors.Is(err, mfa.ErrUnsignedDevice) {
+			h.audit.Record("auth.mfa_push_respond", "", "", req.ChallengeID, "mfa_challenge", ip, r.UserAgent(), "denied",
+				map[string]any{"reason": "no_signing_device"})
+			http.Error(w, `{"error":"device_not_enrolled_for_signing","error_description":"Re-pair your authenticator to approve sign-ins"}`, http.StatusUnauthorized)
+			return
+		}
+		h.audit.Record("auth.mfa_push_respond", "", "", req.ChallengeID, "mfa_challenge", ip, r.UserAgent(), "failure",
+			map[string]any{"reason": err.Error()})
+		http.Error(w, `{"error":"challenge_error","error_description":"Challenge could not be answered"}`, http.StatusBadRequest)
+		return
+	}
+
+	outcome := "denied"
+	if approved {
+		outcome = "success"
+	}
+	h.audit.Record("auth.mfa_push_respond", "", "", req.ChallengeID, "mfa_challenge", h.middleware.ClientIP(r), r.UserAgent(), outcome,
+		map[string]any{"deviceId": deviceID})
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"success": ok})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"success": approved})
 }
 
 // PullNotifications provides pull queue for clients without direct push relays.

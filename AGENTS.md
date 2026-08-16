@@ -10,6 +10,12 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 4. **Native Device Pairing & Push MFA**: Natively hosts device pairing (`/api/notifications/native/register`) using 90s PIN/QR codes, push challenge dispatch with 2-digit number matching, and TOTP/recovery code support.
 5. **Dashboard & Application Launcher**: KySecurity Patina themed interface (dark `#0d0f14`, cyan `#4deeea`, Space Grotesk, IBM Plex Mono) using `css/styles.css` and local fonts.
 
+## Security Invariants
+
+- Public deployments require an HTTPS issuer and secure session cookies; loopback HTTP is development-only.
+- Account creation and updates write their replication outbox events in the same database transaction. The final active administrator cannot be deleted, disabled, or demoted.
+- Sensitive API and OAuth responses are `no-store`; registered redirect and launcher URLs must be HTTPS, except loopback HTTP for development.
+
 # Ponytail, lazy senior dev mode
 
 Use the smallest correct change.

@@ -213,6 +213,34 @@ func TestServerHasTimeouts(t *testing.T) {
 	}
 }
 
+func TestSensitiveRoutesAreNoStoreAndCSPForbidsInlineScript(t *testing.T) {
+	srv, _, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if strings.Contains(rec.Header().Get("Content-Security-Policy"), "script-src 'self' 'unsafe-inline'") {
+		t.Fatal("CSP still permits inline scripts")
+	}
+}
+
+func TestRegisteredURLsRejectUnsafeSchemes(t *testing.T) {
+	for _, raw := range []string{"javascript:alert(1)", "http://example.test/callback", "https://user@example.test/callback#fragment"} {
+		if err := validateExternalURL(raw); err == nil {
+			t.Errorf("unsafe URL %q was accepted", raw)
+		}
+	}
+	if err := validateExternalURL("https://app.example.test/callback"); err != nil {
+		t.Fatalf("HTTPS URL rejected: %v", err)
+	}
+	if err := validateExternalURL("http://localhost:3000/callback"); err != nil {
+		t.Fatalf("loopback HTTP URL rejected: %v", err)
+	}
+}
+
 // An unbounded body on an unauthenticated endpoint is a memory exhaustion primitive.
 func TestOversizedRequestBodyIsRejected(t *testing.T) {
 	srv, _, _, _, _, cleanup := setupTestServer(t)

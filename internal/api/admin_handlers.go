@@ -2,7 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -97,20 +101,10 @@ func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Status:       req.Status,
 	}
 
-	if err := h.store.CreateUser(user); err != nil {
+	if err := h.syncEngine.CreateUserAndQueueSyncEvents(user, userSyncPayload(user)); err != nil {
 		http.Error(w, `{"error":"user_exists","error_description":"Username or email already exists"}`, http.StatusConflict)
 		return
 	}
-
-	// Queue account replication to downstream KySecurity products
-	_ = h.syncEngine.QueueAccountSyncEvent(user.ID, "user.created", map[string]any{
-		"id":          user.ID,
-		"username":    user.Username,
-		"displayName": user.DisplayName,
-		"email":       user.Email,
-		"role":        user.Role,
-		"status":      user.Status,
-	})
 
 	h.audit.Record("admin.user_created", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"username": user.Username,
@@ -148,54 +142,45 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.DisplayName != "" {
+	if req.DisplayName = strings.TrimSpace(req.DisplayName); req.DisplayName != "" {
 		user.DisplayName = req.DisplayName
 	}
-	if req.Email != "" {
+	if req.Email = strings.TrimSpace(req.Email); req.Email != "" {
 		user.Email = req.Email
 	}
 	if req.Role == "user" || req.Role == "admin" {
 		user.Role = req.Role
 	}
+	wasActive := user.Status == "active"
 	if req.Status == "active" || req.Status == "disabled" {
 		user.Status = req.Status
-		if user.Status == "disabled" {
-			_ = h.store.DeleteUserSessions(user.ID)
-			// Sessions alone are not deprovisioning: access tokens already issued keep
-			// working until they expire unless they are revoked here.
-			_ = h.store.RevokeUserTokens(user.ID)
-		}
 	}
 
-	if err := h.store.UpdateUser(user); err != nil {
-		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
-		return
-	}
-
+	passwordChanged := req.Password != ""
 	if req.Password != "" {
 		passHash, err := auth.HashPassword(req.Password)
 		if err != nil {
 			http.Error(w, `{"error":"password_policy","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
 			return
 		}
-		if err := h.store.UpdateUserPassword(user.ID, passHash); err != nil {
+		user.PasswordHash = passHash
+	}
+
+	revokeAccess := passwordChanged || (wasActive && user.Status == "disabled")
+	if err := h.syncEngine.UpdateUserAndQueueSyncEvents(user, revokeAccess, userSyncPayload(user)); err != nil {
+		if errors.Is(err, store.ErrLastActiveAdmin) {
+			http.Error(w, `{"error":"cannot_remove_last_admin"}`, http.StatusBadRequest)
+		} else {
+			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		}
+		return
+	}
+	if passwordChanged {
+		if err := h.store.ClearFailedLogins(user.ID); err != nil {
 			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 			return
 		}
-		_ = h.store.DeleteUserSessions(user.ID)
-		_ = h.store.RevokeUserTokens(user.ID)
-		_ = h.store.ClearFailedLogins(user.ID)
 	}
-
-	// Queue account replication update
-	_ = h.syncEngine.QueueAccountSyncEvent(user.ID, "user.updated", map[string]any{
-		"id":          user.ID,
-		"username":    user.Username,
-		"displayName": user.DisplayName,
-		"email":       user.Email,
-		"role":        user.Role,
-		"status":      user.Status,
-	})
 
 	h.audit.Record("admin.user_updated", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"username": user.Username,
@@ -264,21 +249,15 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prevent deleting last active admin
-	if user.Role == "admin" {
-		count, _ := h.store.CountAdmins()
-		if count <= 1 {
-			http.Error(w, `{"error":"cannot_delete_last_admin","error_description":"Cannot delete the only active administrator"}`, http.StatusBadRequest)
-			return
-		}
-	}
-
-	_ = h.store.RevokeUserTokens(userID)
 	if err := h.syncEngine.DeleteUserAndQueueSyncEvents(userID, map[string]any{
 		"id":       userID,
 		"username": user.Username,
 	}); err != nil {
-		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		if errors.Is(err, store.ErrLastActiveAdmin) {
+			http.Error(w, `{"error":"cannot_delete_last_admin","error_description":"Cannot delete the only active administrator"}`, http.StatusBadRequest)
+		} else {
+			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		}
 		return
 	}
 
@@ -495,6 +474,10 @@ func (h *AdminHandler) CreateOAuthClient(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	if err := validateRegisteredURLs(req.RedirectURIs, req.LaunchURL); err != nil {
+		http.Error(w, `{"error":"invalid_request","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
 	redirectURIsJSON, _ := json.Marshal(req.RedirectURIs)
 	scopesJSON, _ := json.Marshal(req.AllowedScopes)
 
@@ -573,6 +556,10 @@ func (h *AdminHandler) UpdateOAuthClient(w http.ResponseWriter, r *http.Request)
 		client.ClientName = strings.TrimSpace(*req.ClientName)
 	}
 	if req.LaunchURL != nil {
+		if err := validateExternalURL(*req.LaunchURL); err != nil {
+			http.Error(w, `{"error":"invalid_request","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
+			return
+		}
 		client.LaunchURL = strings.TrimSpace(*req.LaunchURL)
 	}
 	if req.Enabled != nil {
@@ -581,6 +568,10 @@ func (h *AdminHandler) UpdateOAuthClient(w http.ResponseWriter, r *http.Request)
 	if req.RedirectURIs != nil {
 		if len(*req.RedirectURIs) == 0 {
 			http.Error(w, `{"error":"invalid_request","error_description":"At least one redirect URI is required"}`, http.StatusBadRequest)
+			return
+		}
+		if err := validateRegisteredURLs(*req.RedirectURIs, ""); err != nil {
+			http.Error(w, `{"error":"invalid_request","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
 			return
 		}
 		encoded, err := json.Marshal(*req.RedirectURIs)
@@ -704,6 +695,10 @@ func (h *AdminHandler) CreateApplication(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
+	if err := validateExternalURL(req.URL); err != nil {
+		http.Error(w, `{"error":"invalid_request","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
 
 	app := &store.Application{
 		ID:          uuid.New().String(),
@@ -724,6 +719,40 @@ func (h *AdminHandler) CreateApplication(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "application": app})
+}
+
+func userSyncPayload(user *store.User) map[string]any {
+	return map[string]any{"id": user.ID, "username": user.Username, "displayName": user.DisplayName, "email": user.Email, "role": user.Role, "status": user.Status}
+}
+
+func validateRegisteredURLs(redirectURIs []string, launchURL string) error {
+	for _, raw := range redirectURIs {
+		if err := validateExternalURL(raw); err != nil {
+			return fmt.Errorf("invalid redirect URI: %w", err)
+		}
+	}
+	if launchURL != "" {
+		return validateExternalURL(launchURL)
+	}
+	return nil
+}
+
+func validateExternalURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return errors.New("URL must be an absolute URL without credentials or a fragment")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" {
+		host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+		ip := net.ParseIP(host)
+		if host == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return errors.New("URL must use https (http is allowed only on loopback)")
 }
 
 func (h *AdminHandler) DeleteApplication(w http.ResponseWriter, r *http.Request) {

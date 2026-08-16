@@ -173,18 +173,7 @@ func (e *Engine) VerifyAndConsumeRecoveryCode(userID, code string) (bool, error)
 	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
 	codeHash := crypto.HashSHA256(normalized)
 
-	codes, err := e.store.GetValidRecoveryCodes(userID)
-	if err != nil {
-		return false, err
-	}
-
-	for _, c := range codes {
-		if c.CodeHash == codeHash {
-			_ = e.store.MarkRecoveryCodeUsed(c.ID)
-			return true, nil
-		}
-	}
-	return false, nil
+	return e.store.ConsumeRecoveryCode(userID, codeHash)
 }
 
 // GenerateDevicePairingToken generates a 90s ephemeral PIN & token for registering a native mobile device.

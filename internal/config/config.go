@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,10 @@ func Load() (*Config, error) {
 
 	port := getEnv("KYSIGNON_PORT", "5867")
 	issuerURL := strings.TrimRight(getEnv("KYSIGNON_ISSUER_URL", "http://localhost:"+port), "/")
+	issuer, err := url.Parse(issuerURL)
+	if err != nil || issuer.Hostname() == "" || (issuer.Scheme != "https" && !issuerIsLocal(issuer)) {
+		return nil, fmt.Errorf("KYSIGNON_ISSUER_URL must be an https URL (http is allowed only on loopback)")
+	}
 
 	secretKey, err := loadKey("KYSIGNON_SECRET_KEY", filepath.Join(dataDir, "secret.key"))
 	if err != nil {
@@ -75,9 +80,18 @@ func Load() (*Config, error) {
 		TrustedProxyCIDRs:     trustedCIDRs,
 		BootstrapUser:         getEnv("BOOTSTRAP_ADMIN_USER", "admin"),
 		BootstrapPass:         os.Getenv("BOOTSTRAP_ADMIN_PASS"),
-		SecureCookies:         strings.EqualFold(os.Getenv("KYSIGNON_SECURE_COOKIES"), "true"),
+		SecureCookies:         issuer.Scheme == "https" || strings.EqualFold(os.Getenv("KYSIGNON_SECURE_COOKIES"), "true"),
 		AllowPrivateCallbacks: strings.EqualFold(os.Getenv("KYSIGNON_ALLOW_PRIVATE_CALLBACKS"), "true"),
 	}, nil
+}
+
+func issuerIsLocal(u *url.URL) bool {
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func getEnv(key, defaultVal string) string {

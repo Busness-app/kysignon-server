@@ -50,6 +50,23 @@ func TestKeyPersistenceFailureIsFatal(t *testing.T) {
 	}
 }
 
+func TestMalformedExistingKeyIsFatalAndPreserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jwt.key")
+	if err := os.WriteFile(path, []byte("not a PEM"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateRSAKey(path); err == nil {
+		t.Fatal("malformed signing key was silently replaced")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != "not a PEM" {
+		t.Fatal("malformed signing key was overwritten")
+	}
+}
+
 func TestVerifyJWTRejectsTokenWithoutExp(t *testing.T) {
 	km, err := LoadOrCreateRSAKey(filepath.Join(t.TempDir(), "k.key"))
 	if err != nil {

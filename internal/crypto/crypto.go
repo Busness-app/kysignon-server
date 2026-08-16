@@ -219,22 +219,28 @@ type JWTKeyManager struct {
 func LoadOrCreateRSAKey(keyPath string) (*JWTKeyManager, error) {
 	var privKey *rsa.PrivateKey
 
-	if data, err := os.ReadFile(keyPath); err == nil {
+	data, err := os.ReadFile(keyPath)
+	if err == nil {
 		block, _ := pem.Decode(data)
-		if block != nil {
-			var parsedKey any
-			var parseErr error
-			if block.Type == "RSA PRIVATE KEY" {
-				parsedKey, parseErr = x509.ParsePKCS1PrivateKey(block.Bytes)
-			} else {
-				parsedKey, parseErr = x509.ParsePKCS8PrivateKey(block.Bytes)
-			}
-			if parseErr == nil {
-				if k, ok := parsedKey.(*rsa.PrivateKey); ok {
-					privKey = k
-				}
-			}
+		if block == nil {
+			return nil, fmt.Errorf("signing key %s is not PEM", keyPath)
 		}
+		var parsedKey any
+		var parseErr error
+		if block.Type == "RSA PRIVATE KEY" {
+			parsedKey, parseErr = x509.ParsePKCS1PrivateKey(block.Bytes)
+		} else {
+			parsedKey, parseErr = x509.ParsePKCS8PrivateKey(block.Bytes)
+		}
+		if parseErr != nil {
+			return nil, fmt.Errorf("failed to parse signing key %s: %w", keyPath, parseErr)
+		}
+		var ok bool
+		if privKey, ok = parsedKey.(*rsa.PrivateKey); !ok {
+			return nil, fmt.Errorf("signing key %s is not RSA", keyPath)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read signing key %s: %w", keyPath, err)
 	}
 
 	if privKey == nil {

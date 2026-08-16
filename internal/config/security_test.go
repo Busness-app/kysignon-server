@@ -112,6 +112,29 @@ func TestNoProxiesAreTrustedByDefault(t *testing.T) {
 	}
 }
 
+func TestPublicHTTPIssuerIsRejectedAndHTTPSForcesSecureCookies(t *testing.T) {
+	withEnv(t, map[string]string{
+		"KYSIGNON_DATA_DIR":   t.TempDir(),
+		"KYSIGNON_ISSUER_URL": "http://auth.example.test",
+	})
+	if _, err := Load(); err == nil {
+		t.Fatal("a public HTTP issuer was accepted")
+	}
+
+	withEnv(t, map[string]string{
+		"KYSIGNON_DATA_DIR":       t.TempDir(),
+		"KYSIGNON_ISSUER_URL":     "https://auth.example.test",
+		"KYSIGNON_SECURE_COOKIES": "false",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SecureCookies {
+		t.Fatal("HTTPS issuer did not force Secure cookies")
+	}
+}
+
 // A CIDR that does not parse must be reported, not skipped, or an operator's typo
 // silently drops their proxy out of the trusted set.
 func TestMalformedTrustedProxyCIDRIsRejected(t *testing.T) {

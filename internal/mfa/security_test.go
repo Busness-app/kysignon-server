@@ -167,6 +167,23 @@ func TestRecoveryCodeIsSingleUse(t *testing.T) {
 	}
 }
 
+func TestRecoveryCodeIsSingleUseUnderConcurrency(t *testing.T) {
+	e, db, _, cleanup := setupTestMFAEngine(t)
+	defer cleanup()
+	u := mfaUser(t, db)
+	codes, err := e.GenerateRecoveryCodes(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan bool, 2)
+	for range 2 {
+		go func() { ok, _ := e.VerifyAndConsumeRecoveryCode(u.ID, codes[0]); results <- ok }()
+	}
+	if (<-results) == (<-results) {
+		t.Fatal("concurrent redemption did not produce exactly one success")
+	}
+}
+
 // RFC 6238 §5.2: a TOTP value must not be accepted twice.
 func TestTOTPCodeCannotBeReplayed(t *testing.T) {
 	e, db, _, cleanup := setupTestMFAEngine(t)

@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -13,6 +14,8 @@ import (
 type Store struct {
 	db *sql.DB
 }
+
+var ErrLastActiveAdmin = errors.New("cannot remove the last active administrator")
 
 // New opens the SQLite database and creates the schema.
 func New(dbPath string) (*Store, error) {
@@ -319,6 +322,24 @@ func (s *Store) CreateUser(u *User) error {
 	return err
 }
 
+// CreateUserWithSyncEvents is the transactional outbox path for directory creation.
+func (s *Store) CreateUserWithSyncEvents(u *User, events []AccountSyncEvent) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC()
+	u.CreatedAt, u.UpdatedAt = now, now
+	if _, err := tx.Exec(`INSERT INTO users (id, username, display_name, email, password_hash, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, u.ID, u.Username, u.DisplayName, u.Email, u.PasswordHash, u.Role, u.Status, u.CreatedAt, u.UpdatedAt); err != nil {
+		return err
+	}
+	if err := insertSyncEvents(tx, events, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) GetUserByID(id string) (*User, error) {
 	query := `SELECT id, username, display_name, email, password_hash, role, status, created_at, updated_at FROM users WHERE id = ?`
 	u := &User{}
@@ -375,6 +396,46 @@ func (s *Store) UpdateUser(u *User) error {
 	return err
 }
 
+// UpdateUserWithSyncEvents preserves the active-admin invariant and writes its outbox event
+// in the same transaction as the account change.
+func (s *Store) UpdateUserWithSyncEvents(u *User, revokeAccess bool, events []AccountSyncEvent) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var oldRole, oldStatus string
+	if err := tx.QueryRow(`SELECT role, status FROM users WHERE id = ?`, u.ID).Scan(&oldRole, &oldStatus); err != nil {
+		return err
+	}
+	if oldRole == "admin" && oldStatus == "active" && (u.Role != "admin" || u.Status != "active") {
+		var admins int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active'`).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return ErrLastActiveAdmin
+		}
+	}
+	now := time.Now().UTC()
+	u.UpdatedAt = now
+	if _, err := tx.Exec(`UPDATE users SET display_name = ?, email = ?, password_hash = ?, role = ?, status = ?, updated_at = ? WHERE id = ?`, u.DisplayName, u.Email, u.PasswordHash, u.Role, u.Status, now, u.ID); err != nil {
+		return err
+	}
+	if revokeAccess {
+		if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ?`, u.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE issued_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`, now, u.ID); err != nil {
+			return err
+		}
+	}
+	if err := insertSyncEvents(tx, events, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) UpdateUserPassword(userID, passwordHash string) error {
 	query := `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`
 	_, err := s.db.Exec(query, passwordHash, time.Now().UTC(), userID)
@@ -407,6 +468,19 @@ func (s *Store) DeleteUserWithSyncEvents(userID string, events []AccountSyncEven
 		return err
 	}
 	defer tx.Rollback()
+	var role, status string
+	if err := tx.QueryRow(`SELECT role, status FROM users WHERE id = ?`, userID).Scan(&role, &status); err != nil {
+		return err
+	}
+	if role == "admin" && status == "active" {
+		var admins int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active'`).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return ErrLastActiveAdmin
+		}
+	}
 
 	if _, err := tx.Exec(`DELETE FROM account_sync_events WHERE user_id = ?`, userID); err != nil {
 		return err
@@ -421,18 +495,24 @@ func (s *Store) DeleteUserWithSyncEvents(userID string, events []AccountSyncEven
 		return sql.ErrNoRows
 	}
 
+	if err := insertSyncEvents(tx, events, time.Now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertSyncEvents(tx *sql.Tx, events []AccountSyncEvent, now time.Time) error {
 	stmt, err := tx.Prepare(`INSERT INTO account_sync_events (id, user_id, system_id, event_type, payload_json, attempts, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
-	now := time.Now().UTC()
 	for _, event := range events {
 		if _, err := stmt.Exec(event.ID, event.UserID, event.SystemID, event.EventType, event.PayloadJSON, event.Attempts, event.Status, now, now); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // Session Management
@@ -1090,10 +1170,16 @@ func (s *Store) GetValidRecoveryCodes(userID string) ([]RecoveryCode, error) {
 	return codes, nil
 }
 
-func (s *Store) MarkRecoveryCodeUsed(codeID string) error {
+// ConsumeRecoveryCode atomically spends a recovery code. A separate lookup and update lets
+// concurrent logins redeem the same code.
+func (s *Store) ConsumeRecoveryCode(userID, codeHash string) (bool, error) {
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`UPDATE recovery_codes SET used_at = ? WHERE id = ?`, now, codeID)
-	return err
+	res, err := s.db.Exec(`UPDATE recovery_codes SET used_at = ? WHERE user_id = ? AND code_hash = ? AND used_at IS NULL`, now, userID, codeHash)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 // OAuth Clients

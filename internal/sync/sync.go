@@ -260,6 +260,25 @@ func (e *Engine) QueueAccountSyncEvent(userID, eventType string, userPayload any
 	return nil
 }
 
+// CreateUserAndQueueSyncEvents atomically records a new source-of-truth account and every
+// downstream delivery obligation.
+func (e *Engine) CreateUserAndQueueSyncEvents(user *store.User, userPayload any) error {
+	events, err := e.newAccountSyncEvents(user.ID, "user.created", userPayload)
+	if err != nil {
+		return err
+	}
+	return e.store.CreateUserWithSyncEvents(user, events)
+}
+
+// UpdateUserAndQueueSyncEvents atomically records an account mutation and its outbox events.
+func (e *Engine) UpdateUserAndQueueSyncEvents(user *store.User, revokeAccess bool, userPayload any) error {
+	events, err := e.newAccountSyncEvents(user.ID, "user.updated", userPayload)
+	if err != nil {
+		return err
+	}
+	return e.store.UpdateUserWithSyncEvents(user, revokeAccess, events)
+}
+
 // DeleteUserAndQueueSyncEvents removes a user and queues its deletion atomically, so a
 // downstream product cannot retain an account when the source deletion succeeds.
 func (e *Engine) DeleteUserAndQueueSyncEvents(userID string, userPayload any) error {

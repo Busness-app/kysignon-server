@@ -424,6 +424,17 @@ type CreateClientRequest struct {
 	LaunchURL     string   `json:"launchUrl"`
 }
 
+// generateClientSecret mints a client secret and its stored hash. The secret is 32 random
+// bytes, so a plain SHA-256 is an appropriate one-way store: there is no low-entropy
+// guess space for an attacker with the database to search.
+func generateClientSecret() (raw, hash string, err error) {
+	raw, err = crypto.GenerateRandomHex(32)
+	if err != nil {
+		return "", "", err
+	}
+	return raw, crypto.HashSHA256(raw), nil
+}
+
 func (h *AdminHandler) CreateOAuthClient(w http.ResponseWriter, r *http.Request) {
 	admin := GetUserFromContext(r.Context())
 	var req CreateClientRequest
@@ -432,18 +443,29 @@ func (h *AdminHandler) CreateOAuthClient(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if req.ClientType != "confidential" {
-		req.ClientType = "public"
+	// Confidential is the default. Every KySecurity suite service is a server-side
+	// application that can hold a secret, and for a public client PKCE is the only thing
+	// binding a code to its requester. "public" stays available for SPAs and native apps,
+	// which genuinely cannot keep a secret, but it has to be asked for.
+	if req.ClientType != "public" {
+		req.ClientType = "confidential"
 	}
 	if len(req.AllowedScopes) == 0 {
 		req.AllowedScopes = []string{"openid", "profile", "email"}
 	}
+	if len(req.RedirectURIs) == 0 {
+		http.Error(w, `{"error":"invalid_request","error_description":"At least one redirect URI is required"}`, http.StatusBadRequest)
+		return
+	}
 
-	var rawSecret string
-	var secretHash string
+	var rawSecret, secretHash string
 	if req.ClientType == "confidential" {
-		rawSecret, _ = crypto.GenerateRandomHex(32)
-		secretHash = crypto.HashSHA256(rawSecret)
+		var err error
+		rawSecret, secretHash, err = generateClientSecret()
+		if err != nil {
+			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+			return
+		}
 	}
 
 	redirectURIsJSON, _ := json.Marshal(req.RedirectURIs)
@@ -472,13 +494,138 @@ func (h *AdminHandler) CreateOAuthClient(w http.ResponseWriter, r *http.Request)
 
 	h.audit.Record("admin.oauth_client_created", admin.ID, admin.Username, client.ID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"clientName": client.ClientName,
+		"clientType": client.ClientType,
 	})
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"success":      true,
 		"client":       client,
-		"clientSecret": rawSecret, // Displayed once at creation
+		"clientSecret": rawSecret, // shown once; only the hash is kept
+	})
+}
+
+type UpdateClientRequest struct {
+	ClientName    *string   `json:"clientName,omitempty"`
+	ClientType    *string   `json:"clientType,omitempty"`
+	RedirectURIs  *[]string `json:"redirectUris,omitempty"`
+	AllowedScopes *[]string `json:"allowedScopes,omitempty"`
+	LaunchURL     *string   `json:"launchUrl,omitempty"`
+	Enabled       *bool     `json:"enabled,omitempty"`
+	RotateSecret  bool      `json:"rotateSecret,omitempty"`
+}
+
+// UpdateOAuthClient edits a registered client in place.
+//
+// This exists so a client registered without a secret can be promoted to confidential, and
+// so a secret can be rotated, without deleting the client. Delete-and-recreate is not a
+// migration path: it breaks the integration it is meant to secure, which is a good way to
+// ensure nobody ever does it.
+func (h *AdminHandler) UpdateOAuthClient(w http.ResponseWriter, r *http.Request) {
+	admin := GetUserFromContext(r.Context())
+	clientID := r.PathValue("id")
+
+	var req UpdateClientRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+		return
+	}
+
+	client, err := h.store.GetOAuthClientByID(clientID)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if client == nil {
+		http.Error(w, `{"error":"client_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	if req.ClientName != nil && strings.TrimSpace(*req.ClientName) != "" {
+		client.ClientName = strings.TrimSpace(*req.ClientName)
+	}
+	if req.LaunchURL != nil {
+		client.LaunchURL = strings.TrimSpace(*req.LaunchURL)
+	}
+	if req.Enabled != nil {
+		client.Enabled = *req.Enabled
+	}
+	if req.RedirectURIs != nil {
+		if len(*req.RedirectURIs) == 0 {
+			http.Error(w, `{"error":"invalid_request","error_description":"At least one redirect URI is required"}`, http.StatusBadRequest)
+			return
+		}
+		encoded, err := json.Marshal(*req.RedirectURIs)
+		if err != nil {
+			http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+			return
+		}
+		client.RedirectURIsJSON = string(encoded)
+	}
+	if req.AllowedScopes != nil {
+		encoded, err := json.Marshal(*req.AllowedScopes)
+		if err != nil {
+			http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+			return
+		}
+		client.AllowedScopesJSON = string(encoded)
+	}
+
+	// A promotion to confidential must come with a secret in the same response, or the
+	// client is left declared confidential with nothing to authenticate with, and every
+	// token exchange it attempts fails.
+	rotate := req.RotateSecret
+	if req.ClientType != nil {
+		switch *req.ClientType {
+		case "confidential":
+			if client.ClientType != "confidential" || client.ClientSecretHash == "" {
+				rotate = true
+			}
+			client.ClientType = "confidential"
+		case "public":
+			client.ClientType = "public"
+			client.ClientSecretHash = ""
+			rotate = false
+		default:
+			http.Error(w, `{"error":"invalid_request","error_description":"clientType must be confidential or public"}`, http.StatusBadRequest)
+			return
+		}
+	}
+
+	var rawSecret string
+	if rotate {
+		if client.ClientType != "confidential" {
+			http.Error(w, `{"error":"invalid_request","error_description":"Only a confidential client has a secret to rotate"}`, http.StatusBadRequest)
+			return
+		}
+		var err error
+		rawSecret, client.ClientSecretHash, err = generateClientSecret()
+		if err != nil {
+			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := h.store.UpdateOAuthClient(client); err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	h.audit.Record("admin.oauth_client_updated", admin.ID, admin.Username, client.ID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+		"clientType":     client.ClientType,
+		"secretRotated":  rotate,
+		"redirectsSet":   req.RedirectURIs != nil,
+		"scopesSet":      req.AllowedScopes != nil,
+		"enabledChanged": req.Enabled != nil,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success":      true,
+		"client":       client,
+		"clientSecret": rawSecret, // empty unless a new secret was just issued
 	})
 }
 

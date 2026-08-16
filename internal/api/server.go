@@ -161,6 +161,7 @@ func (s *Server) routes() *http.ServeMux {
 
 	mux.Handle("GET /api/admin/clients", adminM(http.HandlerFunc(adminH.ListOAuthClients)))
 	mux.Handle("POST /api/admin/clients", adminM(http.HandlerFunc(adminH.CreateOAuthClient)))
+	mux.Handle("PUT /api/admin/clients/{id}", adminM(http.HandlerFunc(adminH.UpdateOAuthClient)))
 	mux.Handle("DELETE /api/admin/clients/{id}", adminM(http.HandlerFunc(adminH.DeleteOAuthClient)))
 
 	mux.Handle("GET /api/admin/applications", adminM(http.HandlerFunc(adminH.ListApplications)))

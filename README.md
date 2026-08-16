@@ -152,8 +152,26 @@ code; anything looser makes registration advisory.
 public client presents no secret, so the verifier is the only thing binding a code to the
 party that requested it.
 
-**Confidential clients must have a secret configured.** One with an empty
-`client_secret_hash` is rejected rather than authenticated by existing.
+**Clients are confidential by default.** Registration issues a client secret unless
+`"clientType":"public"` is passed explicitly. Every suite service (KyPost, KyDNS,
+KyPasswords, KyNotes, KyBookmarks) is a server-side application that can hold one, so it
+should be confidential; `public` exists for SPAs and native apps that genuinely cannot.
+A confidential client with an empty `client_secret_hash` is rejected rather than
+authenticated by existing.
+
+**Existing clients registered before this change are public and have no secret.** The
+server logs a NOTICE for each at startup. Promote one in place, without breaking it, via:
+
+```bash
+curl -X PUT https://auth.example.com/api/admin/clients/kypost \
+  -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" \
+  --cookie "kysignon_session=$SESSION; kysignon_csrf=$CSRF" \
+  -d '{"clientType":"confidential"}'
+```
+
+The response carries `clientSecret` once. Configure it in that service before its next
+sign-in, since the client is confidential from that moment and unauthenticated exchanges
+stop working. `{"rotateSecret":true}` rotates an existing one the same way.
 
 **Scopes are intersected with the client's `allowedScopes`.** Asking for more than a client
 is registered for narrows to the permitted set, or fails if nothing overlaps.

@@ -499,3 +499,185 @@ func TestIssuedCSRFTokenIsAccepted(t *testing.T) {
 		t.Errorf("a correctly issued CSRF token was rejected: %s", rr.Body.String())
 	}
 }
+
+// adminRequest performs an authenticated admin call with a correctly issued CSRF token.
+func adminRequest(t *testing.T, srv *Server, method, path, cookie, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	csrf := srv.middleware.IssueCSRFToken(cookie)
+	var reader *strings.Reader
+	if body == "" {
+		reader = strings.NewReader("")
+	} else {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	req.AddCookie(&http.Cookie{Name: "kysignon_session", Value: cookie})
+	req.AddCookie(&http.Cookie{Name: "kysignon_csrf", Value: csrf})
+	rr := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rr, req)
+	return rr
+}
+
+// A server-side integration can hold a secret, so registration must give it one. Defaulting
+// to a public client silently drops a whole authentication factor for every suite app.
+func TestNewClientIsConfidentialByDefault(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+
+	rr := adminRequest(t, srv, "POST", "/api/admin/clients", cookie,
+		`{"clientId":"kypost","clientName":"KyPost","redirectUris":["https://mail.urlxl.com/callback"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("client creation returned %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		ClientSecret string `json:"clientSecret"`
+		Client       struct {
+			ClientType string `json:"clientType"`
+		} `json:"client"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Client.ClientType != "confidential" {
+		t.Errorf("clientType = %q, want confidential when unspecified", resp.Client.ClientType)
+	}
+	if resp.ClientSecret == "" {
+		t.Error("no client secret was issued; the client cannot authenticate at the token endpoint")
+	}
+
+	stored, err := db.GetOAuthClientByID("kypost")
+	if err != nil || stored == nil {
+		t.Fatal(err)
+	}
+	if stored.ClientSecretHash == "" {
+		t.Error("no secret hash was stored")
+	}
+}
+
+// A genuinely public client (SPA, mobile) must still be registrable, explicitly.
+func TestPublicClientStillRegistrableWhenAsked(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+
+	rr := adminRequest(t, srv, "POST", "/api/admin/clients", cookie,
+		`{"clientId":"mobile","clientName":"Mobile","clientType":"public","redirectUris":["https://m.urlxl.com/callback"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("public client creation returned %d: %s", rr.Code, rr.Body.String())
+	}
+	stored, _ := db.GetOAuthClientByID("mobile")
+	if stored == nil || stored.ClientType != "public" {
+		t.Errorf("explicit public client was not honoured: %+v", stored)
+	}
+}
+
+// An existing client with no secret must be upgradeable in place. Without this the only
+// route is delete-and-recreate, which breaks the integration it is meant to secure.
+func TestClientSecretCanBeRotated(t *testing.T) {
+	srv, db, _, _, oe, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+	user := newUser(t, db, "user")
+
+	create := adminRequest(t, srv, "POST", "/api/admin/clients", cookie,
+		`{"clientId":"kydns","clientName":"KyDNS","redirectUris":["https://dns.urlxl.com/callback"]}`)
+	if create.Code != http.StatusOK {
+		t.Fatalf("create returned %d: %s", create.Code, create.Body.String())
+	}
+	var created struct {
+		ClientSecret string `json:"clientSecret"`
+	}
+	_ = json.Unmarshal(create.Body.Bytes(), &created)
+
+	rotate := adminRequest(t, srv, "PUT", "/api/admin/clients/kydns", cookie, `{"rotateSecret":true}`)
+	if rotate.Code != http.StatusOK {
+		t.Fatalf("rotation returned %d: %s", rotate.Code, rotate.Body.String())
+	}
+	var rotated struct {
+		ClientSecret string `json:"clientSecret"`
+	}
+	_ = json.Unmarshal(rotate.Body.Bytes(), &rotated)
+	if rotated.ClientSecret == "" {
+		t.Fatal("rotation returned no new secret")
+	}
+	if rotated.ClientSecret == created.ClientSecret {
+		t.Error("rotation returned the same secret")
+	}
+
+	// The old secret must stop working, and the new one must work.
+	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+	code, err := oe.CreateAuthorizationCode("kydns", user.ID, "https://dns.urlxl.com/callback", "openid", challenge, "S256")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oe.ExchangeAuthorizationCode(code, "kydns", created.ClientSecret, "https://dns.urlxl.com/callback", verifier); err == nil {
+		t.Error("the superseded client secret still authenticated")
+	}
+
+	code, err = oe.CreateAuthorizationCode("kydns", user.ID, "https://dns.urlxl.com/callback", "openid", challenge, "S256")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oe.ExchangeAuthorizationCode(code, "kydns", rotated.ClientSecret, "https://dns.urlxl.com/callback", verifier); err != nil {
+		t.Errorf("the rotated client secret did not authenticate: %v", err)
+	}
+}
+
+// Promoting a legacy public client to confidential is the migration path for suite apps
+// registered before secrets were the default.
+func TestPublicClientCanBePromotedToConfidential(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+
+	newClient(t, db, "kypasswords", []string{"https://passwords.urlxl.com/callback"}, []string{"openid"})
+
+	rr := adminRequest(t, srv, "PUT", "/api/admin/clients/kypasswords", cookie,
+		`{"clientType":"confidential"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("promotion returned %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		ClientSecret string `json:"clientSecret"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.ClientSecret == "" {
+		t.Error("promoting to confidential issued no secret, leaving the client unable to authenticate")
+	}
+
+	stored, _ := db.GetOAuthClientByID("kypasswords")
+	if stored == nil || stored.ClientType != "confidential" || stored.ClientSecretHash == "" {
+		t.Errorf("client was not promoted: %+v", stored)
+	}
+}
+
+// Redirect URIs are the control that decides who receives a code, so editing them must be
+// possible without deleting the client, and must never widen silently.
+func TestClientRedirectURIsCanBeUpdated(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+	newClient(t, db, "kynotes", []string{"https://notes.urlxl.com/callback"}, []string{"openid"})
+
+	rr := adminRequest(t, srv, "PUT", "/api/admin/clients/kynotes", cookie,
+		`{"redirectUris":["https://notes.urlxl.com/callback","https://notes.urlxl.com/oauth/callback"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update returned %d: %s", rr.Code, rr.Body.String())
+	}
+
+	stored, _ := db.GetOAuthClientByID("kynotes")
+	if stored == nil || !strings.Contains(stored.RedirectURIsJSON, "/oauth/callback") {
+		t.Errorf("redirect URIs were not updated: %+v", stored)
+	}
+}

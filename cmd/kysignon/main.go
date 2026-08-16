@@ -98,6 +98,8 @@ func main() {
 		log.Printf("Bootstrap admin created. Credentials written to %s (removed automatically after first sign-in).", passFile)
 	}
 
+	warnAboutSecretlessClients(dbStore)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -229,6 +231,27 @@ func ensureBootstrapAdmin(dbStore *store.Store, username, password string) error
 		return fmt.Errorf("failed to create the bootstrap administrator: %w", err)
 	}
 	return nil
+}
+
+// warnAboutSecretlessClients reports clients registered without a secret. A public client
+// is legitimate for an SPA or native app, where PKCE is the only binding available. For a
+// server-side integration it discards a factor for no benefit, and since these were the
+// default before, an existing deployment will have them without anyone having chosen it.
+func warnAboutSecretlessClients(dbStore *store.Store) {
+	clients, err := dbStore.ListOAuthClients()
+	if err != nil {
+		log.Printf("Could not check OAuth client registrations: %v", err)
+		return
+	}
+	for _, c := range clients {
+		if !c.Enabled || c.ClientType != "public" {
+			continue
+		}
+		log.Printf("NOTICE: OAuth client %q is registered as public and has no client secret. "+
+			"If it is a server-side service, promote it with: "+
+			"PUT /api/admin/clients/%s {\"clientType\":\"confidential\"} "+
+			"and configure the returned secret in that service.", c.ID, c.ID)
+	}
 }
 
 func adminSessionExpiry() time.Time {

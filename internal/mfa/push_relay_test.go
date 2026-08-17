@@ -28,7 +28,9 @@ func TestRelaySenderRegistersAndPersistsKey(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&sentPayload); err != nil {
 				t.Fatalf("decode send payload: %v", err)
 			}
+			w.Header().Set("X-Request-Id", "req-ok")
 			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 		default:
 			http.NotFound(w, r)
 		}
@@ -79,6 +81,11 @@ func TestRelaySenderRegistersAndPersistsKey(t *testing.T) {
 	if _, ok := data["decoyDigits"]; ok {
 		t.Fatal("push data leaked decoyDigits")
 	}
+	for _, field := range []string{"title", "body"} {
+		if strings.Contains(fmt.Sprint(data[field]), "42") {
+			t.Fatalf("data.%s leaked match digits: %v", field, data[field])
+		}
+	}
 	if data["challengeId"] != "challenge" {
 		t.Fatalf("challengeId = %v, want challenge", data["challengeId"])
 	}
@@ -99,5 +106,28 @@ func TestRelaySenderReturnsStaleTokenOnGone(t *testing.T) {
 	}, MFAChallengePush{ChallengeID: "challenge"})
 	if err != ErrStalePushToken {
 		t.Fatalf("error = %v, want ErrStalePushToken", err)
+	}
+}
+
+func TestRelaySenderRequiresOKBodyOnSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "req-bad")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "queued nowhere"})
+	}))
+	defer srv.Close()
+
+	sender, err := NewRelaySender(RelayConfig{URL: srv.URL, Key: "key"}, RelayConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sender.SendPush(store.NativeDevice{
+		ID: "dev1", UserID: "u1", Platform: "android", PushToken: "token",
+	}, MFAChallengePush{ChallengeID: "challenge"})
+	if err == nil {
+		t.Fatal("expected relay success without ok=true to fail")
+	}
+	if !strings.Contains(err.Error(), "req-bad") {
+		t.Fatalf("error did not include relay request id: %v", err)
 	}
 }

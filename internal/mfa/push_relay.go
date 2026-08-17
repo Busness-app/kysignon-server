@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +17,8 @@ import (
 )
 
 var ErrStalePushToken = errors.New("push token is stale")
+
+const relayResponseLimit = 2048
 
 type RelayConfig struct {
 	URL     string
@@ -36,6 +40,13 @@ type relayEndpoint struct {
 
 type relayRegisterResponse struct {
 	Key string `json:"key"`
+}
+
+type relaySendResponse struct {
+	OK        bool   `json:"ok"`
+	Stale     bool   `json:"stale"`
+	Error     string `json:"error"`
+	RequestID string `json:"requestId"`
 }
 
 func NewRelaySender(fcm, apns RelayConfig) (*RelaySender, error) {
@@ -120,13 +131,17 @@ func (s *RelaySender) SendPush(dev store.NativeDevice, ch MFAChallengePush) erro
 	}
 	// Notification payloads can be visible on lock screens and in client-side
 	// local notification renderers. Never send the number-matching answer here.
+	title := "Sign-in request"
+	messageBody := "Open KySecurity Authenticator to review."
 	body, _ := json.Marshal(map[string]any{
 		"token":    dev.PushToken,
-		"title":    "Sign-in request",
-		"body":     "Open KySecurity Authenticator to review.",
+		"title":    title,
+		"body":     messageBody,
 		"platform": dev.Platform,
 		"data": map[string]string{
 			"type":           "mfa_challenge",
+			"title":          title,
+			"body":           messageBody,
 			"challengeId":    ch.ChallengeID,
 			"deviceId":       dev.ID,
 			"deviceUserId":   dev.UserID,
@@ -144,13 +159,29 @@ func (s *RelaySender) SendPush(dev store.NativeDevice, ch MFAChallengePush) erro
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
+	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, relayResponseLimit))
+	responseText := strings.TrimSpace(string(responseBody))
+	requestID := resp.Header.Get("X-Request-Id")
+	var parsed relaySendResponse
+	if responseText != "" {
+		_ = json.Unmarshal(responseBody, &parsed)
+	}
+	if parsed.RequestID != "" {
+		requestID = parsed.RequestID
+	}
+	if resp.StatusCode == http.StatusOK && parsed.OK {
+		if requestID != "" {
+			log.Printf("mfa push relay: relay accepted device %s platform %s requestId=%s", dev.ID, dev.Platform, requestID)
+		}
 		return nil
 	}
 	if resp.StatusCode == http.StatusGone {
 		return ErrStalePushToken
 	}
-	return fmt.Errorf("push relay send failed: %s", resp.Status)
+	if resp.StatusCode == http.StatusOK {
+		return fmt.Errorf("push relay send returned %s without ok=true body=%q requestId=%s", resp.Status, responseText, requestID)
+	}
+	return fmt.Errorf("push relay send failed: %s body=%q requestId=%s", resp.Status, responseText, requestID)
 }
 
 func (s *RelaySender) endpointFor(platform string) (relayEndpoint, error) {

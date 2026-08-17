@@ -1,6 +1,7 @@
 let csrfTokenCache: string | null = null;
 
-export async function fetchCSRF(): Promise<string> {
+export async function fetchCSRF(forceRefresh = false): Promise<string> {
+  if (forceRefresh) csrfTokenCache = null;
   if (csrfTokenCache) return csrfTokenCache;
   const res = await fetch('/api/auth/csrf');
   if (!res.ok) throw new Error('Failed to obtain CSRF token');
@@ -14,26 +15,25 @@ export async function apiRequest<T = any>(
   options: RequestInit = {}
 ): Promise<T> {
   const method = options.method || 'GET';
-  const headers = new Headers(options.headers || {});
+  const isMutating = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
 
-  if (!headers.has('Content-Type') && options.body && typeof options.body === 'string') {
-    headers.set('Content-Type', 'application/json');
-  }
-
-  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-    try {
-      const csrf = await fetchCSRF();
-      headers.set('X-CSRF-Token', csrf);
-    } catch {
-      // ignore
+  const send = async (refreshCSRF = false) => {
+    const headers = new Headers(options.headers || {});
+    if (!headers.has('Content-Type') && options.body && typeof options.body === 'string') {
+      headers.set('Content-Type', 'application/json');
     }
-  }
+    if (isMutating) {
+      const csrf = await fetchCSRF(refreshCSRF);
+      headers.set('X-CSRF-Token', csrf);
+    }
+    return fetch(path, {
+      ...options,
+      headers,
+      credentials: 'same-origin',
+    });
+  };
 
-  const res = await fetch(path, {
-    ...options,
-    headers,
-    credentials: 'same-origin',
-  });
+  let res = await send(false);
 
   if (res.status === 401 && !path.startsWith('/api/auth/login')) {
     // Session unauthorized
@@ -47,6 +47,19 @@ export async function apiRequest<T = any>(
       data = JSON.parse(text);
     } catch {
       data = { raw: text };
+    }
+  }
+
+  if (isMutating && res.status === 403 && data.error === 'invalid_csrf') {
+    res = await send(true);
+    const retryText = await res.text();
+    data = {};
+    if (retryText) {
+      try {
+        data = JSON.parse(retryText);
+      } catch {
+        data = { raw: retryText };
+      }
     }
   }
 

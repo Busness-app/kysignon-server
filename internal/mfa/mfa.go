@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net/url"
 	"strconv"
@@ -374,10 +375,12 @@ func (e *Engine) CreatePushChallenge(userID string) (*store.MFAChallenge, error)
 
 func (e *Engine) dispatchPushChallenge(challenge *store.MFAChallenge, decoys []string) {
 	if e.pushSender == nil {
+		log.Printf("mfa push relay: no sender configured for challenge %s user %s", challenge.ID, challenge.UserID)
 		return
 	}
 	devices, err := e.store.ListUserNativeDevices(challenge.UserID)
 	if err != nil {
+		log.Printf("mfa push relay: failed to list devices for challenge %s user %s: %v", challenge.ID, challenge.UserID, err)
 		return
 	}
 	push := MFAChallengePush{
@@ -385,13 +388,24 @@ func (e *Engine) dispatchPushChallenge(challenge *store.MFAChallenge, decoys []s
 		MatchDigits: challenge.MatchDigits,
 		Decoys:      decoys,
 	}
+	dispatched := 0
 	for _, dev := range devices {
 		if !dev.IsMFAApprover || dev.PushToken == "" {
+			log.Printf("mfa push relay: skipping device %s platform %s approver=%v hasToken=%v", dev.ID, dev.Platform, dev.IsMFAApprover, dev.PushToken != "")
 			continue
 		}
 		if err := e.pushSender.SendPush(dev, push); errors.Is(err, ErrStalePushToken) {
 			_ = e.store.ClearNativeDevicePushToken(dev.ID, dev.UserID)
+			log.Printf("mfa push relay: stale token cleared for device %s platform %s", dev.ID, dev.Platform)
+		} else if err != nil {
+			log.Printf("mfa push relay: send failed for device %s platform %s: %v", dev.ID, dev.Platform, err)
+		} else {
+			dispatched++
+			log.Printf("mfa push relay: sent challenge %s to device %s platform %s", challenge.ID, dev.ID, dev.Platform)
 		}
+	}
+	if dispatched == 0 {
+		log.Printf("mfa push relay: no pushes sent for challenge %s user %s across %d device(s)", challenge.ID, challenge.UserID, len(devices))
 	}
 }
 

@@ -26,6 +26,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
   const [showPairModal, setShowPairModal] = useState(false);
   const [pairPin, setPairPin] = useState('');
   const [pairExpiresAt, setPairExpiresAt] = useState<number | null>(null);
+  const [pairStartedAt, setPairStartedAt] = useState<number | null>(null);
   const [countdown, setCountdown] = useState(90);
   const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -69,8 +70,34 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
     return () => clearInterval(interval);
   }, [showPairModal, pairExpiresAt]);
 
+  useEffect(() => {
+    if (!showPairModal || !pairStartedAt || countdown <= 0) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const data = await apiRequest('/api/user/devices');
+        const nextDevices: NativeDevice[] = data.devices || [];
+        setDevices(nextDevices);
+        const paired = nextDevices.some((dev) => {
+          const seenAt = new Date(dev.lastSeenAt || dev.createdAt).getTime();
+          return Number.isFinite(seenAt) && seenAt >= pairStartedAt - 2000;
+        });
+        if (paired) {
+          setShowPairModal(false);
+          setPairStartedAt(null);
+          onUserUpdate();
+        }
+      } catch {
+        // Keep the QR/PIN visible; the normal countdown still expires it.
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [showPairModal, pairStartedAt, countdown, onUserUpdate]);
+
   const handleStartDevicePairing = async () => {
     setShowPairModal(true);
+    setPairStartedAt(Date.now());
     try {
       const data = await apiRequest('/api/user/devices/pairing-token', { method: 'POST' });
       setPairPin(data.pinCode);

@@ -66,6 +66,18 @@ body {
   gap: 1.5rem;
 }
 
+@media (min-width: 1280px) {
+  .main-content {
+    padding-left: 3rem;
+    padding-right: 3rem;
+  }
+
+  .navbar-content {
+    padding-left: 3rem;
+    padding-right: 3rem;
+  }
+}
+
 .navbar-brand {
   display: flex;
   align-items: center;

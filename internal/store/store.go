@@ -126,6 +126,7 @@ func (s *Store) migrate() error {
 		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 		device_name TEXT NOT NULL,
 		device_identifier TEXT NOT NULL,
+		platform TEXT NOT NULL DEFAULT 'android' CHECK (platform IN ('android', 'ios', 'macos')),
 		public_key TEXT,
 		push_token TEXT,
 		is_mfa_approver BOOLEAN NOT NULL DEFAULT 0,
@@ -266,7 +267,37 @@ func (s *Store) migrate() error {
 	if err := s.migrateSyncEventsUserReference(); err != nil {
 		return err
 	}
+	if err := s.migrateNativeDevicePlatform(); err != nil {
+		return err
+	}
 	return s.migrateLegacyDevicePairingTokens()
+}
+
+func (s *Store) migrateNativeDevicePlatform() error {
+	rows, err := s.db.Query(`PRAGMA table_info(native_devices)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "platform" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE native_devices ADD COLUMN platform TEXT NOT NULL DEFAULT 'android' CHECK (platform IN ('android', 'ios', 'macos'))`)
+	return err
 }
 
 // migrateLegacyDevicePairingTokens removes the pre-hash pin_code column. Pairing tokens
@@ -941,16 +972,20 @@ func (s *Store) RegisterNativeDeviceWithPairingToken(tokenID string, dev *Native
 
 	dev.CreatedAt = now
 	dev.LastSeenAt = &now
+	if dev.Platform == "" {
+		dev.Platform = "android"
+	}
 	if _, err := tx.Exec(`
-		INSERT INTO native_devices (id, user_id, device_name, device_identifier, public_key, push_token, is_mfa_approver, last_seen_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO native_devices (id, user_id, device_name, device_identifier, platform, public_key, push_token, is_mfa_approver, last_seen_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, device_identifier) DO UPDATE SET
 			device_name = excluded.device_name,
+			platform = excluded.platform,
 			public_key = excluded.public_key,
 			push_token = excluded.push_token,
 			is_mfa_approver = excluded.is_mfa_approver,
 			last_seen_at = excluded.last_seen_at
-	`, dev.ID, dev.UserID, dev.DeviceName, dev.DeviceIdentifier, dev.PublicKey, dev.PushToken, dev.IsMFAApprover, dev.LastSeenAt, dev.CreatedAt); err != nil {
+	`, dev.ID, dev.UserID, dev.DeviceName, dev.DeviceIdentifier, dev.Platform, dev.PublicKey, dev.PushToken, dev.IsMFAApprover, dev.LastSeenAt, dev.CreatedAt); err != nil {
 		return false, err
 	}
 
@@ -970,10 +1005,11 @@ func (s *Store) RegisterNativeDeviceWithPairingToken(tokenID string, dev *Native
 
 func (s *Store) UpsertNativeDevice(dev *NativeDevice) error {
 	query := `
-	INSERT INTO native_devices (id, user_id, device_name, device_identifier, public_key, push_token, is_mfa_approver, last_seen_at, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO native_devices (id, user_id, device_name, device_identifier, platform, public_key, push_token, is_mfa_approver, last_seen_at, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(user_id, device_identifier) DO UPDATE SET
 		device_name = excluded.device_name,
+		platform = excluded.platform,
 		public_key = excluded.public_key,
 		push_token = excluded.push_token,
 		is_mfa_approver = excluded.is_mfa_approver,
@@ -982,12 +1018,15 @@ func (s *Store) UpsertNativeDevice(dev *NativeDevice) error {
 	now := time.Now().UTC()
 	dev.CreatedAt = now
 	dev.LastSeenAt = &now
-	_, err := s.db.Exec(query, dev.ID, dev.UserID, dev.DeviceName, dev.DeviceIdentifier, dev.PublicKey, dev.PushToken, dev.IsMFAApprover, dev.LastSeenAt, dev.CreatedAt)
+	if dev.Platform == "" {
+		dev.Platform = "android"
+	}
+	_, err := s.db.Exec(query, dev.ID, dev.UserID, dev.DeviceName, dev.DeviceIdentifier, dev.Platform, dev.PublicKey, dev.PushToken, dev.IsMFAApprover, dev.LastSeenAt, dev.CreatedAt)
 	return err
 }
 
 func (s *Store) ListUserNativeDevices(userID string) ([]NativeDevice, error) {
-	query := `SELECT id, user_id, device_name, device_identifier, public_key, push_token, is_mfa_approver, last_seen_at, created_at FROM native_devices WHERE user_id = ? ORDER BY created_at DESC`
+	query := `SELECT id, user_id, device_name, device_identifier, platform, public_key, push_token, is_mfa_approver, last_seen_at, created_at FROM native_devices WHERE user_id = ? ORDER BY created_at DESC`
 	rows, err := s.db.Query(query, userID)
 	if err != nil {
 		return nil, err
@@ -998,7 +1037,7 @@ func (s *Store) ListUserNativeDevices(userID string) ([]NativeDevice, error) {
 	for rows.Next() {
 		var dev NativeDevice
 		var pubKey, pushTok sql.NullString
-		if err := rows.Scan(&dev.ID, &dev.UserID, &dev.DeviceName, &dev.DeviceIdentifier, &pubKey, &pushTok, &dev.IsMFAApprover, &dev.LastSeenAt, &dev.CreatedAt); err != nil {
+		if err := rows.Scan(&dev.ID, &dev.UserID, &dev.DeviceName, &dev.DeviceIdentifier, &dev.Platform, &pubKey, &pushTok, &dev.IsMFAApprover, &dev.LastSeenAt, &dev.CreatedAt); err != nil {
 			return nil, err
 		}
 		if pubKey.Valid {
@@ -1019,6 +1058,11 @@ func (s *Store) SetNativeDeviceMFAApprover(deviceID, userID string, isApprover b
 
 func (s *Store) DeleteNativeDevice(deviceID, userID string) error {
 	_, err := s.db.Exec(`DELETE FROM native_devices WHERE id = ? AND user_id = ?`, deviceID, userID)
+	return err
+}
+
+func (s *Store) ClearNativeDevicePushToken(deviceID, userID string) error {
+	_, err := s.db.Exec(`UPDATE native_devices SET push_token = '' WHERE id = ? AND user_id = ?`, deviceID, userID)
 	return err
 }
 

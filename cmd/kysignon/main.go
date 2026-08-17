@@ -66,6 +66,24 @@ func main() {
 	auditLogger := audit.NewLogger(dbStore)
 	syncEngine := sync.NewEngine(dbStore, cfg.EncryptionKey)
 	mfaEngine := mfa.NewEngine(dbStore, cfg.EncryptionKey)
+	relaySender, err := mfa.NewRelaySender(
+		mfa.RelayConfig{
+			URL:     cfg.PushRelayURL,
+			Key:     cfg.PushRelayKey,
+			KeyFile: filepath.Join(cfg.DataDir, "push-relay-fcm.key"),
+			Label:   "kysignon-" + cfg.IssuerURL,
+		},
+		mfa.RelayConfig{
+			URL:     cfg.APNSRelayURL,
+			Key:     cfg.APNSRelayKey,
+			KeyFile: filepath.Join(cfg.DataDir, "push-relay-apns.key"),
+			Label:   "kysignon-" + cfg.IssuerURL,
+		},
+	)
+	if err != nil {
+		log.Fatalf("Failed to initialize push relay sender: %v", err)
+	}
+	mfaEngine.SetPushSender(relaySender)
 	oauthEngine := oauth.NewEngine(dbStore, keyManager, cfg.IssuerURL)
 
 	adminCount, err := dbStore.CountAdmins()

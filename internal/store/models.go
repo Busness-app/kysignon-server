@@ -71,6 +71,7 @@ type NativeDevice struct {
 	UserID           string     `json:"userId"`
 	DeviceName       string     `json:"deviceName"`
 	DeviceIdentifier string     `json:"deviceIdentifier"`
+	Platform         string     `json:"platform"`
 	PublicKey        string     `json:"publicKey,omitempty"`
 	PushToken        string     `json:"pushToken,omitempty"`
 	IsMFAApprover    bool       `json:"isMfaApprover"`

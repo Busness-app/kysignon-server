@@ -24,6 +24,7 @@ import (
 type Engine struct {
 	store         *store.Store
 	encryptionKey []byte
+	pushSender    PushSender
 }
 
 func NewEngine(s *store.Store, encryptionKey []byte) *Engine {
@@ -31,6 +32,20 @@ func NewEngine(s *store.Store, encryptionKey []byte) *Engine {
 		store:         s,
 		encryptionKey: encryptionKey,
 	}
+}
+
+type PushSender interface {
+	SendPush(dev store.NativeDevice, ch MFAChallengePush) error
+}
+
+type MFAChallengePush struct {
+	ChallengeID string
+	MatchDigits string
+	Decoys      []string
+}
+
+func (e *Engine) SetPushSender(sender PushSender) {
+	e.pushSender = sender
 }
 
 // GenerateTOTPSecret generates a random 20-byte base32 TOTP secret and returns an otpauth URL.
@@ -211,6 +226,7 @@ type NativeDeviceRegisterRequest struct {
 	UserID           string `json:"userId,omitempty"`
 	DeviceName       string `json:"deviceName"`
 	DeviceIdentifier string `json:"deviceIdentifier"`
+	Platform         string `json:"platform,omitempty"`
 	PublicKey        string `json:"publicKey,omitempty"`
 	PushToken        string `json:"pushToken,omitempty"`
 }
@@ -253,12 +269,17 @@ func (e *Engine) RegisterNativeDevice(req *NativeDeviceRegisterRequest) (*store.
 	if name == "" {
 		name = "KySecurity Authenticator Device"
 	}
+	platform, err := normalizeDevicePlatform(req.Platform)
+	if err != nil {
+		return nil, err
+	}
 
 	device := &store.NativeDevice{
 		ID:               uuid.New().String(),
 		UserID:           validToken.UserID,
 		DeviceName:       name,
 		DeviceIdentifier: req.DeviceIdentifier,
+		Platform:         platform,
 		PublicKey:        req.PublicKey,
 		PushToken:        req.PushToken,
 		IsMFAApprover:    true, // Enrolled devices are default approvers
@@ -278,6 +299,17 @@ func (e *Engine) RegisterNativeDevice(req *NativeDeviceRegisterRequest) (*store.
 	}
 
 	return device, nil
+}
+
+func normalizeDevicePlatform(platform string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case "", "android":
+		return "android", nil
+	case "ios", "macos":
+		return strings.ToLower(strings.TrimSpace(platform)), nil
+	default:
+		return "", errors.New("unsupported device platform")
+	}
 }
 
 // randomMatchNumber returns a uniformly distributed number in [10, 99].
@@ -335,7 +367,32 @@ func (e *Engine) CreatePushChallenge(userID string) (*store.MFAChallenge, error)
 		return nil, err
 	}
 
+	e.dispatchPushChallenge(challenge, decoys)
+
 	return challenge, nil
+}
+
+func (e *Engine) dispatchPushChallenge(challenge *store.MFAChallenge, decoys []string) {
+	if e.pushSender == nil {
+		return
+	}
+	devices, err := e.store.ListUserNativeDevices(challenge.UserID)
+	if err != nil {
+		return
+	}
+	push := MFAChallengePush{
+		ChallengeID: challenge.ID,
+		MatchDigits: challenge.MatchDigits,
+		Decoys:      decoys,
+	}
+	for _, dev := range devices {
+		if !dev.IsMFAApprover || dev.PushToken == "" {
+			continue
+		}
+		if err := e.pushSender.SendPush(dev, push); errors.Is(err, ErrStalePushToken) {
+			_ = e.store.ClearNativeDevicePushToken(dev.ID, dev.UserID)
+		}
+	}
 }
 
 // ErrUnsignedDevice reports that no paired device is able to sign push responses, so no

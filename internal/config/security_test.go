@@ -136,6 +136,29 @@ func TestPublicHTTPIssuerIsRejectedAndHTTPSForcesSecureCookies(t *testing.T) {
 	}
 }
 
+func TestRelayURLsRequireHTTPS(t *testing.T) {
+	withEnv(t, map[string]string{
+		"KYSIGNON_DATA_DIR": t.TempDir(),
+		"PUSH_RELAY_URL":    "http://relay.example.test",
+	})
+	if _, err := Load(); err == nil {
+		t.Fatal("public HTTP PUSH_RELAY_URL was accepted")
+	}
+
+	withEnv(t, map[string]string{
+		"KYSIGNON_DATA_DIR": t.TempDir(),
+		"PUSH_RELAY_URL":    "https://fcm.example.test/",
+		"APNS_RELAY_URL":    "https://apns.example.test/",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PushRelayURL != "https://fcm.example.test" || cfg.APNSRelayURL != "https://apns.example.test" {
+		t.Fatalf("relay URLs were not normalized: %q / %q", cfg.PushRelayURL, cfg.APNSRelayURL)
+	}
+}
+
 // A CIDR that does not parse must be reported, not skipped, or an operator's typo
 // silently drops their proxy out of the trusted set.
 func TestMalformedTrustedProxyCIDRIsRejected(t *testing.T) {

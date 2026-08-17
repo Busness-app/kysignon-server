@@ -39,6 +39,10 @@ type Config struct {
 	// container network; it widens an attacker-chosen callback into a request forgery
 	// primitive aimed at the internal network, so it is off by default.
 	AllowPrivateCallbacks bool
+	PushRelayURL          string
+	PushRelayKey          string
+	APNSRelayURL          string
+	APNSRelayKey          string
 }
 
 // Load loads configuration from environment variables. Anything malformed is an error:
@@ -84,6 +88,14 @@ func Load() (*Config, error) {
 	if sessionIdleTTL > sessionTTL {
 		return nil, fmt.Errorf("KYSIGNON_SESSION_IDLE_TTL must not exceed KYSIGNON_SESSION_TTL")
 	}
+	pushRelayURL, err := loadRelayURL("PUSH_RELAY_URL")
+	if err != nil {
+		return nil, err
+	}
+	apnsRelayURL, err := loadRelayURL("APNS_RELAY_URL")
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		Port:                  port,
@@ -100,7 +112,23 @@ func Load() (*Config, error) {
 		SessionTTL:            sessionTTL,
 		SessionIdleTTL:        sessionIdleTTL,
 		AllowPrivateCallbacks: strings.EqualFold(os.Getenv("KYSIGNON_ALLOW_PRIVATE_CALLBACKS"), "true"),
+		PushRelayURL:          pushRelayURL,
+		PushRelayKey:          strings.TrimSpace(os.Getenv("PUSH_RELAY_KEY")),
+		APNSRelayURL:          apnsRelayURL,
+		APNSRelayKey:          strings.TrimSpace(os.Getenv("APNS_RELAY_KEY")),
 	}, nil
+}
+
+func loadRelayURL(name string) (string, error) {
+	raw := strings.TrimRight(strings.TrimSpace(os.Getenv(name)), "/")
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || u.Scheme != "https" {
+		return "", fmt.Errorf("%s must be an https URL", name)
+	}
+	return raw, nil
 }
 
 func loadPositiveDuration(name string, defaultValue time.Duration) (time.Duration, error) {

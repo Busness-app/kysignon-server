@@ -84,6 +84,10 @@ KYSIGNON_ISSUER_URL=https://auth.yourdomain.com
 # Optional: Pre-seed administrator credentials
 BOOTSTRAP_ADMIN_USER=admin
 BOOTSTRAP_ADMIN_PASS=YourSecurePassword123!
+
+# Optional: Cloudflare Worker native-push relays
+PUSH_RELAY_URL=https://kysecurity-mobile-push-fcm.<account>.workers.dev
+APNS_RELAY_URL=https://kysecurity-mobile-push-apns.<account>.workers.dev
 ```
 
 ### 2. Start the Server

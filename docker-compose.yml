@@ -29,6 +29,10 @@ services:
       KYSIGNON_SESSION_IDLE_TTL: ${KYSIGNON_SESSION_IDLE_TTL:-30m}
       KYSIGNON_SECRET_KEY: ${KYSIGNON_SECRET_KEY:-}
       KYSIGNON_ENCRYPTION_KEY: ${KYSIGNON_ENCRYPTION_KEY:-}
+      PUSH_RELAY_URL: ${PUSH_RELAY_URL:-}
+      PUSH_RELAY_KEY: ${PUSH_RELAY_KEY:-}
+      APNS_RELAY_URL: ${APNS_RELAY_URL:-}
+      APNS_RELAY_KEY: ${APNS_RELAY_KEY:-}
       # Services on kypost-net address each other privately, so pairing callbacks there
       # are internal by design. Set to false if KySignOn is reachable from the internet
       # and paired systems live on public hostnames.

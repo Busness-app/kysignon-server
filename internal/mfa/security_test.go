@@ -28,6 +28,16 @@ func mfaUser(t *testing.T, db *store.Store) *store.User {
 	return u
 }
 
+type fakePushSender struct {
+	sent []store.NativeDevice
+	err  error
+}
+
+func (f *fakePushSender) SendPush(dev store.NativeDevice, ch MFAChallengePush) error {
+	f.sent = append(f.sent, dev)
+	return f.err
+}
+
 func signingKey(t *testing.T) (*ecdsa.PrivateKey, string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -363,5 +373,90 @@ func TestPairingTokenCannotBeConsumedAfterExpiry(t *testing.T) {
 	}
 	if spent {
 		t.Error("an expired pairing token was consumed after a stale lookup")
+	}
+}
+
+func TestPushChallengeDispatchesToRegisteredRelayToken(t *testing.T) {
+	e, _, _, cleanup := setupTestMFAEngine(t)
+	defer cleanup()
+	u := mfaUser(t, e.store)
+
+	_, pub := signingKey(t)
+	token, _, _, err := e.GenerateDevicePairingToken(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.RegisterNativeDevice(&NativeDeviceRegisterRequest{
+		PairingToken: token, DeviceName: "iphone", DeviceIdentifier: "dev-ios", Platform: "ios",
+		PublicKey: pub, PushToken: "apns-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sender := &fakePushSender{}
+	e.SetPushSender(sender)
+	if _, err := e.CreatePushChallenge(u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("expected one push dispatch, got %d", len(sender.sent))
+	}
+	if sender.sent[0].Platform != "ios" || sender.sent[0].PushToken != "apns-token" {
+		t.Fatalf("unexpected dispatched device: %+v", sender.sent[0])
+	}
+}
+
+func TestStaleRelayTokenIsClearedWithoutDeletingDevice(t *testing.T) {
+	e, db, _, cleanup := setupTestMFAEngine(t)
+	defer cleanup()
+	u := mfaUser(t, db)
+
+	_, pub := signingKey(t)
+	token, _, _, err := e.GenerateDevicePairingToken(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.RegisterNativeDevice(&NativeDeviceRegisterRequest{
+		PairingToken: token, DeviceName: "phone", DeviceIdentifier: "dev-stale",
+		PublicKey: pub, PushToken: "dead-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	e.SetPushSender(&fakePushSender{err: ErrStalePushToken})
+	if _, err := e.CreatePushChallenge(u.ID); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := db.ListUserNativeDevices(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 {
+		t.Fatalf("expected signing device to remain, got %d devices", len(devices))
+	}
+	if devices[0].PushToken != "" {
+		t.Fatalf("stale push token was not cleared: %+v", devices[0])
+	}
+	if !devices[0].IsMFAApprover || devices[0].PublicKey == "" {
+		t.Fatalf("signing enrollment was damaged: %+v", devices[0])
+	}
+}
+
+func TestUnsupportedDevicePlatformIsRejected(t *testing.T) {
+	e, db, _, cleanup := setupTestMFAEngine(t)
+	defer cleanup()
+	u := mfaUser(t, db)
+
+	_, pub := signingKey(t)
+	token, _, _, err := e.GenerateDevicePairingToken(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.RegisterNativeDevice(&NativeDeviceRegisterRequest{
+		PairingToken: token, DeviceName: "bad", DeviceIdentifier: "dev-bad",
+		Platform: "windows-phone", PublicKey: pub, PushToken: "token",
+	})
+	if err == nil {
+		t.Fatal("unsupported device platform was accepted")
 	}
 }

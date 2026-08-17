@@ -129,8 +129,9 @@ func (s *RelaySender) SendPush(dev store.NativeDevice, ch MFAChallengePush) erro
 	if endpoint.url == "" {
 		return nil
 	}
-	// Notification payloads can be visible on lock screens and in client-side
-	// local notification renderers. Never send the number-matching answer here.
+	// Keep the visible notification generic. The matching choices are carried in
+	// data-only fields below for the authenticator's in-app approval UI; they are
+	// never placed in the title/body shown on a lock screen.
 	title := "Sign-in request"
 	messageBody := "Open KySecurity Authenticator to review."
 	body, _ := json.Marshal(map[string]any{
@@ -143,6 +144,8 @@ func (s *RelaySender) SendPush(dev store.NativeDevice, ch MFAChallengePush) erro
 			"title":          title,
 			"body":           messageBody,
 			"challengeId":    ch.ChallengeID,
+			"matchDigits":    ch.MatchDigits,
+			"decoyDigits":    strings.Join(ch.Decoys, ","),
 			"deviceId":       dev.ID,
 			"deviceUserId":   dev.UserID,
 			"devicePlatform": dev.Platform,

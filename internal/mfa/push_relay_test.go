@@ -59,7 +59,7 @@ func TestRelaySenderRegistersAndPersistsKey(t *testing.T) {
 
 	err = sender.SendPush(store.NativeDevice{
 		ID: "dev1", UserID: "u1", Platform: "android", PushToken: "token",
-	}, MFAChallengePush{ChallengeID: "challenge"})
+	}, MFAChallengePush{ChallengeID: "challenge", MatchDigits: "42", Decoys: []string{"11", "22", "33"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,11 +75,8 @@ func TestRelaySenderRegistersAndPersistsKey(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected data payload: %#v", sentPayload["data"])
 	}
-	if _, ok := data["matchDigits"]; ok {
-		t.Fatal("push data leaked matchDigits")
-	}
-	if _, ok := data["decoyDigits"]; ok {
-		t.Fatal("push data leaked decoyDigits")
+	if data["matchDigits"] != "42" || data["decoyDigits"] != "11,22,33" {
+		t.Fatalf("matching choices missing from app data: %#v", data)
 	}
 	for _, field := range []string{"title", "body"} {
 		if strings.Contains(fmt.Sprint(data[field]), "42") {

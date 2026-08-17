@@ -41,6 +41,8 @@ type PushSender interface {
 
 type MFAChallengePush struct {
 	ChallengeID string
+	MatchDigits string
+	Decoys      []string
 }
 
 func (e *Engine) SetPushSender(sender PushSender) {
@@ -386,6 +388,8 @@ func (e *Engine) dispatchPushChallenge(challenge *store.MFAChallenge, decoys []s
 	}
 	push := MFAChallengePush{
 		ChallengeID: challenge.ID,
+		MatchDigits: challenge.MatchDigits,
+		Decoys:      append([]string(nil), decoys...),
 	}
 	dispatched := 0
 	for _, dev := range devices {

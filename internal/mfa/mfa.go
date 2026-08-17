@@ -241,6 +241,9 @@ func (e *Engine) RegisterNativeDevice(req *NativeDeviceRegisterRequest) (*store.
 	if req.PublicKey == "" {
 		return nil, errors.New("a device public key is required to pair an authenticator")
 	}
+	if strings.TrimSpace(req.PushToken) == "" {
+		return nil, errors.New("a push token is required to pair an authenticator")
+	}
 	if _, err := crypto.ParseP256PublicKey(req.PublicKey); err != nil {
 		return nil, fmt.Errorf("device public key is not a valid P-256 key: %w", err)
 	}
@@ -282,7 +285,7 @@ func (e *Engine) RegisterNativeDevice(req *NativeDeviceRegisterRequest) (*store.
 		DeviceIdentifier: req.DeviceIdentifier,
 		Platform:         platform,
 		PublicKey:        req.PublicKey,
-		PushToken:        req.PushToken,
+		PushToken:        strings.TrimSpace(req.PushToken),
 		IsMFAApprover:    true, // Enrolled devices are default approvers
 	}
 

@@ -101,9 +101,30 @@ func TestDeviceWithMalformedPublicKeyIsRejected(t *testing.T) {
 	}
 	if _, err := e.RegisterNativeDevice(&NativeDeviceRegisterRequest{
 		PairingToken: token, DeviceName: "junk-key", DeviceIdentifier: "dev-2",
-		PublicKey: "not-a-real-key",
+		PublicKey: "not-a-real-key", PushToken: "fcm-token",
 	}); err == nil {
 		t.Error("a device with an unparseable public key was paired")
+	}
+}
+
+func TestDeviceWithoutPushTokenIsRejected(t *testing.T) {
+	e, db, _, cleanup := setupTestMFAEngine(t)
+	defer cleanup()
+	u := mfaUser(t, db)
+
+	_, pub := signingKey(t)
+	token, _, _, err := e.GenerateDevicePairingToken(u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.RegisterNativeDevice(&NativeDeviceRegisterRequest{
+		PairingToken: token, DeviceName: "no-push-token", DeviceIdentifier: "dev-no-push",
+		PublicKey: pub,
+	}); err == nil {
+		t.Error("a device with no push token was paired")
+	}
+	if methods, _ := db.ListUserMFAMethods(u.ID); len(methods) != 0 {
+		t.Errorf("push MFA was enrolled for a device that cannot receive pushes: %d method(s)", len(methods))
 	}
 }
 
@@ -118,7 +139,7 @@ func TestDeviceWithValidKeyPairsAndCanApprove(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := e.RegisterNativeDevice(&NativeDeviceRegisterRequest{
-		PairingToken: token, DeviceName: "phone", DeviceIdentifier: "dev-3", PublicKey: pub,
+		PairingToken: token, DeviceName: "phone", DeviceIdentifier: "dev-3", PublicKey: pub, PushToken: "fcm-token",
 	}); err != nil {
 		t.Fatalf("a device with a valid P-256 key was rejected: %v", err)
 	}
@@ -319,7 +340,7 @@ func TestExpiredPairingTokenIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := e.RegisterNativeDevice(&NativeDeviceRegisterRequest{
-		PairingToken: token, DeviceName: "late", DeviceIdentifier: "dev-late", PublicKey: pub,
+		PairingToken: token, DeviceName: "late", DeviceIdentifier: "dev-late", PublicKey: pub, PushToken: "fcm-token",
 	}); err == nil {
 		t.Error("an expired pairing token was accepted")
 	}
@@ -339,7 +360,7 @@ func TestMFAResetExpiresPendingDevicePairingTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := e.RegisterNativeDevice(&NativeDeviceRegisterRequest{
-		PairingToken: token, DeviceName: "after-reset", DeviceIdentifier: "dev-reset", PublicKey: pub,
+		PairingToken: token, DeviceName: "after-reset", DeviceIdentifier: "dev-reset", PublicKey: pub, PushToken: "fcm-token",
 	}); err == nil {
 		t.Error("a pending pairing token was accepted after MFA reset")
 	}

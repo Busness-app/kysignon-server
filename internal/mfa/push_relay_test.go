@@ -2,10 +2,12 @@ package mfa
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
@@ -14,6 +16,7 @@ import (
 func TestRelaySenderRegistersAndPersistsKey(t *testing.T) {
 	var registered bool
 	var sentAuth string
+	var sentPayload map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/register":
@@ -22,6 +25,9 @@ func TestRelaySenderRegistersAndPersistsKey(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]string{"key": "relay-key"})
 		case "/send":
 			sentAuth = r.Header.Get("Authorization")
+			if err := json.NewDecoder(r.Body).Decode(&sentPayload); err != nil {
+				t.Fatalf("decode send payload: %v", err)
+			}
 			w.WriteHeader(http.StatusOK)
 		default:
 			http.NotFound(w, r)
@@ -51,12 +57,30 @@ func TestRelaySenderRegistersAndPersistsKey(t *testing.T) {
 
 	err = sender.SendPush(store.NativeDevice{
 		ID: "dev1", UserID: "u1", Platform: "android", PushToken: "token",
-	}, MFAChallengePush{ChallengeID: "challenge", MatchDigits: "42"})
+	}, MFAChallengePush{ChallengeID: "challenge"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sentAuth != "Bearer relay-key" {
 		t.Fatalf("unexpected Authorization header: %q", sentAuth)
+	}
+	for _, field := range []string{"title", "body"} {
+		if strings.Contains(fmt.Sprint(sentPayload[field]), "42") {
+			t.Fatalf("%s leaked match digits: %v", field, sentPayload[field])
+		}
+	}
+	data, ok := sentPayload["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected data payload: %#v", sentPayload["data"])
+	}
+	if _, ok := data["matchDigits"]; ok {
+		t.Fatal("push data leaked matchDigits")
+	}
+	if _, ok := data["decoyDigits"]; ok {
+		t.Fatal("push data leaked decoyDigits")
+	}
+	if data["challengeId"] != "challenge" {
+		t.Fatalf("challengeId = %v, want challenge", data["challengeId"])
 	}
 }
 
@@ -72,7 +96,7 @@ func TestRelaySenderReturnsStaleTokenOnGone(t *testing.T) {
 	}
 	err = sender.SendPush(store.NativeDevice{
 		ID: "dev1", UserID: "u1", Platform: "android", PushToken: "token",
-	}, MFAChallengePush{ChallengeID: "challenge", MatchDigits: "42"})
+	}, MFAChallengePush{ChallengeID: "challenge"})
 	if err != ErrStalePushToken {
 		t.Fatalf("error = %v, want ErrStalePushToken", err)
 	}

@@ -21,6 +21,7 @@ interface DeviceSettingsProps {
 
 export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpdate }) => {
   const [devices, setDevices] = useState<NativeDevice[]>([]);
+  const [pairDeviceIdsBefore, setPairDeviceIdsBefore] = useState<Set<string>>(new Set());
 
   // Device Pairing State
   const [showPairModal, setShowPairModal] = useState(false);
@@ -51,6 +52,12 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
     }
   };
 
+  const closePairModal = () => {
+    setShowPairModal(false);
+    setPairStartedAt(null);
+    fetchDevices();
+  };
+
   useEffect(() => {
     fetchDevices();
   }, []);
@@ -71,20 +78,24 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
   }, [showPairModal, pairExpiresAt]);
 
   useEffect(() => {
-    if (!showPairModal || !pairStartedAt || countdown <= 0) return;
+    if (!showPairModal || !pairStartedAt || !pairExpiresAt) return;
 
     const interval = setInterval(async () => {
+      if (Date.now() >= pairExpiresAt) {
+        clearInterval(interval);
+        return;
+      }
       try {
         const data = await apiRequest('/api/user/devices');
         const nextDevices: NativeDevice[] = data.devices || [];
         setDevices(nextDevices);
         const paired = nextDevices.some((dev) => {
+          if (!pairDeviceIdsBefore.has(dev.id) && dev.pushToken) return true;
           const seenAt = new Date(dev.lastSeenAt || dev.createdAt).getTime();
-          return Number.isFinite(seenAt) && seenAt >= pairStartedAt - 2000;
+          return Boolean(dev.pushToken) && Number.isFinite(seenAt) && seenAt >= pairStartedAt - 2000;
         });
         if (paired) {
-          setShowPairModal(false);
-          setPairStartedAt(null);
+          closePairModal();
           onUserUpdate();
         }
       } catch {
@@ -93,11 +104,12 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [showPairModal, pairStartedAt, countdown, onUserUpdate]);
+  }, [showPairModal, pairStartedAt, pairExpiresAt, pairDeviceIdsBefore, onUserUpdate]);
 
   const handleStartDevicePairing = async () => {
     setShowPairModal(true);
     setPairStartedAt(Date.now());
+    setPairDeviceIdsBefore(new Set(devices.map((dev) => dev.id)));
     try {
       const data = await apiRequest('/api/user/devices/pairing-token', { method: 'POST' });
       setPairPin(data.pinCode);
@@ -114,7 +126,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
       }
     } catch (err: any) {
       alert(err.message || 'Failed to generate pairing token');
-      setShowPairModal(false);
+      closePairModal();
     }
   };
 
@@ -283,7 +295,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
           <div className="modal-card">
             <div className="modal-header">
               <h3>Pair KySecurity Authenticator</h3>
-              <button className="close-btn" onClick={() => setShowPairModal(false)}>
+              <button className="close-btn" onClick={closePairModal}>
                 ×
               </button>
             </div>
@@ -318,7 +330,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
               </div>
             </div>
             <div className="modal-footer">
-              <button className="secondary-btn" onClick={() => setShowPairModal(false)}>
+              <button className="secondary-btn" onClick={closePairModal}>
                 Done
               </button>
             </div>

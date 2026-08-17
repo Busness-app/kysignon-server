@@ -73,6 +73,11 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
     if (!mfaRequired || mfaMode !== 'push' || !challengeId || !mfaToken) return;
 
     let isMounted = true;
+    const timeout = setTimeout(() => {
+      if (!isMounted) return;
+      setError('Push challenge expired. Please try again or use TOTP.');
+      setMfaMode('totp');
+    }, 5 * 60 * 1000);
     const interval = setInterval(async () => {
       try {
         const poll = await apiRequest('/api/auth/mfa/push/poll', {
@@ -84,6 +89,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
 
         if (poll.status === 'approved') {
           clearInterval(interval);
+          clearTimeout(timeout);
           // Complete login
           const finish = await apiRequest('/api/auth/mfa/push/finish', {
             method: 'POST',
@@ -94,16 +100,26 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
           }
         } else if (poll.status === 'denied' || poll.status === 'expired') {
           clearInterval(interval);
+          clearTimeout(timeout);
           setError(`Push challenge ${poll.status}. Please try again or use TOTP.`);
+          setMfaMode('totp');
         }
-      } catch {
-        // keep polling
+      } catch (err: any) {
+        if (!isMounted) return;
+        const message = err?.message || '';
+        if (message.includes('invalid_mfa_token') || message.toLowerCase().includes('expired')) {
+          clearInterval(interval);
+          clearTimeout(timeout);
+          setError('Push challenge expired. Please sign in again or use another MFA method.');
+          setMfaMode('totp');
+        }
       }
     }, 2000);
 
     return () => {
       isMounted = false;
       clearInterval(interval);
+      clearTimeout(timeout);
     };
   }, [mfaRequired, mfaMode, challengeId, mfaToken]);
 

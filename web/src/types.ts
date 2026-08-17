@@ -24,6 +24,8 @@ export interface NativeDevice {
   userId: string;
   deviceName: string;
   deviceIdentifier: string;
+  platform?: string;
+  pushToken?: string;
   isMfaApprover: boolean;
   lastSeenAt?: string;
   createdAt: string;

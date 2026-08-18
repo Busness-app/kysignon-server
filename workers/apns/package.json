@@ -1,0 +1,20 @@
+{
+  "name": "kysecurity-mobile-push-apns",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker that delivers KySecurity Mobile App push notifications to iOS devices via Apple Push Notification service (APNs).",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260719.1",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.112.0"
+  },
+  "overrides": {
+    "undici": "7.29.0"
+  }
+}

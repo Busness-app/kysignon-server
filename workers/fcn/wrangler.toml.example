@@ -1,0 +1,108 @@
+name = "kysecurity-mobile-push-fcm"
+main = "src/index.ts"
+# The date whose runtime behaviour this Worker is pinned to. It is not a
+# "leave it wherever it landed" field: it had sat on 2024-11-01 for well over a
+# year, so every runtime fix and API added since was invisible here. Bump it
+# deliberately (and re-run `npm run typecheck` plus a `wrangler dev` smoke test
+# when you do) rather than on a copy-paste — see
+# https://developers.cloudflare.com/workers/configuration/compatibility-dates/
+compatibility_date = "2026-07-31"
+
+# Persist the structured logs so send failures / rate-limit events are queryable
+# in the dashboard (not just via a live `wrangler tail`).
+[observability]
+enabled = true
+
+[vars]
+# The per-minute limit is enforced by the PUSH_RATE_LIMITER binding below.
+# RATE_LIMIT_PER_MINUTE here is display-only (/health + 429 body) and should be
+# kept equal to that binding's simple.limit.
+# NOTE: rolling hour/day limits were removed so an accepted send does zero KV
+# writes (free-tier friendly). The day tier is back as RELAY_DAILY_BUDGET below,
+# built the way that note prescribed — a Durable Object counter, not KV.
+RATE_LIMIT_PER_MINUTE = "10"  # display only; keep equal to PUSH_RATE_LIMITER.simple.limit
+
+# Relay-wide ceiling on sends per UTC day, enforced by the RELAY_COORDINATOR
+# Durable Object already bound below. Commented out = unmetered, which is the
+# behaviour every deployment had before this existed.
+#
+# Set it if you open REGISTRATION_ENABLED. The per-minute limiter buckets per
+# key, and with registration open anyone can mint another key from another
+# address — so the minute limit bounds how fast one caller sends and nothing at
+# all about what the relay spends against YOUR Firebase quota in a day. This is
+# the only setting that bounds that number.
+#
+# It is a single shared pool across every key. "0" closes the relay to sends;
+# unset is unmetered. Pick it from your provider quota with headroom, e.g. a
+# relay serving ~50 self-hosters at a few hundred notifications a day each.
+# RELAY_DAILY_BUDGET = "50000"
+
+# Public self-registration (POST /register). Set to "true" ONLY if you intend to
+# run an unauthenticated key-minting endpoint on the public internet: anyone who
+# can reach this Worker can then mint a key and spend your FCM quota. Left "false"
+# here so a copied-unchanged config is closed; there is no admin API to mint keys
+# with instead, so flip this on deliberately. When open, self-hosted servers mint their
+# own key with no maintainer involvement, and per-IP request rate is capped by the
+# REGISTER_RATE_LIMITER binding below (independent of PUSH_RATE_LIMITER, which
+# only governs /send).
+REGISTRATION_ENABLED = "false"
+
+# KV namespaces. Create these with:
+#   npx wrangler kv namespace create API_KEYS
+#   npx wrangler kv namespace create OAUTH_CACHE
+# then paste the returned ids below.
+[[kv_namespaces]]
+binding = "API_KEYS"
+id = "REPLACE_WITH_API_KEYS_NAMESPACE_ID"
+
+[[kv_namespaces]]
+binding = "OAUTH_CACHE"
+id = "REPLACE_WITH_OAUTH_CACHE_NAMESPACE_ID"
+
+# Native per-key minute-tier rate limiter (no KV writes). period must be 10 or 60;
+# namespace_id is any unique integer you pick for this limiter.
+[[unsafe.bindings]]
+name = "PUSH_RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+# Native per-IP minute-tier rate limiter for POST /register (no KV writes).
+# Bounds how fast one IP can mint self-registered keys; the "one active key
+# per IP" dedup in handleRegister alone only limits concurrent keys, not churn.
+[[unsafe.bindings]]
+name = "REGISTER_RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1003"
+simple = { limit = 5, period = 60 }
+
+# Analytics Engine dataset for per-key usage counters (off the KV write path).
+# Query lifetime totals per key via the Analytics Engine SQL API. Created on deploy.
+[[analytics_engine_datasets]]
+binding = "USAGE_ANALYTICS"
+dataset = "kysecurity_mobile_push_fcm_usage"
+
+# Secrets (set with `npx wrangler secret put <NAME>`, never commit them):
+#   FCM_CLIENT_EMAIL   - client_email from the Firebase service-account JSON
+#   FCM_PRIVATE_KEY    - private_key from the service-account JSON (PEM, keep the newlines)
+#   FCM_PROJECT_ID     - project_id from the service-account JSON
+#
+# There is no ADMIN_SECRET: the relay has no admin API. Keys are listed and
+# revoked with `npx wrangler kv key` against API_KEYS — see the README.
+
+# Durable Object holding the two ownership rules KV cannot hold atomically:
+# device-token pinning (first key to deliver to a token owns it) and one active
+# self-registered key per IP. Both were check-then-write against eventually
+# consistent KV, so concurrent requests could both win. Every request for one
+# token (or one IP) routes to the same instance by name and is handled one at a
+# time — see push-relay-shared/relay-coordinator.ts.
+#
+# Both /send and /register FAIL CLOSED without this binding, so it is required,
+# not optional. SQLite-backed and available on the Workers Free plan.
+[[durable_objects.bindings]]
+name = "RELAY_COORDINATOR"
+class_name = "RelayCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayCoordinator"]

@@ -1,0 +1,19 @@
+{
+  "name": "kysecurity-mobile-push-fcm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker that relays KySecurity Mobile App push notifications to Firebase Cloud Messaging.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260719.1",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.112.0"
+  },
+  "overrides": {
+    "undici": "7.29.0"
+  }
+}

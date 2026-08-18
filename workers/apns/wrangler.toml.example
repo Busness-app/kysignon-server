@@ -1,0 +1,106 @@
+name = "kysecurity-mobile-push-apns"
+main = "src/index.ts"
+# The date whose runtime behaviour this Worker is pinned to. It is not a
+# "leave it wherever it landed" field: it had sat on 2024-11-01 for well over a
+# year, so every runtime fix and API added since was invisible here. Bump it
+# deliberately (and re-run `npm run typecheck` plus a `wrangler dev` smoke test
+# when you do) rather than on a copy-paste — see
+# https://developers.cloudflare.com/workers/configuration/compatibility-dates/
+compatibility_date = "2026-07-31"
+
+# Persist the structured logs so send failures / rate-limit events are queryable
+# in the dashboard (not just via a live `wrangler tail`).
+[observability]
+enabled = true
+
+[vars]
+# The per-minute limit is enforced by the PUSH_RATE_LIMITER binding below.
+# RATE_LIMIT_PER_MINUTE here is display-only (/health + 429 body) and should be
+# kept equal to that binding's simple.limit.
+# NOTE: rolling hour/day limits were removed so an accepted send does zero KV
+# writes (free-tier friendly). The day tier is back as RELAY_DAILY_BUDGET below,
+# built the way that note prescribed — a Durable Object counter, not KV.
+RATE_LIMIT_PER_MINUTE = "10"  # display only; keep equal to PUSH_RATE_LIMITER.simple.limit
+
+# Relay-wide ceiling on sends per UTC day, enforced by the RELAY_COORDINATOR
+# Durable Object already bound below. Commented out = unmetered (the prior
+# behaviour). One shared pool across every key: the per-minute limiter is
+# per-key, and with REGISTRATION_ENABLED open a caller who wants a second
+# bucket just registers a second key, so nothing else bounds what this relay
+# spends against YOUR APNs quota in a day. "0" closes the relay to sends.
+# See the fuller note in ../worker/wrangler.toml.example.
+# RELAY_DAILY_BUDGET = "50000"
+
+# Public self-registration (POST /register). Set to "true" ONLY if you intend to
+# run an unauthenticated key-minting endpoint on the public internet: anyone who
+# can reach this Worker can then mint a key and spend your APNs quota. Left "false"
+# here so a copied-unchanged config is closed; there is no admin API to mint keys
+# with instead, so flip this on deliberately. When open, self-hosted servers mint their
+# own key with no maintainer involvement, and per-IP request rate is capped by the
+# REGISTER_RATE_LIMITER binding below (independent of PUSH_RATE_LIMITER, which
+# only governs /send).
+REGISTRATION_ENABLED = "false"
+
+# KV namespaces. Create these with:
+#   npx wrangler kv namespace create API_KEYS
+#   npx wrangler kv namespace create APNS_TOKEN_CACHE
+# then paste the returned ids below. These MUST be distinct from the FCM worker's namespaces.
+[[kv_namespaces]]
+binding = "API_KEYS"
+id = "REPLACE_WITH_API_KEYS_NAMESPACE_ID"
+
+[[kv_namespaces]]
+binding = "APNS_TOKEN_CACHE"
+id = "REPLACE_WITH_APNS_TOKEN_CACHE_NAMESPACE_ID"
+
+# Native per-key minute-tier rate limiter (no KV writes). period must be 10 or 60;
+# namespace_id MUST be distinct from the FCM worker's (which uses 1001).
+[[unsafe.bindings]]
+name = "PUSH_RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }
+
+# Native per-IP minute-tier rate limiter for POST /register (no KV writes).
+# namespace_id MUST be distinct from the FCM worker's (which uses 1003).
+[[unsafe.bindings]]
+name = "REGISTER_RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1004"
+simple = { limit = 5, period = 60 }
+
+# Analytics Engine dataset for per-key usage counters (off the KV write path).
+# Query lifetime totals per key via the Analytics Engine SQL API. Created on deploy.
+[[analytics_engine_datasets]]
+binding = "USAGE_ANALYTICS"
+dataset = "kysecurity_mobile_push_apns_usage"
+
+# Secrets (set with `npx wrangler secret put <NAME>`, never commit them):
+#   APNS_AUTH_KEY      - .p8 PEM private key contents from Apple Developer portal (preserve newlines)
+#   APNS_KEY_ID        - Key ID from Apple Developer portal
+#   APNS_TEAM_ID       - Team ID from Apple Developer portal
+#   APNS_TOPIC         - KySecurity Mobile App bundle ID
+#   APNS_ENVIRONMENT   - "production" or "sandbox" (unset means production).
+#                        Any other value is a configuration error, not a
+#                        default: /health reports configured=false and /send
+#                        refuses, rather than the relay guessing a host.
+#
+# There is no ADMIN_SECRET: the relay has no admin API. Keys are listed and
+# revoked with `npx wrangler kv key` against API_KEYS — see the README.
+
+# Durable Object holding the two ownership rules KV cannot hold atomically:
+# device-token pinning (first key to deliver to a token owns it) and one active
+# self-registered key per IP. Both were check-then-write against eventually
+# consistent KV, so concurrent requests could both win. Every request for one
+# token (or one IP) routes to the same instance by name and is handled one at a
+# time — see push-relay-shared/relay-coordinator.ts.
+#
+# Both /send and /register FAIL CLOSED without this binding, so it is required,
+# not optional. SQLite-backed and available on the Workers Free plan.
+[[durable_objects.bindings]]
+name = "RELAY_COORDINATOR"
+class_name = "RelayCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayCoordinator"]

@@ -15,6 +15,40 @@ import {
   Globe,
 } from 'lucide-react';
 
+const PRESET_METADATA: Record<
+  string,
+  { defaultName: string; defaultUrl: string; defaultDesc?: string; defaultIcon?: string }
+> = {
+  kypost: {
+    defaultName: 'KyPost Mail Server',
+    defaultUrl: 'https://mail.example.com/scim/v2',
+  },
+  kypasswords: {
+    defaultName: 'KyPasswords Vault',
+    defaultUrl: 'https://passwords.example.com/scim/v2',
+  },
+  kybookmarks: {
+    defaultName: 'KyBookmarks',
+    defaultUrl: 'https://bookmarks.example.com/scim/v2',
+  },
+  kynotes: {
+    defaultName: 'KyNotes',
+    defaultUrl: 'https://notes.example.com/scim/v2',
+  },
+  scim: {
+    defaultName: 'Nextcloud',
+    defaultUrl: 'https://cloud.example.com/apps/user_scim/v2',
+    defaultDesc: 'Self-hosted cloud storage & collaboration',
+    defaultIcon: 'https://nextcloud.com/media/nextcloud-logo-white.svg',
+  },
+  custom: {
+    defaultName: 'Custom SCIM Service',
+    defaultUrl: 'https://api.example.com/scim/v2',
+    defaultDesc: '',
+    defaultIcon: '',
+  },
+};
+
 export const AdminSystems: React.FC = () => {
   const [systems, setSystems] = useState<PairedSystem[]>([]);
 
@@ -45,12 +79,15 @@ export const AdminSystems: React.FC = () => {
     fetchSystems();
   }, []);
 
-  const applyPreset = (type: string, name: string, url: string, desc = '', icon = '') => {
-    setSystemType(type);
-    setTargetName(name);
-    setCallbackUrl(url);
-    setDescription(desc);
-    setIconUrl(icon);
+  const handleTypeChange = (newType: string) => {
+    setSystemType(newType);
+    const meta = PRESET_METADATA[newType];
+    if (meta) {
+      setTargetName(meta.defaultName);
+      setCallbackUrl(meta.defaultUrl);
+      setDescription(meta.defaultDesc || '');
+      setIconUrl(meta.defaultIcon || '');
+    }
     setFormError(null);
   };
 
@@ -82,11 +119,7 @@ export const AdminSystems: React.FC = () => {
 
   const handleOpenModal = () => {
     setShowPairModal(true);
-    setTargetName('KyPost Mail Server');
-    setSystemType('kypost');
-    setDescription('');
-    setIconUrl('');
-    setCallbackUrl('https://mail.example.com/scim/v2');
+    handleTypeChange('kypost');
     setCreatedToken(null);
     setFormError(null);
   };
@@ -301,58 +334,18 @@ export const AdminSystems: React.FC = () => {
                 {formError && <div className="alert-box error sm">{formError}</div>}
 
                 <div className="form-group">
-                  <label className="form-label">Quick App Preset</label>
-                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                    <button
-                      type="button"
-                      className="secondary-btn sm"
-                      onClick={() => applyPreset('kypost', 'KyPost Mail Server', 'https://mail.example.com/scim/v2')}
-                    >
-                      + KyPost
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-btn sm"
-                      onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', 'https://passwords.example.com/scim/v2')}
-                    >
-                      + KyPasswords
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-btn sm"
-                      onClick={() => applyPreset('kybookmarks', 'KyBookmarks', 'https://bookmarks.example.com/scim/v2')}
-                    >
-                      + KyBookmarks
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-btn sm"
-                      onClick={() => applyPreset('kynotes', 'KyNotes', 'https://notes.example.com/scim/v2')}
-                    >
-                      + KyNotes
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-btn sm"
-                      onClick={() => applyPreset('scim', 'Nextcloud', 'https://cloud.example.com/apps/user_scim/v2', 'Self-hosted cloud storage & collaboration', 'https://nextcloud.com/media/nextcloud-logo-white.svg')}
-                    >
-                      + Generic SCIM
-                    </button>
-                  </div>
-                </div>
-
-                <div className="form-group">
                   <label className="form-label">Product / Service Type</label>
                   <select
                     className="form-select"
                     value={systemType}
-                    onChange={(e) => setSystemType(e.target.value)}
+                    onChange={(e) => handleTypeChange(e.target.value)}
+                    autoFocus
                   >
                     <option value="kypost">KyPost (IMAP Mail & Security)</option>
                     <option value="kypasswords">KyPasswords (Password Vault)</option>
                     <option value="kybookmarks">KyBookmarks (Encrypted Bookmarks)</option>
                     <option value="kynotes">KyNotes (Encrypted Notes)</option>
-                    <option value="scim">Generic SCIM 2.0 Service Provider</option>
+                    <option value="scim">Generic SCIM 2.0 (Nextcloud, OwnCloud, etc.)</option>
                     <option value="custom">Custom Microservice</option>
                   </select>
                 </div>

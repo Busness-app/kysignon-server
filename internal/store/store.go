@@ -1540,11 +1540,17 @@ func (s *Store) DeleteAuditEventsOlderThan(cutoff time.Time) error {
 	return err
 }
 
-func (s *Store) ListAuditEvents(limit int) ([]AuditEvent, error) {
-	query := `SELECT id, actor_id, actor_username, action, target_id, target_type, ip_address, user_agent, outcome, details_json, created_at FROM audit_events ORDER BY created_at DESC LIMIT ?`
-	rows, err := s.db.Query(query, limit)
+func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, int, error) {
+	var total int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&total)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+
+	query := `SELECT id, actor_id, actor_username, action, target_id, target_type, ip_address, user_agent, outcome, details_json, created_at FROM audit_events ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	rows, err := s.db.Query(query, limit, offset)
+	if err != nil {
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -1553,7 +1559,7 @@ func (s *Store) ListAuditEvents(limit int) ([]AuditEvent, error) {
 		var e AuditEvent
 		var actorID, actorUser, targetID, targetType, details sql.NullString
 		if err := rows.Scan(&e.ID, &actorID, &actorUser, &e.Action, &targetID, &targetType, &e.IPAddress, &e.UserAgent, &e.Outcome, &details, &e.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if actorID.Valid {
 			e.ActorID = actorID.String
@@ -1572,5 +1578,5 @@ func (s *Store) ListAuditEvents(limit int) ([]AuditEvent, error) {
 		}
 		events = append(events, e)
 	}
-	return events, nil
+	return events, total, nil
 }

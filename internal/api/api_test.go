@@ -484,3 +484,96 @@ func setupTestServerWith(t *testing.T, opts ...func(*config.Config)) (*Server, *
 		_ = os.RemoveAll(tmpDir)
 	}
 }
+
+func TestAdminListAuditEventsPagination(t *testing.T) {
+	server, dbStore, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// 1. Create Admin & Session
+	adminPassHash, _ := auth.HashPassword("admin-secure-password-123")
+	admin := &store.User{
+		ID:           "admin-user-id",
+		Username:     "admin",
+		DisplayName:  "System Administrator",
+		Email:        "admin@example.com",
+		PasswordHash: adminPassHash,
+		Role:         "admin",
+		Status:       "active",
+	}
+	_ = dbStore.CreateUser(admin)
+
+	adminSessionToken, _ := crypto.GenerateRandomHex(32)
+	_ = dbStore.CreateSession(&store.Session{
+		ID:               "admin-sess-id",
+		UserID:           admin.ID,
+		SessionTokenHash: crypto.HashSHA256(adminSessionToken),
+		IPAddress:        "127.0.0.1",
+		UserAgent:        "TestAdminBrowser",
+		ExpiresAt:        time.Now().UTC().Add(time.Hour),
+	})
+	adminCookie := &http.Cookie{Name: "kysignon_session", Value: adminSessionToken}
+
+	// 2. Insert test audit events
+	for i := 1; i <= 20; i++ {
+		_ = dbStore.RecordAuditEvent(&store.AuditEvent{
+			ID:            uuid.New().String(),
+			ActorUsername: "admin",
+			Action:        "admin.test_action",
+			Outcome:       "success",
+			IPAddress:     "127.0.0.1",
+		})
+	}
+
+	// 3. Query page 1 with limit 5
+	req := httptest.NewRequest("GET", "/api/admin/audit-events?page=1&limit=5", nil)
+	req.AddCookie(adminCookie)
+	rec := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from GET /api/admin/audit-events, got %d", rec.Code)
+	}
+
+	var resp struct {
+		AuditEvents []store.AuditEvent `json:"auditEvents"`
+		Total       int                `json:"total"`
+		Page        int                `json:"page"`
+		Limit       int                `json:"limit"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Total != 20 {
+		t.Fatalf("expected total 20, got %d", resp.Total)
+	}
+	if len(resp.AuditEvents) != 5 {
+		t.Fatalf("expected 5 events on page 1, got %d", len(resp.AuditEvents))
+	}
+	if resp.Page != 1 || resp.Limit != 5 {
+		t.Fatalf("expected page 1, limit 5, got page %d, limit %d", resp.Page, resp.Limit)
+	}
+
+	// 4. Query page 2 with limit 5
+	req2 := httptest.NewRequest("GET", "/api/admin/audit-events?page=2&limit=5", nil)
+	req2.AddCookie(adminCookie)
+	rec2 := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(rec2, req2)
+
+	var resp2 struct {
+		AuditEvents []store.AuditEvent `json:"auditEvents"`
+		Total       int                `json:"total"`
+		Page        int                `json:"page"`
+		Limit       int                `json:"limit"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp2.AuditEvents) != 5 {
+		t.Fatalf("expected 5 events on page 2, got %d", len(resp2.AuditEvents))
+	}
+	if resp2.Page != 2 {
+		t.Fatalf("expected page 2, got %d", resp2.Page)
+	}
+}
+

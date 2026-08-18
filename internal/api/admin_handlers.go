@@ -768,13 +768,23 @@ func (h *AdminHandler) DeleteApplication(w http.ResponseWriter, r *http.Request)
 
 // ListAuditEvents returns audit trail for admin inspection.
 func (h *AdminHandler) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
-	limitStr := r.URL.Query().Get("limit")
-	limit := 100
-	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 500 {
+	page := 1
+	if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 0 {
+		page = p
+	}
+
+	limit := 25
+	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 500 {
 		limit = l
 	}
 
-	events, err := h.store.ListAuditEvents(limit)
+	offset := (page - 1) * limit
+	if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o >= 0 {
+		offset = o
+		page = (offset / limit) + 1
+	}
+
+	events, total, err := h.store.ListAuditEvents(limit, offset)
 	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
@@ -784,5 +794,10 @@ func (h *AdminHandler) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"auditEvents": events})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"auditEvents": events,
+		"total":       total,
+		"page":        page,
+		"limit":       limit,
+	})
 }

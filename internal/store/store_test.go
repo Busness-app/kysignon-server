@@ -157,3 +157,61 @@ func TestLegacyDevicePairingTokensAreRebuiltWithoutPlaintextPINs(t *testing.T) {
 		t.Fatalf("new pairing token failed after migration: %v", err)
 	}
 }
+
+func TestListAuditEventsPagination(t *testing.T) {
+	s, err := New(filepath.Join(t.TempDir(), "audit_test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for i := 1; i <= 15; i++ {
+		err := s.RecordAuditEvent(&AuditEvent{
+			ID:            strings.Repeat("a", 10) + string(rune('0'+i)),
+			ActorUsername: "admin",
+			Action:        "test.action",
+			Outcome:       "success",
+			IPAddress:     "127.0.0.1",
+		})
+		if err != nil {
+			t.Fatalf("RecordAuditEvent failed: %v", err)
+		}
+	}
+
+	// Page 1 with limit 5
+	events, total, err := s.ListAuditEvents(5, 0)
+	if err != nil {
+		t.Fatalf("ListAuditEvents failed: %v", err)
+	}
+	if total != 15 {
+		t.Fatalf("expected total 15, got %d", total)
+	}
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events on page 1, got %d", len(events))
+	}
+
+	// Page 2 with limit 5 offset 5
+	events2, total2, err := s.ListAuditEvents(5, 5)
+	if err != nil {
+		t.Fatalf("ListAuditEvents page 2 failed: %v", err)
+	}
+	if total2 != 15 {
+		t.Fatalf("expected total 15, got %d", total2)
+	}
+	if len(events2) != 5 {
+		t.Fatalf("expected 5 events on page 2, got %d", len(events2))
+	}
+
+	// Page 4 with limit 5 offset 15 (empty)
+	events4, total4, err := s.ListAuditEvents(5, 15)
+	if err != nil {
+		t.Fatalf("ListAuditEvents page 4 failed: %v", err)
+	}
+	if total4 != 15 {
+		t.Fatalf("expected total 15, got %d", total4)
+	}
+	if len(events4) != 0 {
+		t.Fatalf("expected 0 events on page 4, got %d", len(events4))
+	}
+}
+

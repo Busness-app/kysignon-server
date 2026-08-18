@@ -234,6 +234,7 @@ export const AdminSystems: React.FC = () => {
                       <option value="kypasswords">KyPasswords (Password Vault)</option>
                       <option value="kybookmarks">KyBookmarks (Encrypted Bookmarks)</option>
                       <option value="kynotes">KyNotes (Encrypted Notes)</option>
+                      <option value="scim">Generic SCIM 2.0 Service Provider (RESTful /Users)</option>
                       <option value="custom">Custom KySecurity Microservice</option>
                     </select>
                   </div>

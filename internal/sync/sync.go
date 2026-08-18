@@ -316,11 +316,181 @@ func (e *Engine) newAccountSyncEvents(userID, eventType string, userPayload any)
 	return events, nil
 }
 
+// SCIM Schema URIs and standard types (RFC 7643 / RFC 7644)
+const (
+	SCIMUserSchema = "urn:ietf:params:scim:schemas:core:2.0:User"
+)
+
+type SCIMName struct {
+	Formatted  string `json:"formatted,omitempty"`
+	FamilyName string `json:"familyName,omitempty"`
+	GivenName  string `json:"givenName,omitempty"`
+}
+
+type SCIMEmail struct {
+	Value   string `json:"value"`
+	Type    string `json:"type,omitempty"`
+	Primary bool   `json:"primary"`
+}
+
+type SCIMRole struct {
+	Value   string `json:"value"`
+	Primary bool   `json:"primary"`
+}
+
+type SCIMMeta struct {
+	ResourceType string     `json:"resourceType"`
+	Created      *time.Time `json:"created,omitempty"`
+	LastModified *time.Time `json:"lastModified,omitempty"`
+	Location     string     `json:"location,omitempty"`
+}
+
+type SCIMUserResource struct {
+	Schemas     []string    `json:"schemas"`
+	ID          string      `json:"id"`
+	ExternalID  string      `json:"externalId,omitempty"`
+	UserName    string      `json:"userName"`
+	DisplayName string      `json:"displayName,omitempty"`
+	Name        *SCIMName   `json:"name,omitempty"`
+	Emails      []SCIMEmail `json:"emails,omitempty"`
+	Roles       []SCIMRole  `json:"roles,omitempty"`
+	Active      bool        `json:"active"`
+	Meta        *SCIMMeta   `json:"meta,omitempty"`
+}
+
+// UserToSCIMResource converts an internal KySignOn user into a standard SCIM 2.0 User resource.
+func UserToSCIMResource(u *store.User) *SCIMUserResource {
+	if u == nil {
+		return nil
+	}
+	res := &SCIMUserResource{
+		Schemas:     []string{SCIMUserSchema},
+		ID:          u.ID,
+		ExternalID:  u.ID,
+		UserName:    u.Username,
+		DisplayName: u.DisplayName,
+		Name: &SCIMName{
+			Formatted: u.DisplayName,
+		},
+		Active: u.Status == "active",
+		Meta: &SCIMMeta{
+			ResourceType: "User",
+			Created:      &u.CreatedAt,
+			LastModified: &u.UpdatedAt,
+		},
+	}
+	if u.Email != "" {
+		res.Emails = []SCIMEmail{
+			{
+				Value:   u.Email,
+				Type:    "work",
+				Primary: true,
+			},
+		}
+	}
+	if u.Role != "" {
+		res.Roles = []SCIMRole{
+			{
+				Value:   u.Role,
+				Primary: true,
+			},
+		}
+	}
+	return res
+}
+
+// FormatUserAsSCIM parses arbitrary user payload data into a SCIM 2.0 User resource.
+func FormatUserAsSCIM(userPayload any) (*SCIMUserResource, error) {
+	if userPayload == nil {
+		return nil, errors.New("nil user payload")
+	}
+	switch v := userPayload.(type) {
+	case *SCIMUserResource:
+		return v, nil
+	case SCIMUserResource:
+		return &v, nil
+	case *store.User:
+		return UserToSCIMResource(v), nil
+	case store.User:
+		return UserToSCIMResource(&v), nil
+	default:
+		data, err := json.Marshal(userPayload)
+		if err != nil {
+			return nil, err
+		}
+		var temp struct {
+			Schemas     []string `json:"schemas"`
+			ID          string   `json:"id"`
+			UserName    string   `json:"userName"`
+			DisplayName string   `json:"displayName"`
+			Email       string   `json:"email"`
+			Username    string   `json:"username"`
+			Role        string   `json:"role"`
+			Status      string   `json:"status"`
+			Active      *bool    `json:"active"`
+		}
+		if err := json.Unmarshal(data, &temp); err != nil {
+			return nil, err
+		}
+		if len(temp.Schemas) > 0 {
+			var scimRes SCIMUserResource
+			if err := json.Unmarshal(data, &scimRes); err == nil {
+				return &scimRes, nil
+			}
+		}
+		uname := temp.UserName
+		if uname == "" {
+			uname = temp.Username
+		}
+		active := true
+		if temp.Active != nil {
+			active = *temp.Active
+		} else if temp.Status != "" {
+			active = (temp.Status == "active")
+		}
+
+		res := &SCIMUserResource{
+			Schemas:     []string{SCIMUserSchema},
+			ID:          temp.ID,
+			ExternalID:  temp.ID,
+			UserName:    uname,
+			DisplayName: temp.DisplayName,
+			Name: &SCIMName{
+				Formatted: temp.DisplayName,
+			},
+			Active: active,
+			Meta: &SCIMMeta{
+				ResourceType: "User",
+			},
+		}
+		if temp.Email != "" {
+			res.Emails = []SCIMEmail{
+				{Value: temp.Email, Type: "work", Primary: true},
+			}
+		}
+		if temp.Role != "" {
+			res.Roles = []SCIMRole{
+				{Value: temp.Role, Primary: true},
+			}
+		}
+		return res, nil
+	}
+}
+
 type SyncWebhookPayload struct {
-	EventID   string          `json:"eventId"`
-	EventType string          `json:"eventType"`
-	Timestamp string          `json:"timestamp"`
-	User      json.RawMessage `json:"user"`
+	Schemas     []string        `json:"schemas,omitempty"`
+	ID          string          `json:"id,omitempty"`
+	EventID     string          `json:"eventId"`
+	EventType   string          `json:"eventType"`
+	Timestamp   string          `json:"timestamp"`
+	User        json.RawMessage `json:"user"`
+	UserName    string          `json:"userName,omitempty"`
+	DisplayName string          `json:"displayName,omitempty"`
+	Name        *SCIMName       `json:"name,omitempty"`
+	Emails      []SCIMEmail     `json:"emails,omitempty"`
+	Roles       []SCIMRole      `json:"roles,omitempty"`
+	Active      bool            `json:"active"`
+	Meta        *SCIMMeta       `json:"meta,omitempty"`
 }
 
 // retryDelay is exponential with a ceiling, so a system that is down is not hammered every
@@ -375,18 +545,40 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 			continue
 		}
 
-		payloadBytes, err := json.Marshal(SyncWebhookPayload{
-			EventID:   ev.ID,
-			EventType: ev.EventType,
-			Timestamp: ev.CreatedAt.Format(time.RFC3339),
-			User:      json.RawMessage(ev.PayloadJSON),
-		})
+		scimUser, _ := FormatUserAsSCIM(json.RawMessage(ev.PayloadJSON))
+		var payloadBytes []byte
+		if scimUser != nil {
+			rawUser, _ := json.Marshal(scimUser)
+			payload := SyncWebhookPayload{
+				Schemas:     scimUser.Schemas,
+				ID:          scimUser.ID,
+				EventID:     ev.ID,
+				EventType:   ev.EventType,
+				Timestamp:   ev.CreatedAt.Format(time.RFC3339),
+				User:        rawUser,
+				UserName:    scimUser.UserName,
+				DisplayName: scimUser.DisplayName,
+				Name:        scimUser.Name,
+				Emails:      scimUser.Emails,
+				Roles:       scimUser.Roles,
+				Active:      scimUser.Active,
+				Meta:        scimUser.Meta,
+			}
+			payloadBytes, err = json.Marshal(payload)
+		} else {
+			payloadBytes, err = json.Marshal(SyncWebhookPayload{
+				EventID:   ev.ID,
+				EventType: ev.EventType,
+				Timestamp: ev.CreatedAt.Format(time.RFC3339),
+				User:      json.RawMessage(ev.PayloadJSON),
+			})
+		}
 		if err != nil {
 			_ = e.store.UpdateSyncEventStatus(ev.ID, "failed", err.Error(), ev.Attempts+1, nil)
 			continue
 		}
 
-		if err := e.deliver(ctx, sys, secret, ev.EventType, payloadBytes); err != nil {
+		if err := e.deliver(ctx, sys, secret, ev.EventType, ev.UserID, payloadBytes); err != nil {
 			attempts := ev.Attempts + 1
 			_ = e.store.UpdatePairedSystemStatus(sys.ID, "failing")
 			if attempts >= 5 {
@@ -405,21 +597,70 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 	return nil
 }
 
-func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, eventType string, payload []byte) error {
-	// Sign the timestamp alongside the body so a captured delivery cannot be replayed
-	// indefinitely against a downstream that checks it.
+// resolveSCIMURL calculates the RESTful SCIM 2.0 route and HTTP method according to RFC 7644.
+func resolveSCIMURL(sys *store.PairedSystem, eventType, userID string) (method string, targetURL string, isBodyRequired bool) {
+	trimmed := strings.TrimRight(sys.CallbackURL, "/")
+
+	// If system is explicitly scim or callback URL contains /scim or ends with /Users or /v2
+	isRESTfulSCIM := sys.SystemType == "scim" ||
+		strings.Contains(trimmed, "/scim") ||
+		strings.HasSuffix(trimmed, "/Users") ||
+		strings.HasSuffix(trimmed, "/v2")
+
+	if isRESTfulSCIM {
+		var baseUsersURL string
+		if strings.HasSuffix(trimmed, "/Users") {
+			baseUsersURL = trimmed
+		} else {
+			baseUsersURL = trimmed + "/Users"
+		}
+
+		switch eventType {
+		case "user.created":
+			return http.MethodPost, baseUsersURL, true
+		case "user.updated":
+			return http.MethodPut, fmt.Sprintf("%s/%s", baseUsersURL, url.PathEscape(userID)), true
+		case "user.deleted":
+			return http.MethodDelete, fmt.Sprintf("%s/%s", baseUsersURL, url.PathEscape(userID)), false
+		default:
+			return http.MethodPost, baseUsersURL, true
+		}
+	}
+
+	// For legacy webhooks, default to POST callback URL directly
+	return http.MethodPost, trimmed, true
+}
+
+func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, eventType, userID string, payload []byte) error {
+	method, targetURL, isBodyRequired := resolveSCIMURL(sys, eventType, userID)
+
+	var bodyReader *bytes.Reader
+	var signPayload []byte
+	if isBodyRequired && payload != nil {
+		bodyReader = bytes.NewReader(payload)
+		signPayload = payload
+	} else {
+		bodyReader = bytes.NewReader(nil)
+		signPayload = []byte{}
+	}
+
+	// Sign the timestamp alongside the body for KySecurity HMAC authenticity
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(timestamp))
 	mac.Write([]byte("."))
-	mac.Write(payload)
+	mac.Write(signPayload)
 	signature := hex.EncodeToString(mac.Sum(nil))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sys.CallbackURL, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, bodyReader)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if isBodyRequired {
+		req.Header.Set("Content-Type", "application/scim+json")
+	}
+	req.Header.Set("Accept", "application/scim+json, application/json")
+	req.Header.Set("Authorization", "Bearer "+secret)
 	req.Header.Set("X-KySignOn-Signature", signature)
 	req.Header.Set("X-KySignOn-Timestamp", timestamp)
 	req.Header.Set("X-KySignOn-Event-Type", eventType)
@@ -430,10 +671,14 @@ func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, e
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("system %s returned status %d", sys.Name, resp.StatusCode)
+	// SCIM success codes: 200, 201, 204, or 404 on DELETE (already gone), or 409 on POST (already exists)
+	if (resp.StatusCode >= 200 && resp.StatusCode < 300) ||
+		(eventType == "user.deleted" && resp.StatusCode == http.StatusNotFound) ||
+		(eventType == "user.created" && resp.StatusCode == http.StatusConflict) {
+		return nil
 	}
-	return nil
+
+	return fmt.Errorf("system %s returned status %d", sys.Name, resp.StatusCode)
 }
 
 // ResyncAllAccounts pushes every current account to one paired system.
@@ -451,14 +696,8 @@ func (e *Engine) ResyncAllAccounts(systemID string) error {
 		return err
 	}
 	for _, u := range users {
-		payload, err := json.Marshal(map[string]any{
-			"id":          u.ID,
-			"username":    u.Username,
-			"displayName": u.DisplayName,
-			"email":       u.Email,
-			"role":        u.Role,
-			"status":      u.Status,
-		})
+		scimRes := UserToSCIMResource(&u)
+		payload, err := json.Marshal(scimRes)
 		if err != nil {
 			return err
 		}

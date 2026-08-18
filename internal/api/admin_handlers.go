@@ -721,8 +721,8 @@ func (h *AdminHandler) CreateApplication(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "application": app})
 }
 
-func userSyncPayload(user *store.User) map[string]any {
-	return map[string]any{"id": user.ID, "username": user.Username, "displayName": user.DisplayName, "email": user.Email, "role": user.Role, "status": user.Status}
+func userSyncPayload(user *store.User) *sync.SCIMUserResource {
+	return sync.UserToSCIMResource(user)
 }
 
 func validateRegisteredURLs(redirectURIs []string, launchURL string) error {

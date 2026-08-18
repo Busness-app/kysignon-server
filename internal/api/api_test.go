@@ -242,11 +242,14 @@ func TestAdminSystemPairingHandshakeViaAPI(t *testing.T) {
 	csrfToken := server.middleware.IssueCSRFToken(adminSessionToken)
 	csrfCookie := &http.Cookie{Name: "kysignon_csrf", Value: csrfToken}
 
-	// 2. Admin calls POST /api/admin/systems/pairing-token
-	pairingReqBody, _ := json.Marshal(map[string]string{
-		"systemType": "kypost",
+	// 2. Admin calls POST /api/admin/systems to connect a SCIM target
+	scimReqBody, _ := json.Marshal(map[string]string{
+		"name":        "Production KyPost Cluster",
+		"systemType":  "kypost",
+		"callbackUrl": "https://kypost.example.com/scim/v2",
+		"bearerToken": "custom-bearer-token-xyz",
 	})
-	pairReq := httptest.NewRequest("POST", "/api/admin/systems/pairing-token", bytes.NewReader(pairingReqBody))
+	pairReq := httptest.NewRequest("POST", "/api/admin/systems", bytes.NewReader(scimReqBody))
 	pairReq.Header.Set("Content-Type", "application/json")
 	pairReq.Header.Set("X-CSRF-Token", csrfToken)
 	pairReq.AddCookie(adminCookie)
@@ -255,47 +258,19 @@ func TestAdminSystemPairingHandshakeViaAPI(t *testing.T) {
 
 	server.httpServer.Handler.ServeHTTP(pairRec, pairReq)
 	if pairRec.Code != http.StatusOK {
-		t.Fatalf("expected 200 from pairing-token, got %d: %s", pairRec.Code, pairRec.Body.String())
+		t.Fatalf("expected 200 from POST /api/admin/systems, got %d: %s", pairRec.Code, pairRec.Body.String())
 	}
 
 	var pairResp struct {
-		PairingToken string `json:"pairingToken"`
-		PINCode      string `json:"pinCode"`
-		SystemType   string `json:"systemType"`
+		System      store.PairedSystem `json:"system"`
+		BearerToken string             `json:"bearerToken"`
 	}
 	_ = json.NewDecoder(pairRec.Body).Decode(&pairResp)
-	if pairResp.PairingToken == "" || pairResp.PINCode == "" {
-		t.Fatalf("unexpected pairing token response: %+v", pairResp)
+	if pairResp.System.ID == "" || pairResp.BearerToken != "custom-bearer-token-xyz" {
+		t.Fatalf("unexpected system creation response: %+v", pairResp)
 	}
 
-	// 3. Downstream KyPost product registers via POST /api/systems/register (Unauthenticated with token)
-	regBody, _ := json.Marshal(map[string]string{
-		"pairingToken": pairResp.PairingToken,
-		"pinCode":      pairResp.PINCode,
-		"systemName":   "Production KyPost Cluster",
-		"systemType":   "kypost",
-		"callbackUrl":  "https://kypost.example.com/api/sso/sync",
-	})
-	regReq := httptest.NewRequest("POST", "/api/systems/register", bytes.NewReader(regBody))
-	regReq.Header.Set("Content-Type", "application/json")
-	regRec := httptest.NewRecorder()
-
-	server.httpServer.Handler.ServeHTTP(regRec, regReq)
-	if regRec.Code != http.StatusOK {
-		t.Fatalf("expected 200 from /api/systems/register, got %d: %s", regRec.Code, regRec.Body.String())
-	}
-
-	var regResp struct {
-		SystemID   string `json:"systemId"`
-		HMACSecret string `json:"hmacSecret"`
-		Status     string `json:"status"`
-	}
-	_ = json.NewDecoder(regRec.Body).Decode(&regResp)
-	if regResp.SystemID == "" || regResp.HMACSecret == "" || regResp.Status != "active" {
-		t.Fatalf("unexpected system registration response: %+v", regResp)
-	}
-
-	// 4. Admin lists systems via GET /api/admin/systems
+	// 3. Admin lists systems via GET /api/admin/systems
 	listReq := httptest.NewRequest("GET", "/api/admin/systems", nil)
 	listReq.AddCookie(adminCookie)
 	listRec := httptest.NewRecorder()

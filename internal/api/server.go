@@ -120,9 +120,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/auth/mfa/push/finish", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(authH.FinishPushLogin)))
 	mux.Handle("POST /api/mfa/push/respond", s.middleware.RateLimit("push_respond", 15, 0.5)(http.HandlerFunc(authH.RespondPush)))
 
-	// System Pairing Redemption (Unauthenticated with 90s token)
-	mux.Handle("POST /api/systems/register", s.middleware.RateLimit("system_reg", 10, 0.2)(http.HandlerFunc(adminH.RegisterPairedSystem)))
-
 	// Native Device Pairing Registration (Unauthenticated with 90s PIN/token)
 	mux.Handle("POST /api/notifications/native/register", s.middleware.RateLimit("device_reg", 10, 0.2)(http.HandlerFunc(devH.RegisterNativeDevice)))
 
@@ -160,7 +157,6 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/admin/users/{id}/revoke-sessions", adminM(http.HandlerFunc(adminH.RevokeUserSessions)))
 	mux.Handle("DELETE /api/admin/users/{id}", adminM(http.HandlerFunc(adminH.DeleteUser)))
 
-	mux.Handle("POST /api/admin/systems/pairing-token", adminM(http.HandlerFunc(adminH.GenerateSystemPairingToken)))
 	mux.Handle("GET /api/admin/systems", adminM(http.HandlerFunc(adminH.ListPairedSystems)))
 	mux.Handle("POST /api/admin/systems", adminM(http.HandlerFunc(adminH.CreatePairedSystem)))
 	mux.Handle("POST /api/admin/systems/{id}/resync", adminM(http.HandlerFunc(adminH.ResyncSystem)))

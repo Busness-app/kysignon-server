@@ -491,16 +491,10 @@ func TestDeletingUserQueuesDeletionSyncEvent(t *testing.T) {
 	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
 	victim := newUser(t, db, "user")
 
-	token, pin, _, err := syncEngine.GenerateSystemPairingToken("kypost", admin.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := syncEngine.RegisterPairedSystem(&sync.SystemRegistrationRequest{
-		PairingToken: token,
-		PINCode:      pin,
-		SystemName:   "KyPost",
-		SystemType:   "kypost",
-		CallbackURL:  "https://kypost.example.com/api/sso/sync",
+	if _, _, err := syncEngine.CreateSystem(&sync.CreateSystemRequest{
+		Name:        "KyPost",
+		SystemType:  "kypost",
+		CallbackURL: "https://kypost.example.com/scim/v2",
 	}); err != nil {
 		t.Fatal(err)
 	}

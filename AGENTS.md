@@ -5,7 +5,7 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 ## Core Capabilities & Responsibilities
 
 1. **Central User Directory & Replication**: KySignOn is the source of truth for accounts. When an admin creates, updates, or disables an account, it automatically replicates to paired KySecurity products via SCIM 2.0 signed sync events.
-2. **UI-Based System Pairing**: Admin generates an ephemeral (90s) pairing key to connect downstream KySecurity product servers and establish mutual HMAC credentials.
+2. **Direct SCIM 2.0 Service Connection**: Admin configures downstream KySecurity and 3rd-party product servers directly with their SCIM Base URL and Bearer token for automated RESTful CRUD replication.
 3. **OpenID Connect & OAuth 2.0**: Standard authorization-code flow with PKCE, RS256 ID tokens, and JWKS discovery.
 4. **Native Device Pairing & Push MFA**: Natively hosts device pairing (`/api/notifications/native/register`) using 90s PIN/QR codes, push challenge dispatch through FCM/APNs relay Workers with 2-digit number matching, and TOTP/recovery code support.
 5. **Dashboard & Application Launcher**: KySecurity Patina themed interface (dark `#0d0f14`, cyan `#4deeea`, Space Grotesk, IBM Plex Mono) using `css/styles.css` and local fonts.

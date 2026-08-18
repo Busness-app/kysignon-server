@@ -1,11 +1,9 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import { PairedSystem } from '../types';
 import { apiRequest } from '../api';
-import QRCode from 'qrcode';
 import {
   RefreshCw,
   Plus,
-  Clock,
   Trash2,
   CheckCircle,
   AlertTriangle,
@@ -13,16 +11,13 @@ import {
   Copy,
   Check,
   Send,
-  Server,
-  Key,
 } from 'lucide-react';
 
 export const AdminSystems: React.FC = () => {
   const [systems, setSystems] = useState<PairedSystem[]>([]);
 
-  // System Pairing Modal State
+  // Modal State
   const [showPairModal, setShowPairModal] = useState(false);
-  const [modalTab, setModalTab] = useState<'scim' | 'pin'>('scim');
 
   // Direct SCIM Form State
   const [targetName, setTargetName] = useState('');
@@ -32,15 +27,7 @@ export const AdminSystems: React.FC = () => {
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-
-  // Ephemeral PIN State
-  const [pairToken, setPairToken] = useState('');
-  const [pairPin, setPairPin] = useState('');
-  const [pairExpiresAt, setPairExpiresAt] = useState<number | null>(null);
-  const [countdown, setCountdown] = useState(90);
-  const [pairLoading, setPairLoading] = useState(false);
   const [copied, setCopied] = useState(false);
-  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const fetchSystems = async () => {
     try {
@@ -54,21 +41,6 @@ export const AdminSystems: React.FC = () => {
   useEffect(() => {
     fetchSystems();
   }, []);
-
-  // 90s Countdown Timer
-  useEffect(() => {
-    if (!showPairModal || !pairExpiresAt) return;
-
-    const interval = setInterval(() => {
-      const remaining = Math.max(0, Math.floor((pairExpiresAt - Date.now()) / 1000));
-      setCountdown(remaining);
-      if (remaining <= 0) {
-        clearInterval(interval);
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [showPairModal, pairExpiresAt]);
 
   const applyPreset = (type: string, name: string, url: string) => {
     setSystemType(type);
@@ -102,45 +74,14 @@ export const AdminSystems: React.FC = () => {
     }
   };
 
-  const handleGeneratePairingKey = async () => {
-    setPairLoading(true);
-    try {
-      const data = await apiRequest('/api/admin/systems/pairing-token', {
-        method: 'POST',
-        body: JSON.stringify({ systemType }),
-      });
-      setPairToken(data.pairingToken);
-      setPairPin(data.pinCode);
-      const exp = new Date(data.expiresAt).getTime();
-      setPairExpiresAt(exp);
-      setCountdown(Math.floor((exp - Date.now()) / 1000));
-
-      if (qrCanvasRef.current && data.qrPayload) {
-        QRCode.toCanvas(qrCanvasRef.current, data.qrPayload, {
-          width: 200,
-          margin: 1,
-          color: { dark: '#0d0f14', light: '#4deeea' },
-        });
-      }
-    } catch (err: any) {
-      alert(err.message || 'Failed to generate system pairing token');
-    } finally {
-      setPairLoading(false);
-    }
-  };
-
   const handleOpenModal = () => {
     setShowPairModal(true);
-    setModalTab('scim');
     setTargetName('KyPost Mail Server');
     setSystemType('kypost');
     setCallbackUrl('https://mail.example.com/scim/v2');
     setBearerToken('');
     setCreatedToken(null);
     setFormError(null);
-    setPairToken('');
-    setPairPin('');
-    setPairExpiresAt(null);
   };
 
   const handleCloseModal = () => {
@@ -178,19 +119,13 @@ export const AdminSystems: React.FC = () => {
     }
   };
 
-  const copyPairingToken = () => {
-    navigator.clipboard.writeText(pairToken);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
   return (
     <div className="admin-page">
       <div className="page-header">
         <div>
           <h1 className="page-title">SCIM 2.0 Downstream Directory Sync</h1>
           <p className="page-subtitle">
-            Connect KySecurity Suite products and 3rd-party services via SCIM 2.0 (RFC 7643/7644) for automated account replication.
+            Connect KySecurity Suite products and 3rd-party services via standard SCIM 2.0 (RFC 7643/7644) for automated account replication.
           </p>
         </div>
         <button className="primary-btn sm" onClick={handleOpenModal}>
@@ -309,219 +244,114 @@ export const AdminSystems: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <div>
-                <div style={{ display: 'flex', gap: '0.5rem', padding: '0 1.25rem 0.75rem', borderBottom: '1px solid var(--line)' }}>
-                  <button
-                    type="button"
-                    className={`secondary-btn sm ${modalTab === 'scim' ? 'active' : ''}`}
-                    onClick={() => setModalTab('scim')}
-                  >
-                    <Server size={13} />
-                    <span>Direct SCIM Connection</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`secondary-btn sm ${modalTab === 'pin' ? 'active' : ''}`}
-                    onClick={() => setModalTab('pin')}
-                  >
-                    <Key size={13} />
-                    <span>90s Ephemeral PIN</span>
-                  </button>
+              <form onSubmit={handleCreateSCIMTarget} className="modal-body">
+                {formError && <div className="alert-box error sm">{formError}</div>}
+
+                <div className="form-group">
+                  <label className="form-label">Quick App Preset</label>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('kypost', 'KyPost Mail Server', 'https://mail.example.com/scim/v2')}
+                    >
+                      + KyPost
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', 'https://passwords.example.com/scim/v2')}
+                    >
+                      + KyPasswords
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('kybookmarks', 'KyBookmarks', 'https://bookmarks.example.com/scim/v2')}
+                    >
+                      + KyBookmarks
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('kynotes', 'KyNotes', 'https://notes.example.com/scim/v2')}
+                    >
+                      + KyNotes
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-btn sm"
+                      onClick={() => applyPreset('scim', 'Nextcloud SCIM', 'https://cloud.example.com/apps/user_scim/v2')}
+                    >
+                      + Generic SCIM
+                    </button>
+                  </div>
                 </div>
 
-                {modalTab === 'scim' ? (
-                  <form onSubmit={handleCreateSCIMTarget} className="modal-body">
-                    {formError && <div className="alert-box error sm">{formError}</div>}
+                <div className="form-group">
+                  <label className="form-label">Target Name</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. KyPost Mail Server"
+                    value={targetName}
+                    onChange={(e) => setTargetName(e.target.value)}
+                    required
+                    autoFocus
+                  />
+                </div>
 
-                    <div className="form-group">
-                      <label className="form-label">Quick App Preset</label>
-                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        <button
-                          type="button"
-                          className="secondary-btn sm"
-                          onClick={() => applyPreset('kypost', 'KyPost Mail Server', 'https://mail.example.com/scim/v2')}
-                        >
-                          + KyPost
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary-btn sm"
-                          onClick={() => applyPreset('kypasswords', 'KyPasswords Vault', 'https://passwords.example.com/scim/v2')}
-                        >
-                          + KyPasswords
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary-btn sm"
-                          onClick={() => applyPreset('kybookmarks', 'KyBookmarks', 'https://bookmarks.example.com/scim/v2')}
-                        >
-                          + KyBookmarks
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary-btn sm"
-                          onClick={() => applyPreset('kynotes', 'KyNotes', 'https://notes.example.com/scim/v2')}
-                        >
-                          + KyNotes
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary-btn sm"
-                          onClick={() => applyPreset('scim', 'Nextcloud SCIM', 'https://cloud.example.com/apps/user_scim/v2')}
-                        >
-                          + Generic SCIM
-                        </button>
-                      </div>
-                    </div>
+                <div className="form-group">
+                  <label className="form-label">Product / Service Type</label>
+                  <select
+                    className="form-select"
+                    value={systemType}
+                    onChange={(e) => setSystemType(e.target.value)}
+                  >
+                    <option value="kypost">KyPost (IMAP Mail & Security)</option>
+                    <option value="kypasswords">KyPasswords (Password Vault)</option>
+                    <option value="kybookmarks">KyBookmarks (Encrypted Bookmarks)</option>
+                    <option value="kynotes">KyNotes (Encrypted Notes)</option>
+                    <option value="scim">Generic SCIM 2.0 Service Provider</option>
+                    <option value="custom">Custom Microservice</option>
+                  </select>
+                </div>
 
-                    <div className="form-group">
-                      <label className="form-label">Target Name</label>
-                      <input
-                        type="text"
-                        className="form-input"
-                        placeholder="e.g. KyPost Mail Server"
-                        value={targetName}
-                        onChange={(e) => setTargetName(e.target.value)}
-                        required
-                        autoFocus
-                      />
-                    </div>
+                <div className="form-group">
+                  <label className="form-label">SCIM Base URL (Destination)</label>
+                  <input
+                    type="url"
+                    className="form-input font-mono"
+                    placeholder="https://mail.example.com/scim/v2"
+                    value={callbackUrl}
+                    onChange={(e) => setCallbackUrl(e.target.value)}
+                    required
+                  />
+                  <span className="muted" style={{ fontSize: '0.75rem', marginTop: '0.25rem', display: 'block' }}>
+                    KySignOn will send standard RESTful requests: <code>POST /Users</code>, <code>PUT /Users/{'{id}'}</code>, <code>DELETE /Users/{'{id}'}</code>.
+                  </span>
+                </div>
 
-                    <div className="form-group">
-                      <label className="form-label">Product / Service Type</label>
-                      <select
-                        className="form-select"
-                        value={systemType}
-                        onChange={(e) => setSystemType(e.target.value)}
-                      >
-                        <option value="kypost">KyPost (IMAP Mail & Security)</option>
-                        <option value="kypasswords">KyPasswords (Password Vault)</option>
-                        <option value="kybookmarks">KyBookmarks (Encrypted Bookmarks)</option>
-                        <option value="kynotes">KyNotes (Encrypted Notes)</option>
-                        <option value="scim">Generic SCIM 2.0 Service Provider</option>
-                        <option value="custom">Custom Microservice</option>
-                      </select>
-                    </div>
+                <div className="form-group">
+                  <label className="form-label">Bearer API Token (Optional)</label>
+                  <input
+                    type="password"
+                    className="form-input font-mono"
+                    placeholder="Leave blank to auto-generate a secure token"
+                    value={bearerToken}
+                    onChange={(e) => setBearerToken(e.target.value)}
+                  />
+                </div>
 
-                    <div className="form-group">
-                      <label className="form-label">SCIM Base URL (Destination)</label>
-                      <input
-                        type="url"
-                        className="form-input font-mono"
-                        placeholder="https://mail.example.com/scim/v2"
-                        value={callbackUrl}
-                        onChange={(e) => setCallbackUrl(e.target.value)}
-                        required
-                      />
-                      <span className="muted" style={{ fontSize: '0.75rem', marginTop: '0.25rem', display: 'block' }}>
-                        KySignOn will send standard RESTful requests: <code>POST /Users</code>, <code>PUT /Users/{'{id}'}</code>, <code>DELETE /Users/{'{id}'}</code>.
-                      </span>
-                    </div>
-
-                    <div className="form-group">
-                      <label className="form-label">Bearer API Token (Optional)</label>
-                      <input
-                        type="password"
-                        className="form-input font-mono"
-                        placeholder="Leave blank to auto-generate a secure token"
-                        value={bearerToken}
-                        onChange={(e) => setBearerToken(e.target.value)}
-                      />
-                    </div>
-
-                    <div className="modal-footer">
-                      <button type="button" className="secondary-btn" onClick={handleCloseModal}>
-                        Cancel
-                      </button>
-                      <button type="submit" className="primary-btn" disabled={submitting}>
-                        {submitting ? <RefreshCw className="spin" size={14} /> : <span>Connect SCIM Target</span>}
-                      </button>
-                    </div>
-                  </form>
-                ) : (
-                  <div className="modal-body">
-                    {!pairToken ? (
-                      <div>
-                        <p className="modal-desc">
-                          Select the product type to generate an ephemeral 90s pairing PIN:
-                        </p>
-
-                        <div className="form-group">
-                          <label className="form-label">Product Type</label>
-                          <select
-                            className="form-select"
-                            value={systemType}
-                            onChange={(e) => setSystemType(e.target.value)}
-                          >
-                            <option value="kypost">KyPost (IMAP Mail & Security)</option>
-                            <option value="kypasswords">KyPasswords (Password Vault)</option>
-                            <option value="kybookmarks">KyBookmarks (Encrypted Bookmarks)</option>
-                            <option value="kynotes">KyNotes (Encrypted Notes)</option>
-                            <option value="scim">Generic SCIM 2.0 Service Provider</option>
-                            <option value="custom">Custom Microservice</option>
-                          </select>
-                        </div>
-
-                        <div className="modal-footer">
-                          <button type="button" className="secondary-btn" onClick={handleCloseModal}>
-                            Cancel
-                          </button>
-                          <button
-                            type="button"
-                            className="primary-btn"
-                            onClick={handleGeneratePairingKey}
-                            disabled={pairLoading}
-                          >
-                            {pairLoading ? <RefreshCw className="spin" size={14} /> : <span>Generate 90s Pairing Key</span>}
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-center">
-                        <p className="modal-desc">
-                          Scan the QR code or enter the pairing PIN in your target product's settings UI:
-                        </p>
-
-                        <div className="qr-container">
-                          <canvas ref={qrCanvasRef} />
-                        </div>
-
-                        <div className="pin-box">
-                          <span className="pin-label">ONE-TIME PAIRING PIN</span>
-                          <span className="pin-digits">{pairPin}</span>
-                          <div className="pairing-token-text font-mono mt-2">{pairToken}</div>
-                          <button className="secondary-btn sm mt-2" onClick={copyPairingToken}>
-                            {copied ? <Check size={13} /> : <Copy size={13} />}
-                            <span>{copied ? 'Copied Token' : 'Copy Pairing Token'}</span>
-                          </button>
-                        </div>
-
-                        <div className="timer-bar-wrap mt-3">
-                          <div className="timer-info">
-                            <Clock size={14} className="icon-cyan" />
-                            <span>Expires in {countdown}s</span>
-                          </div>
-                          <div className="timer-progress-bg">
-                            <div
-                              className="timer-progress-fill"
-                              style={{ width: `${(countdown / 90) * 100}%` }}
-                            />
-                          </div>
-                        </div>
-
-                        <div className="modal-footer mt-4">
-                          <button
-                            className="primary-btn"
-                            onClick={handleCloseModal}
-                          >
-                            Done
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+                <div className="modal-footer">
+                  <button type="button" className="secondary-btn" onClick={handleCloseModal}>
+                    Cancel
+                  </button>
+                  <button type="submit" className="primary-btn" disabled={submitting}>
+                    {submitting ? <RefreshCw className="spin" size={14} /> : <span>Connect SCIM Target</span>}
+                  </button>
+                </div>
+              </form>
             )}
           </div>
         </div>

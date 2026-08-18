@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
@@ -60,54 +59,43 @@ func setupTestSyncEngine(t *testing.T) (*Engine, *store.Store, *store.User, func
 	return engine, dbStore, adminUser, cleanup
 }
 
-func TestSystemPairingHandshakeAndTokenExpiry(t *testing.T) {
-	engine, dbStore, adminUser, cleanup := setupTestSyncEngine(t)
+func TestDirectSCIMSystemCreationAndRecovery(t *testing.T) {
+	engine, dbStore, _, cleanup := setupTestSyncEngine(t)
 	defer cleanup()
 
-	// 1. Generate 90s system pairing token
-	token, pin, expiresAt, err := engine.GenerateSystemPairingToken("kypost", adminUser.ID)
+	// 1. Create SCIM system directly
+	req := &CreateSystemRequest{
+		Name:        "Production KyPost",
+		SystemType:  "kypost",
+		CallbackURL: "https://kypost.local/scim/v2",
+		BearerToken: "my-custom-bearer-secret",
+	}
+
+	ps, token, err := engine.CreateSystem(req)
 	if err != nil {
-		t.Fatalf("GenerateSystemPairingToken failed: %v", err)
+		t.Fatalf("CreateSystem failed: %v", err)
 	}
 
-	if len(pin) != 8 || token == "" {
-		t.Fatalf("unexpected token or pin format: %s, %s", token, pin)
-	}
-	if expiresAt.Before(time.Now().UTC().Add(80 * time.Second)) {
-		t.Fatalf("token TTL too short: %v", expiresAt)
+	if ps.ID == "" || ps.Status != "active" || token != "my-custom-bearer-secret" {
+		t.Fatalf("unexpected system created: %+v, token=%s", ps, token)
 	}
 
-	// 2. Register paired system using token
-	regReq := &SystemRegistrationRequest{
-		PairingToken: token,
-		PINCode:      pin,
-		SystemName:   "Production KyPost",
-		SystemType:   "kypost",
-		CallbackURL:  "https://kypost.local/api/sync",
-	}
-
-	resp, err := engine.RegisterPairedSystem(regReq)
+	// 2. Recover secret
+	secret, err := engine.SigningSecret(ps)
 	if err != nil {
-		t.Fatalf("RegisterPairedSystem failed: %v", err)
+		t.Fatalf("SigningSecret failed: %v", err)
+	}
+	if secret != "my-custom-bearer-secret" {
+		t.Fatalf("expected recovered secret 'my-custom-bearer-secret', got '%s'", secret)
 	}
 
-	if resp.SystemID == "" || resp.HMACSecret == "" || resp.Status != "active" {
-		t.Fatalf("unexpected registration response: %+v", resp)
-	}
-
-	// 3. Replay of same pairing token must be rejected
-	_, err = engine.RegisterPairedSystem(regReq)
-	if err == nil {
-		t.Fatal("expected token replay to be rejected")
-	}
-
-	// 4. Check system persisted in store
-	ps, err := dbStore.GetPairedSystemByID(resp.SystemID)
-	if err != nil || ps == nil {
+	// 3. Check system persisted in store
+	loaded, err := dbStore.GetPairedSystemByID(ps.ID)
+	if err != nil || loaded == nil {
 		t.Fatalf("paired system not found in store: %v", err)
 	}
-	if ps.Name != "Production KyPost" || ps.Status != "active" {
-		t.Fatalf("unexpected paired system in store: %+v", ps)
+	if loaded.Name != "Production KyPost" || loaded.Status != "active" {
+		t.Fatalf("unexpected paired system in store: %+v", loaded)
 	}
 }
 

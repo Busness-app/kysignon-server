@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,12 +20,6 @@ import (
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
-
-// MaxPINAttempts bounds guesses against a pairing PIN before the token is burned.
-const MaxPINAttempts = 3
-
-// PairingTokenTTL is how long a pairing token and its PIN remain redeemable.
-const PairingTokenTTL = 90 * time.Second
 
 // AllowPrivateCallbacks permits callback URLs on loopback and private ranges. Deployments
 // where every service shares a container network need this; it is off by default because
@@ -48,24 +41,23 @@ func NewEngine(s *store.Store, encryptionKey []byte) *Engine {
 			Timeout: 5 * time.Second,
 			CheckRedirect: func(r *http.Request, via []*http.Request) error {
 				// A redirect would let a validated callback bounce the payload to an
-				// address that was never checked.
-				return http.ErrUseLastResponse
+				// internal address that failed validation.
+				return errors.New("redirects are not followed for sync delivery")
 			},
 			Transport: &http.Transport{
-				DialContext: guardedDialer().DialContext,
+				DialContext:         guardedDialer().DialContext,
+				TLSHandshakeTimeout: 5 * time.Second,
 			},
 		},
 	}
 }
 
-// guardedDialer refuses to connect to non-public addresses. Checking here rather than at
-// registration is what makes the check meaningful: a hostname that resolves publicly when
-// it is registered can resolve to 127.0.0.1 by the time delivery happens, and only the
-// address actually being dialled tells the truth.
+// guardedDialer rejects connection attempts to loopback and private networks unless
+// explicitly allowed.
 func guardedDialer() *net.Dialer {
 	return &net.Dialer{
 		Timeout: 5 * time.Second,
-		Control: func(network, address string, _ syscall.RawConn) error {
+		Control: func(network, address string, c syscall.RawConn) error {
 			if AllowPrivateCallbacks {
 				return nil
 			}
@@ -86,50 +78,8 @@ func guardedDialer() *net.Dialer {
 	}
 }
 
-// GenerateSystemPairingToken creates an ephemeral pairing token and the PIN that must
-// accompany it. Only hashes are stored, so a database read is not a pairing capability.
-func (e *Engine) GenerateSystemPairingToken(systemType, adminUserID string) (token string, pin string, expiresAt time.Time, err error) {
-	rawToken, err := crypto.GenerateRandomHex(24)
-	if err != nil {
-		return "", "", time.Time{}, err
-	}
-	pin, err = crypto.GenerateRandomAlphanumeric(8)
-	if err != nil {
-		return "", "", time.Time{}, err
-	}
-	expiresAt = time.Now().UTC().Add(PairingTokenTTL)
-
-	item := &store.SystemPairingToken{
-		ID:              uuid.New().String(),
-		TokenHash:       crypto.HashSHA256(rawToken),
-		PINHash:         crypto.HashSHA256(pin),
-		SystemType:      systemType,
-		CreatedByUserID: adminUserID,
-		ExpiresAt:       expiresAt,
-	}
-	if err := e.store.CreateSystemPairingToken(item); err != nil {
-		return "", "", time.Time{}, err
-	}
-	return rawToken, pin, expiresAt, nil
-}
-
-type SystemRegistrationRequest struct {
-	PairingToken string `json:"pairingToken"`
-	PINCode      string `json:"pinCode"`
-	SystemName   string `json:"systemName"`
-	SystemType   string `json:"systemType"`
-	CallbackURL  string `json:"callbackUrl"`
-}
-
-type SystemRegistrationResponse struct {
-	SystemID   string `json:"systemId"`
-	HMACSecret string `json:"hmacSecret"`
-	Status     string `json:"status"`
-}
-
 // ValidateCallbackURL rejects anything the server should not be made to POST the user
-// directory at. The caller of this endpoint is unauthenticated apart from the pairing
-// token, so the URL it supplies is hostile input.
+// directory at.
 func ValidateCallbackURL(raw string) error {
 	if strings.TrimSpace(raw) == "" {
 		return errors.New("callbackUrl is required")
@@ -165,75 +115,7 @@ func ValidateCallbackURL(raw string) error {
 	return nil
 }
 
-// RegisterPairedSystem redeems a pairing token and issues webhook credentials.
-func (e *Engine) RegisterPairedSystem(req *SystemRegistrationRequest) (*SystemRegistrationResponse, error) {
-	if req.PairingToken == "" {
-		return nil, errors.New("pairingToken is required")
-	}
-	if req.PINCode == "" {
-		return nil, errors.New("pinCode is required")
-	}
-	if err := ValidateCallbackURL(req.CallbackURL); err != nil {
-		return nil, err
-	}
-
-	validToken, err := e.store.GetValidSystemPairingToken(crypto.HashSHA256(req.PairingToken), MaxPINAttempts)
-	if err != nil {
-		return nil, err
-	}
-	if validToken == nil {
-		return nil, errors.New("invalid or expired pairing token")
-	}
-
-	if subtle.ConstantTimeCompare([]byte(crypto.HashSHA256(req.PINCode)), []byte(validToken.PINHash)) != 1 {
-		attempts, _ := e.store.RecordSystemPairingPINFailure(validToken.ID)
-		return nil, fmt.Errorf("incorrect pairing PIN (%d of %d attempts used)", attempts, MaxPINAttempts)
-	}
-
-	// Spend the token before creating anything, so two racing registrations cannot both
-	// redeem it.
-	spent, err := e.store.ConsumeSystemPairingToken(validToken.ID)
-	if err != nil {
-		return nil, err
-	}
-	if !spent {
-		return nil, errors.New("pairing token has already been redeemed")
-	}
-
-	hmacSecret, err := crypto.GenerateRandomHex(32)
-	if err != nil {
-		return nil, err
-	}
-	encrypted, err := crypto.EncryptAESGCM(e.encryptionKey, []byte(hmacSecret))
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt webhook signing secret: %w", err)
-	}
-
-	name := req.SystemName
-	if name == "" {
-		name = req.SystemType
-	}
-
-	pairedSystem := &store.PairedSystem{
-		ID:                  uuid.New().String(),
-		Name:                name,
-		SystemType:          req.SystemType,
-		CallbackURL:         req.CallbackURL,
-		HMACSecretEncrypted: encrypted,
-		Status:              "active",
-	}
-	if err := e.store.CreatePairedSystem(pairedSystem); err != nil {
-		return nil, err
-	}
-
-	return &SystemRegistrationResponse{
-		SystemID:   pairedSystem.ID,
-		HMACSecret: hmacSecret,
-		Status:     "active",
-	}, nil
-}
-
-// SigningSecret recovers the webhook signing secret for a paired system.
+// SigningSecret recovers the webhook/SCIM bearer signing secret for a paired system.
 func (e *Engine) SigningSecret(sys *store.PairedSystem) (string, error) {
 	if sys.HMACSecretEncrypted == "" {
 		return "", errors.New("paired system has no signing secret; re-pair it")

@@ -92,19 +92,6 @@ func (s *Store) migrate() error {
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
-	CREATE TABLE IF NOT EXISTS system_pairing_tokens (
-		id TEXT PRIMARY KEY,
-		token_hash TEXT NOT NULL UNIQUE,
-		pin_hash TEXT NOT NULL,
-		pin_attempts INTEGER NOT NULL DEFAULT 0,
-		system_type TEXT NOT NULL,
-		created_by_user_id TEXT NOT NULL REFERENCES users(id),
-		expires_at DATETIME NOT NULL,
-		used_at DATETIME,
-		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-	);
-	CREATE INDEX IF NOT EXISTS idx_system_pairing_tokens_hash ON system_pairing_tokens(token_hash);
-
 	CREATE TABLE IF NOT EXISTS account_sync_events (
 		id TEXT PRIMARY KEY,
 		-- Deletion events must remain deliverable after their user has been removed.
@@ -684,66 +671,6 @@ func (s *Store) ClearFailedLogins(userID string) error {
 }
 
 // System Pairing & Sync Management
-func (s *Store) CreateSystemPairingToken(token *SystemPairingToken) error {
-	query := `INSERT INTO system_pairing_tokens (id, token_hash, pin_hash, system_type, created_by_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	token.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, token.ID, token.TokenHash, token.PINHash, token.SystemType, token.CreatedByUserID, token.ExpiresAt, token.CreatedAt)
-	return err
-}
-
-// GetValidSystemPairingToken returns an unspent, unexpired token that still has PIN
-// attempts left.
-func (s *Store) GetValidSystemPairingToken(tokenHash string, maxPINAttempts int) (*SystemPairingToken, error) {
-	query := `SELECT id, token_hash, pin_hash, pin_attempts, system_type, created_by_user_id, expires_at, used_at, created_at
-	          FROM system_pairing_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? AND pin_attempts < ?`
-	t := &SystemPairingToken{}
-	err := s.db.QueryRow(query, tokenHash, time.Now().UTC(), maxPINAttempts).
-		Scan(&t.ID, &t.TokenHash, &t.PINHash, &t.PINAttempts, &t.SystemType, &t.CreatedByUserID, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return t, err
-}
-
-// RecordSystemPairingPINFailure counts a wrong PIN against the token.
-func (s *Store) RecordSystemPairingPINFailure(tokenID string) (int, error) {
-	if _, err := s.db.Exec(`UPDATE system_pairing_tokens SET pin_attempts = pin_attempts + 1 WHERE id = ?`, tokenID); err != nil {
-		return 0, err
-	}
-	var attempts int
-	err := s.db.QueryRow(`SELECT pin_attempts FROM system_pairing_tokens WHERE id = ?`, tokenID).Scan(&attempts)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	return attempts, err
-}
-
-// ConsumeSystemPairingToken atomically spends a pairing token.
-func (s *Store) ConsumeSystemPairingToken(tokenID string) (bool, error) {
-	res, err := s.db.Exec(
-		`UPDATE system_pairing_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL`,
-		time.Now().UTC(), tokenID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n == 1, nil
-}
-
-// ExpireSystemPairingTokens forces outstanding pairing tokens to expire.
-func (s *Store) ExpireSystemPairingTokens(at time.Time) error {
-	_, err := s.db.Exec(`UPDATE system_pairing_tokens SET expires_at = ?`, at)
-	return err
-}
-
-func (s *Store) DeleteExpiredSystemPairingTokens() error {
-	_, err := s.db.Exec(`DELETE FROM system_pairing_tokens WHERE expires_at < ?`, time.Now().UTC())
-	return err
-}
-
 func (s *Store) CreatePairedSystem(ps *PairedSystem) error {
 	query := `INSERT INTO paired_systems (id, name, system_type, callback_url, hmac_secret_encrypted, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
 	ps.CreatedAt = time.Now().UTC()

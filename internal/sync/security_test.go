@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
@@ -44,82 +43,9 @@ func setupSync(t *testing.T) (*Engine, *store.Store, *store.User, func()) {
 	}
 }
 
-// The PIN shown to the admin must be part of redemption. Generating one and discarding it
-// is security theatre: the token alone becomes the whole credential.
-func TestSystemPairingRequiresThePIN(t *testing.T) {
-	e, _, admin, cleanup := setupSync(t)
-	defer cleanup()
-
-	token, pin, _, err := e.GenerateSystemPairingToken("kypost", admin.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pin == "" {
-		t.Fatal("no PIN was issued")
-	}
-
-	if _, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-		PairingToken: token, SystemName: "evil", SystemType: "kypost",
-		CallbackURL: "https://attacker.example.com/collect",
-	}); err == nil {
-		t.Error("a system paired without presenting the PIN")
-	}
-
-	if _, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-		PairingToken: token, PINCode: "WRONGPIN", SystemName: "evil", SystemType: "kypost",
-		CallbackURL: "https://attacker.example.com/collect",
-	}); err == nil {
-		t.Error("a system paired with the wrong PIN")
-	}
-}
-
-func TestSystemPairingSucceedsWithTokenAndPIN(t *testing.T) {
-	e, _, admin, cleanup := setupSync(t)
-	defer cleanup()
-
-	token, pin, _, err := e.GenerateSystemPairingToken("kypost", admin.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-		PairingToken: token, PINCode: pin, SystemName: "mail", SystemType: "kypost",
-		CallbackURL: "https://mail.urlxl.com/hooks/kysignon",
-	})
-	if err != nil {
-		t.Fatalf("a correct token and PIN was rejected: %v", err)
-	}
-	if resp.HMACSecret == "" {
-		t.Error("no HMAC secret was issued")
-	}
-}
-
-// A wrong PIN must not be retryable until it is guessed.
-func TestSystemPairingPINHasAnAttemptBudget(t *testing.T) {
-	e, _, admin, cleanup := setupSync(t)
-	defer cleanup()
-
-	token, pin, _, err := e.GenerateSystemPairingToken("kypost", admin.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 5; i++ {
-		_, _ = e.RegisterPairedSystem(&SystemRegistrationRequest{
-			PairingToken: token, PINCode: "BADGUESS", SystemName: "x", SystemType: "kypost",
-			CallbackURL: "https://x.test/hook",
-		})
-	}
-	if _, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-		PairingToken: token, PINCode: pin, SystemName: "x", SystemType: "kypost",
-		CallbackURL: "https://x.test/hook",
-	}); err == nil {
-		t.Error("the correct PIN still worked after repeated wrong guesses; the PIN is brute-forceable")
-	}
-}
-
-// The callback URL is chosen by whoever redeems the token, and the server then POSTs the
-// whole directory to it. It must not be able to name an internal address.
+// The callback URL must not be able to name an internal address unless explicitly allowed.
 func TestCallbackURLIsValidated(t *testing.T) {
-	e, _, admin, cleanup := setupSync(t)
+	e, _, _, cleanup := setupSync(t)
 	defer cleanup()
 	AllowPrivateCallbacks = false // the production default
 
@@ -134,13 +60,8 @@ func TestCallbackURLIsValidated(t *testing.T) {
 		"",
 	}
 	for _, target := range rejected {
-		token, pin, _, err := e.GenerateSystemPairingToken("kypost", admin.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-			PairingToken: token, PINCode: pin, SystemName: "x", SystemType: "kypost",
-			CallbackURL: target,
+		if _, _, err := e.CreateSystem(&CreateSystemRequest{
+			Name: "x", SystemType: "kypost", CallbackURL: target,
 		}); err == nil {
 			t.Errorf("callback URL %q was accepted", target)
 		}
@@ -150,7 +71,7 @@ func TestCallbackURLIsValidated(t *testing.T) {
 // Events must reach only the system they belong to. Fanning every user record out to every
 // paired system means the least trusted integration receives the whole directory.
 func TestEventsAreScopedToTheirSystem(t *testing.T) {
-	e, db, admin, cleanup := setupSync(t)
+	e, db, _, cleanup := setupSync(t)
 	defer cleanup()
 
 	var hitsA, hitsB int
@@ -160,17 +81,13 @@ func TestEventsAreScopedToTheirSystem(t *testing.T) {
 	defer srvB.Close()
 
 	pair := func(name, url string) string {
-		token, pin, _, err := e.GenerateSystemPairingToken("custom", admin.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-			PairingToken: token, PINCode: pin, SystemName: name, SystemType: "custom", CallbackURL: url,
+		ps, _, err := e.CreateSystem(&CreateSystemRequest{
+			Name: name, SystemType: "custom", CallbackURL: url,
 		})
 		if err != nil {
 			t.Fatalf("pairing %s: %v", name, err)
 		}
-		return resp.SystemID
+		return ps.ID
 	}
 
 	idA := pair("system-a", srvA.URL)
@@ -196,15 +113,14 @@ func TestEventsAreScopedToTheirSystem(t *testing.T) {
 // is temporarily disabled must wait for it, not be marked delivered and dropped, or a
 // deprovision silently never reaches a downstream that still holds the account.
 func TestUndeliverableEventStaysQueued(t *testing.T) {
-	e, db, admin, cleanup := setupSync(t)
+	e, db, _, cleanup := setupSync(t)
 	defer cleanup()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
 
-	token, pin, _, _ := e.GenerateSystemPairingToken("custom", admin.ID)
-	resp, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-		PairingToken: token, PINCode: pin, SystemName: "mail", SystemType: "custom", CallbackURL: srv.URL,
+	ps, _, err := e.CreateSystem(&CreateSystemRequest{
+		Name: "mail", SystemType: "custom", CallbackURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +136,7 @@ func TestUndeliverableEventStaysQueued(t *testing.T) {
 	if err := e.QueueAccountSyncEvent(u.ID, "user.deleted", map[string]any{"id": u.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdatePairedSystemStatus(resp.SystemID, "disabled"); err != nil {
+	if err := db.UpdatePairedSystemStatus(ps.ID, "disabled"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -239,7 +155,7 @@ func TestUndeliverableEventStaysQueued(t *testing.T) {
 
 // Retrying every 3 seconds with no backoff hammers a system that is already failing.
 func TestFailedDeliveryBacksOff(t *testing.T) {
-	e, db, admin, cleanup := setupSync(t)
+	e, db, _, cleanup := setupSync(t)
 	defer cleanup()
 
 	var attempts int
@@ -249,9 +165,8 @@ func TestFailedDeliveryBacksOff(t *testing.T) {
 	}))
 	defer failing.Close()
 
-	token, pin, _, _ := e.GenerateSystemPairingToken("custom", admin.ID)
-	resp, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-		PairingToken: token, PINCode: pin, SystemName: "flaky", SystemType: "custom", CallbackURL: failing.URL,
+	ps, _, err := e.CreateSystem(&CreateSystemRequest{
+		Name: "flaky", SystemType: "custom", CallbackURL: failing.URL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -265,7 +180,7 @@ func TestFailedDeliveryBacksOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.CreateAccountSyncEvent(&store.AccountSyncEvent{
-		ID: uuid.New().String(), UserID: u.ID, SystemID: resp.SystemID,
+		ID: uuid.New().String(), UserID: u.ID, SystemID: ps.ID,
 		EventType: "user.created", PayloadJSON: `{"id":"x"}`, Status: "pending",
 	}); err != nil {
 		t.Fatal(err)
@@ -283,13 +198,11 @@ func TestFailedDeliveryBacksOff(t *testing.T) {
 
 // A secret that signs every outbound webhook must not sit in the database in the clear.
 func TestHMACSecretIsNotStoredInPlaintext(t *testing.T) {
-	e, db, admin, cleanup := setupSync(t)
+	e, db, _, cleanup := setupSync(t)
 	defer cleanup()
 
-	token, pin, _, _ := e.GenerateSystemPairingToken("kypost", admin.ID)
-	resp, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-		PairingToken: token, PINCode: pin, SystemName: "mail", SystemType: "kypost",
-		CallbackURL: "https://mail.urlxl.com/hooks",
+	_, token, err := e.CreateSystem(&CreateSystemRequest{
+		Name: "mail", SystemType: "kypost", CallbackURL: "https://mail.urlxl.com/scim/v2",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -300,7 +213,7 @@ func TestHMACSecretIsNotStoredInPlaintext(t *testing.T) {
 		t.Fatalf("expected 1 system: %v", err)
 	}
 	for _, s := range systems {
-		if strings.Contains(s.HMACSecretEncrypted, resp.HMACSecret) {
+		if strings.Contains(s.HMACSecretEncrypted, token) {
 			t.Error("the webhook signing secret is stored in plaintext")
 		}
 	}
@@ -310,42 +223,7 @@ func TestHMACSecretIsNotStoredInPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not recover the signing secret: %v", err)
 	}
-	if got != resp.HMACSecret {
+	if got != token {
 		t.Error("the recovered signing secret does not match the one handed to the system")
-	}
-}
-
-func TestPairingTokenIsSingleUse(t *testing.T) {
-	e, _, admin, cleanup := setupSync(t)
-	defer cleanup()
-
-	token, pin, _, _ := e.GenerateSystemPairingToken("kypost", admin.ID)
-	req := func() *SystemRegistrationRequest {
-		return &SystemRegistrationRequest{
-			PairingToken: token, PINCode: pin, SystemName: "mail", SystemType: "kypost",
-			CallbackURL: "https://mail.urlxl.com/hooks",
-		}
-	}
-	if _, err := e.RegisterPairedSystem(req()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.RegisterPairedSystem(req()); err == nil {
-		t.Error("a pairing token was redeemed twice")
-	}
-}
-
-func TestExpiredPairingTokenIsRejected(t *testing.T) {
-	e, db, admin, cleanup := setupSync(t)
-	defer cleanup()
-
-	token, pin, _, _ := e.GenerateSystemPairingToken("kypost", admin.ID)
-	if err := db.ExpireSystemPairingTokens(time.Now().UTC().Add(-time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.RegisterPairedSystem(&SystemRegistrationRequest{
-		PairingToken: token, PINCode: pin, SystemName: "late", SystemType: "kypost",
-		CallbackURL: "https://mail.urlxl.com/hooks",
-	}); err == nil {
-		t.Error("an expired pairing token was accepted")
 	}
 }

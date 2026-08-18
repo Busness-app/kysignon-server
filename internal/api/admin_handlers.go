@@ -269,67 +269,6 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
-// GenerateSystemPairingToken generates a 90s pairing token to connect a KySecurity product.
-func (h *AdminHandler) GenerateSystemPairingToken(w http.ResponseWriter, r *http.Request) {
-	admin := GetUserFromContext(r.Context())
-	var req struct {
-		SystemType string `json:"systemType"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SystemType == "" {
-		http.Error(w, `{"error":"system_type_required"}`, http.StatusBadRequest)
-		return
-	}
-
-	token, pin, expiresAt, err := h.syncEngine.GenerateSystemPairingToken(req.SystemType, admin.ID)
-	if err != nil {
-		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
-		return
-	}
-
-	qrPayload := map[string]any{
-		"type":         "kysignon_system_pairing",
-		"serverUrl":    h.issuerURL,
-		"systemType":   req.SystemType,
-		"pairingToken": token,
-		"pinCode":      pin,
-		"expiresAt":    expiresAt.Unix(),
-	}
-	qrBytes, _ := json.Marshal(qrPayload)
-
-	h.audit.Record("admin.system_pairing_token_generated", admin.ID, admin.Username, req.SystemType, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"pairingToken": token,
-		"pinCode":      pin,
-		"systemType":   req.SystemType,
-		"expiresAt":    expiresAt,
-		"qrPayload":    string(qrBytes),
-	})
-}
-
-// RegisterPairedSystem handles redemption of a system pairing token.
-func (h *AdminHandler) RegisterPairedSystem(w http.ResponseWriter, r *http.Request) {
-	var req sync.SystemRegistrationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
-		return
-	}
-
-	resp, err := h.syncEngine.RegisterPairedSystem(&req)
-	if err != nil {
-		http.Error(w, `{"error":"registration_failed","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
-		return
-	}
-
-	h.audit.Record("system.paired", "", req.SystemName, resp.SystemID, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
-		"systemType": req.SystemType,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
 // CreatePairedSystem directly connects a downstream SCIM target service.
 func (h *AdminHandler) CreatePairedSystem(w http.ResponseWriter, r *http.Request) {
 	admin := GetUserFromContext(r.Context())

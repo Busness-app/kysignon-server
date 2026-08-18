@@ -68,7 +68,6 @@ func TestDirectSCIMSystemCreationAndRecovery(t *testing.T) {
 		Name:        "Production KyPost",
 		SystemType:  "kypost",
 		CallbackURL: "https://kypost.local/scim/v2",
-		BearerToken: "my-custom-bearer-secret",
 	}
 
 	ps, token, err := engine.CreateSystem(req)
@@ -76,7 +75,7 @@ func TestDirectSCIMSystemCreationAndRecovery(t *testing.T) {
 		t.Fatalf("CreateSystem failed: %v", err)
 	}
 
-	if ps.ID == "" || ps.Status != "active" || token != "my-custom-bearer-secret" {
+	if ps.ID == "" || ps.Status != "active" || len(token) < 32 {
 		t.Fatalf("unexpected system created: %+v, token=%s", ps, token)
 	}
 
@@ -85,8 +84,8 @@ func TestDirectSCIMSystemCreationAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SigningSecret failed: %v", err)
 	}
-	if secret != "my-custom-bearer-secret" {
-		t.Fatalf("expected recovered secret 'my-custom-bearer-secret', got '%s'", secret)
+	if secret != token {
+		t.Fatalf("expected recovered secret '%s', got '%s'", token, secret)
 	}
 
 	// 3. Check system persisted in store

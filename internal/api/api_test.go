@@ -246,8 +246,8 @@ func TestAdminSystemPairingHandshakeViaAPI(t *testing.T) {
 	scimReqBody, _ := json.Marshal(map[string]string{
 		"name":        "Production KyPost Cluster",
 		"systemType":  "kypost",
+		"description": "Primary email cluster",
 		"callbackUrl": "https://kypost.example.com/scim/v2",
-		"bearerToken": "custom-bearer-token-xyz",
 	})
 	pairReq := httptest.NewRequest("POST", "/api/admin/systems", bytes.NewReader(scimReqBody))
 	pairReq.Header.Set("Content-Type", "application/json")
@@ -266,7 +266,7 @@ func TestAdminSystemPairingHandshakeViaAPI(t *testing.T) {
 		BearerToken string             `json:"bearerToken"`
 	}
 	_ = json.NewDecoder(pairRec.Body).Decode(&pairResp)
-	if pairResp.System.ID == "" || pairResp.BearerToken != "custom-bearer-token-xyz" {
+	if pairResp.System.ID == "" || len(pairResp.BearerToken) < 32 {
 		t.Fatalf("unexpected system creation response: %+v", pairResp)
 	}
 
@@ -582,7 +582,7 @@ func TestAdminCreatePairedSystemSCIM(t *testing.T) {
 
 	// 1. Create SCIM system directly via POST /api/admin/systems
 	csrfToken := server.middleware.IssueCSRFToken(adminSessionToken)
-	body := `{"name":"Nextcloud SCIM","systemType":"scim","callbackUrl":"https://cloud.example.com/scim/v2","bearerToken":"custom-bearer-secret-123"}`
+	body := `{"name":"Nextcloud SCIM","systemType":"scim","description":"Cloud storage","iconUrl":"https://example.com/icon.svg","callbackUrl":"https://cloud.example.com/scim/v2"}`
 	req := httptest.NewRequest("POST", "/api/admin/systems", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", csrfToken)
@@ -606,8 +606,11 @@ func TestAdminCreatePairedSystemSCIM(t *testing.T) {
 	if resp.System.Name != "Nextcloud SCIM" {
 		t.Fatalf("expected system name 'Nextcloud SCIM', got '%s'", resp.System.Name)
 	}
-	if resp.BearerToken != "custom-bearer-secret-123" {
-		t.Fatalf("expected bearer token 'custom-bearer-secret-123', got '%s'", resp.BearerToken)
+	if resp.System.Description != "Cloud storage" || resp.System.IconURL != "https://example.com/icon.svg" {
+		t.Fatalf("unexpected metadata in created system: %+v", resp.System)
+	}
+	if len(resp.BearerToken) < 32 {
+		t.Fatalf("expected high-entropy generated bearer token, got '%s'", resp.BearerToken)
 	}
 
 	// 2. Verify system is in list

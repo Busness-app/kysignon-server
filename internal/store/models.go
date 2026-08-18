@@ -31,6 +31,8 @@ type PairedSystem struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	SystemType  string `json:"systemType"` // "kypost", "kypasswords", "kybookmarks", "kynotes", "scim", "custom"
+	Description string `json:"description,omitempty"`
+	IconURL     string `json:"iconUrl,omitempty"`
 	CallbackURL string `json:"callbackUrl"`
 	// HMACSecretEncrypted holds the Bearer API token/signing secret under the deployment encryption key.
 	HMACSecretEncrypted string     `json:"-"`

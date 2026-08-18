@@ -79,12 +79,12 @@ func (s *Store) migrate() error {
 		last_failure_at DATETIME NOT NULL
 	);
 
-	-- hmac_secret_encrypted holds the webhook signing secret sealed under the deployment
-	-- encryption key. It signs outbound webhooks, so it must be recoverable, not hashed.
 	CREATE TABLE IF NOT EXISTS paired_systems (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
 		system_type TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		icon_url TEXT NOT NULL DEFAULT '',
 		callback_url TEXT NOT NULL,
 		hmac_secret_encrypted TEXT NOT NULL,
 		status TEXT NOT NULL CHECK (status IN ('active', 'failing', 'disabled')),
@@ -257,7 +257,48 @@ func (s *Store) migrate() error {
 	if err := s.migrateNativeDevicePlatform(); err != nil {
 		return err
 	}
+	if err := s.migratePairedSystemsMetadata(); err != nil {
+		return err
+	}
 	return s.migrateLegacyDevicePairingTokens()
+}
+
+func (s *Store) migratePairedSystemsMetadata() error {
+	rows, err := s.db.Query(`PRAGMA table_info(paired_systems)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	hasDesc := false
+	hasIcon := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "description" {
+			hasDesc = true
+		}
+		if name == "icon_url" {
+			hasIcon = true
+		}
+	}
+	if !hasDesc {
+		if _, err := s.db.Exec(`ALTER TABLE paired_systems ADD COLUMN description TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasIcon {
+		if _, err := s.db.Exec(`ALTER TABLE paired_systems ADD COLUMN icon_url TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) migrateNativeDevicePlatform() error {
@@ -672,16 +713,16 @@ func (s *Store) ClearFailedLogins(userID string) error {
 
 // System Pairing & Sync Management
 func (s *Store) CreatePairedSystem(ps *PairedSystem) error {
-	query := `INSERT INTO paired_systems (id, name, system_type, callback_url, hmac_secret_encrypted, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO paired_systems (id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	ps.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, ps.ID, ps.Name, ps.SystemType, ps.CallbackURL, ps.HMACSecretEncrypted, ps.Status, ps.CreatedAt)
+	_, err := s.db.Exec(query, ps.ID, ps.Name, ps.SystemType, ps.Description, ps.IconURL, ps.CallbackURL, ps.HMACSecretEncrypted, ps.Status, ps.CreatedAt)
 	return err
 }
 
 func (s *Store) GetPairedSystemByID(id string) (*PairedSystem, error) {
-	query := `SELECT id, name, system_type, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE id = ?`
+	query := `SELECT id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE id = ?`
 	ps := &PairedSystem{}
-	err := s.db.QueryRow(query, id).Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt)
+	err := s.db.QueryRow(query, id).Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.Description, &ps.IconURL, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -689,7 +730,7 @@ func (s *Store) GetPairedSystemByID(id string) (*PairedSystem, error) {
 }
 
 func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
-	query := `SELECT id, name, system_type, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems ORDER BY created_at ASC`
+	query := `SELECT id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems ORDER BY created_at ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -699,7 +740,7 @@ func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
 	var systems []PairedSystem
 	for rows.Next() {
 		var ps PairedSystem
-		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.Description, &ps.IconURL, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
 			return nil, err
 		}
 		systems = append(systems, ps)
@@ -708,7 +749,7 @@ func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
 }
 
 func (s *Store) ListActivePairedSystems() ([]PairedSystem, error) {
-	query := `SELECT id, name, system_type, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE status != 'disabled' ORDER BY created_at ASC`
+	query := `SELECT id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE status != 'disabled' ORDER BY created_at ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -718,7 +759,7 @@ func (s *Store) ListActivePairedSystems() ([]PairedSystem, error) {
 	var systems []PairedSystem
 	for rows.Next() {
 		var ps PairedSystem
-		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.Description, &ps.IconURL, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
 			return nil, err
 		}
 		systems = append(systems, ps)

@@ -11,6 +11,8 @@ import {
   Copy,
   Check,
   Send,
+  Key,
+  Globe,
 } from 'lucide-react';
 
 export const AdminSystems: React.FC = () => {
@@ -22,8 +24,9 @@ export const AdminSystems: React.FC = () => {
   // Direct SCIM Form State
   const [targetName, setTargetName] = useState('');
   const [systemType, setSystemType] = useState('kypost');
+  const [description, setDescription] = useState('');
+  const [iconUrl, setIconUrl] = useState('');
   const [callbackUrl, setCallbackUrl] = useState('');
-  const [bearerToken, setBearerToken] = useState('');
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -42,10 +45,12 @@ export const AdminSystems: React.FC = () => {
     fetchSystems();
   }, []);
 
-  const applyPreset = (type: string, name: string, url: string) => {
+  const applyPreset = (type: string, name: string, url: string, desc = '', icon = '') => {
     setSystemType(type);
     setTargetName(name);
     setCallbackUrl(url);
+    setDescription(desc);
+    setIconUrl(icon);
     setFormError(null);
   };
 
@@ -60,8 +65,9 @@ export const AdminSystems: React.FC = () => {
         body: JSON.stringify({
           name: targetName.trim(),
           systemType,
+          description: description.trim() || undefined,
+          iconUrl: iconUrl.trim() || undefined,
           callbackUrl: callbackUrl.trim(),
-          bearerToken: bearerToken.trim() || undefined,
         }),
       });
 
@@ -78,8 +84,9 @@ export const AdminSystems: React.FC = () => {
     setShowPairModal(true);
     setTargetName('KyPost Mail Server');
     setSystemType('kypost');
+    setDescription('');
+    setIconUrl('');
     setCallbackUrl('https://mail.example.com/scim/v2');
-    setBearerToken('');
     setCreatedToken(null);
     setFormError(null);
   };
@@ -119,6 +126,8 @@ export const AdminSystems: React.FC = () => {
     }
   };
 
+  const isCustomOrGeneric = systemType === 'scim' || systemType === 'custom';
+
   return (
     <div className="admin-page">
       <div className="page-header">
@@ -156,7 +165,51 @@ export const AdminSystems: React.FC = () => {
             ) : (
               systems.map((s) => (
                 <tr key={s.id}>
-                  <td className="font-bold text-white">{s.name}</td>
+                  <td>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                      {s.iconUrl ? (
+                        <img
+                          src={s.iconUrl}
+                          alt=""
+                          style={{
+                            width: 24,
+                            height: 24,
+                            borderRadius: '4px',
+                            objectFit: 'contain',
+                            background: 'rgba(255,255,255,0.05)',
+                            padding: '2px',
+                            border: '1px solid var(--line)',
+                          }}
+                          onError={(e) => {
+                            (e.target as HTMLElement).style.display = 'none';
+                          }}
+                        />
+                      ) : (
+                        <div
+                          style={{
+                            width: 24,
+                            height: 24,
+                            borderRadius: '4px',
+                            background: 'rgba(77, 238, 234, 0.1)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'var(--cyan)',
+                          }}
+                        >
+                          <Globe size={13} />
+                        </div>
+                      )}
+                      <div>
+                        <div className="font-bold text-white">{s.name}</div>
+                        {s.description && (
+                          <div className="text-muted text-xs" style={{ marginTop: '0.15rem' }}>
+                            {s.description}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </td>
                   <td>
                     <span className="font-mono badge-type">{s.systemType.toUpperCase()}</span>
                   </td>
@@ -225,7 +278,7 @@ export const AdminSystems: React.FC = () => {
                   <span>SCIM Target connected successfully!</span>
                 </div>
                 <div className="form-group mt-3 text-left">
-                  <label className="form-label">Bearer API Token</label>
+                  <label className="form-label">Auto-Generated Bearer API Token</label>
                   <div className="pin-box">
                     <span className="pairing-token-text font-mono">{createdToken}</span>
                     <button className="secondary-btn sm mt-2" onClick={copyCreatedToken}>
@@ -234,7 +287,7 @@ export const AdminSystems: React.FC = () => {
                     </button>
                   </div>
                   <span className="muted" style={{ fontSize: '0.75rem', marginTop: '0.35rem', display: 'block' }}>
-                    Save this token in your target product's SCIM configuration to authenticate incoming requests from KySignOn.
+                    Configure this Bearer token in your downstream SCIM target service to authenticate incoming account replication requests from KySignOn.
                   </span>
                 </div>
                 <div className="modal-footer mt-4">
@@ -281,24 +334,11 @@ export const AdminSystems: React.FC = () => {
                     <button
                       type="button"
                       className="secondary-btn sm"
-                      onClick={() => applyPreset('scim', 'Nextcloud SCIM', 'https://cloud.example.com/apps/user_scim/v2')}
+                      onClick={() => applyPreset('scim', 'Nextcloud', 'https://cloud.example.com/apps/user_scim/v2', 'Self-hosted cloud storage & collaboration', 'https://nextcloud.com/media/nextcloud-logo-white.svg')}
                     >
                       + Generic SCIM
                     </button>
                   </div>
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Target Name</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    placeholder="e.g. KyPost Mail Server"
-                    value={targetName}
-                    onChange={(e) => setTargetName(e.target.value)}
-                    required
-                    autoFocus
-                  />
                 </div>
 
                 <div className="form-group">
@@ -318,6 +358,45 @@ export const AdminSystems: React.FC = () => {
                 </div>
 
                 <div className="form-group">
+                  <label className="form-label">Target Name</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. KyPost Mail Server"
+                    value={targetName}
+                    onChange={(e) => setTargetName(e.target.value)}
+                    required
+                    autoFocus
+                  />
+                </div>
+
+                {isCustomOrGeneric && (
+                  <>
+                    <div className="form-group">
+                      <label className="form-label">Description (Optional)</label>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="e.g. Self-hosted storage & productivity suite"
+                        value={description}
+                        onChange={(e) => setDescription(e.target.value)}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label className="form-label">Custom Icon / Image URL (Optional)</label>
+                      <input
+                        type="url"
+                        className="form-input font-mono"
+                        placeholder="https://example.com/logo.svg"
+                        value={iconUrl}
+                        onChange={(e) => setIconUrl(e.target.value)}
+                      />
+                    </div>
+                  </>
+                )}
+
+                <div className="form-group">
                   <label className="form-label">SCIM Base URL (Destination)</label>
                   <input
                     type="url"
@@ -332,15 +411,9 @@ export const AdminSystems: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="form-group">
-                  <label className="form-label">Bearer API Token (Optional)</label>
-                  <input
-                    type="password"
-                    className="form-input font-mono"
-                    placeholder="Leave blank to auto-generate a secure token"
-                    value={bearerToken}
-                    onChange={(e) => setBearerToken(e.target.value)}
-                  />
+                <div className="alert-box info sm" style={{ marginBottom: '1.25rem' }}>
+                  <Key size={14} />
+                  <span>KySignOn will auto-generate a cryptographically secure 256-bit Bearer API Token.</span>
                 </div>
 
                 <div className="modal-footer">

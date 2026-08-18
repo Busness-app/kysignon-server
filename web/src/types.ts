@@ -13,6 +13,8 @@ export interface PairedSystem {
   id: string;
   name: string;
   systemType: string;
+  description?: string;
+  iconUrl?: string;
   callbackUrl: string;
   status: 'active' | 'failing' | 'disabled';
   lastSyncedAt?: string;

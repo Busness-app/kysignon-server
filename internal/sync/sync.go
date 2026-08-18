@@ -378,11 +378,12 @@ type SyncWebhookPayload struct {
 type CreateSystemRequest struct {
 	Name        string `json:"name"`
 	SystemType  string `json:"systemType"`
+	Description string `json:"description,omitempty"`
+	IconURL     string `json:"iconUrl,omitempty"`
 	CallbackURL string `json:"callbackUrl"`
-	BearerToken string `json:"bearerToken"`
 }
 
-// CreateSystem connects a downstream SCIM target service directly.
+// CreateSystem connects a downstream SCIM target service directly with a server-generated Bearer API token.
 func (e *Engine) CreateSystem(req *CreateSystemRequest) (*store.PairedSystem, string, error) {
 	if req.Name == "" {
 		req.Name = req.SystemType
@@ -390,17 +391,17 @@ func (e *Engine) CreateSystem(req *CreateSystemRequest) (*store.PairedSystem, st
 	if req.Name == "" {
 		return nil, "", errors.New("name is required")
 	}
+	if req.SystemType == "" {
+		req.SystemType = "scim"
+	}
 	if err := ValidateCallbackURL(req.CallbackURL); err != nil {
 		return nil, "", err
 	}
 
-	token := req.BearerToken
-	if token == "" {
-		var err error
-		token, err = crypto.GenerateRandomHex(32)
-		if err != nil {
-			return nil, "", err
-		}
+	// Always generate a cryptographically secure 256-bit Bearer API token
+	token, err := crypto.GenerateRandomHex(32)
+	if err != nil {
+		return nil, "", err
 	}
 
 	encrypted, err := crypto.EncryptAESGCM(e.encryptionKey, []byte(token))
@@ -412,6 +413,8 @@ func (e *Engine) CreateSystem(req *CreateSystemRequest) (*store.PairedSystem, st
 		ID:                  uuid.New().String(),
 		Name:                req.Name,
 		SystemType:          req.SystemType,
+		Description:         req.Description,
+		IconURL:             req.IconURL,
 		CallbackURL:         req.CallbackURL,
 		HMACSecretEncrypted: encrypted,
 		Status:              "active",

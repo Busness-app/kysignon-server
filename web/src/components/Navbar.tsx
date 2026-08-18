@@ -1,6 +1,6 @@
 import React from 'react';
 import { User } from '../types';
-import { Shield, LayoutGrid, Smartphone, Users, RefreshCw, Key, FileText, LogOut } from 'lucide-react';
+import { Shield, LayoutGrid, Smartphone, Users, RefreshCw, Key, FileText, LogOut, Archive } from 'lucide-react';
 
 interface NavbarProps {
   user: User;
@@ -73,6 +73,14 @@ export const Navbar: React.FC<NavbarProps> = ({ user, activeTab, setActiveTab, o
               >
                 <FileText size={16} />
                 <span>Audit Logs</span>
+              </button>
+
+              <button
+                className={`nav-btn ${activeTab === 'admin-backup' ? 'active' : ''}`}
+                onClick={() => setActiveTab('admin-backup')}
+              >
+                <Archive size={16} />
+                <span>Disaster Recovery</span>
               </button>
             </>
           )}

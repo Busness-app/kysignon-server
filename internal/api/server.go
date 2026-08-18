@@ -100,6 +100,7 @@ func (s *Server) routes() *http.ServeMux {
 	devH := NewDeviceHandler(s.store, s.mfaEngine, s.audit, s.middleware, s.cfg.IssuerURL)
 	adminH := NewAdminHandler(s.store, s.syncEngine, s.audit, s.middleware, s.cfg.IssuerURL)
 	oauthH := NewOAuthHandler(s.store, s.oauthEngine, s.audit, s.middleware)
+	backupH := NewBackupHandler(s.cfg, s.store, s.audit, s.middleware)
 
 	// Health Check
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +173,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("DELETE /api/admin/applications/{id}", adminM(http.HandlerFunc(adminH.DeleteApplication)))
 
 	mux.Handle("GET /api/admin/audit-events", adminM(http.HandlerFunc(adminH.ListAuditEvents)))
+	mux.Handle("POST /api/admin/backup/drill", adminM(http.HandlerFunc(backupH.RunDrill)))
+	mux.Handle("GET /api/admin/backup/recovery-kit", adminM(http.HandlerFunc(backupH.ExportRecoveryKit)))
+	mux.Handle("POST /api/admin/backup/pair-remote", adminM(http.HandlerFunc(backupH.PairRemote)))
+	mux.Handle("POST /api/admin/backup/push", adminM(http.HandlerFunc(backupH.PushBackup)))
+	mux.Handle("GET /api/admin/backup/status", adminM(http.HandlerFunc(backupH.Status)))
 
 	// Static CSS & Fonts from filesystem if present
 	cssDir := http.Dir("./css")

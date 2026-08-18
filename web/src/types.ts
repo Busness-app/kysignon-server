@@ -67,3 +67,24 @@ export interface AuditEvent {
   detailsJson?: string;
   createdAt: string;
 }
+
+export interface BackupDrillCheck {
+  name: string;
+  passed: boolean;
+  message: string;
+}
+
+export interface BackupDrillResult {
+  passed: boolean;
+  duration_ms: number;
+  checks: BackupDrillCheck[];
+  error_message?: string;
+}
+
+export interface BackupStatus {
+  paired: boolean;
+  recovery_url?: string;
+  app_name: string;
+  app_version: string;
+}
+

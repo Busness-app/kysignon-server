@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"github.com/Yoshiofthewire/kysignon-server/internal/api"
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
 	"github.com/Yoshiofthewire/kysignon-server/internal/auth"
+	"github.com/Yoshiofthewire/kysignon-server/internal/backup"
 	"github.com/Yoshiofthewire/kysignon-server/internal/config"
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/mfa"
@@ -29,15 +31,33 @@ import (
 const auditRetention = 180 * 24 * time.Hour
 
 func main() {
-	bootstrapCmd := flag.NewFlagSet("bootstrap-admin", flag.ExitOnError)
-	bootstrapUser := bootstrapCmd.String("username", "admin", "Admin username")
-	bootstrapPass := bootstrapCmd.String("password", "", "Admin password (min 12 chars)")
-	bootstrapEmail := bootstrapCmd.String("email", "admin@local.kysecurity", "Admin email")
-
-	if len(os.Args) > 1 && os.Args[1] == "bootstrap-admin" {
-		_ = bootstrapCmd.Parse(os.Args[2:])
-		runBootstrap(*bootstrapUser, *bootstrapPass, *bootstrapEmail)
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "bootstrap-admin":
+			bootstrapCmd := flag.NewFlagSet("bootstrap-admin", flag.ExitOnError)
+			bootstrapUser := bootstrapCmd.String("username", "admin", "Admin username")
+			bootstrapPass := bootstrapCmd.String("password", "", "Admin password (min 12 chars)")
+			bootstrapEmail := bootstrapCmd.String("email", "admin@local.kysecurity", "Admin email")
+			_ = bootstrapCmd.Parse(os.Args[2:])
+			runBootstrap(*bootstrapUser, *bootstrapPass, *bootstrapEmail)
+			return
+		case "backup-drill":
+			runBackupDrill()
+			return
+		case "export-recovery-kit":
+			kitCmd := flag.NewFlagSet("export-recovery-kit", flag.ExitOnError)
+			outPath := kitCmd.String("out", "kysignon-recovery-kit.html", "Output file path (or - for stdout)")
+			_ = kitCmd.Parse(os.Args[2:])
+			runExportRecoveryKit(*outPath)
+			return
+		case "push-backup":
+			pushCmd := flag.NewFlagSet("push-backup", flag.ExitOnError)
+			recURL := pushCmd.String("recovery-url", "", "KyRecovery server base URL")
+			apiToken := pushCmd.String("token", "", "KyRecovery API bearer token")
+			_ = pushCmd.Parse(os.Args[2:])
+			runPushBackup(*recURL, *apiToken)
+			return
+		}
 	}
 
 	cfg, err := config.Load()
@@ -274,3 +294,135 @@ func clearFirstRunPasswordFile(dbStore *store.Store, dataDir string) error {
 	log.Printf("Removed %s; the first administrator has signed in.", path)
 	return nil
 }
+
+func runBackupDrill() {
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	payload, err := backup.BuildLocalPayload(cfg, "1.0.0")
+	if err != nil {
+		log.Fatalf("Failed to build local backup payload: %v", err)
+	}
+
+	var files []backup.BackupFile
+	for _, f := range payload.Files {
+		data, err := base64.StdEncoding.DecodeString(f.DataBase64)
+		if err != nil {
+			continue
+		}
+		files = append(files, backup.BackupFile{
+			Path: f.Path,
+			Data: data,
+			Mode: f.Mode,
+		})
+	}
+
+	capsule, key, err := backup.CreateCapsule("KySignOn", "1.0.0", files, payload.Dependencies, payload.VerificationRecipe, 2, 3)
+	if err != nil {
+		log.Fatalf("Failed to create capsule: %v", err)
+	}
+
+	ctx := context.Background()
+	result, err := backup.RunRestoreDrill(ctx, capsule, key)
+	if err != nil {
+		log.Fatalf("Drill execution failed: %v", err)
+	}
+
+	fmt.Printf("\n=== Feature 0: KyBackup Restore Drill Summary ===\n")
+	statusStr := "PASSED (OK)"
+	if !result.Passed {
+		statusStr = "FAILED"
+	}
+	fmt.Printf("Status:   %s\n", statusStr)
+	fmt.Printf("Duration: %d ms\n", result.DurationMS)
+	for _, check := range result.Checks {
+		status := "✓"
+		if !check.Passed {
+			status = "✗"
+		}
+		fmt.Printf("  [%s] %s: %s\n", status, check.Name, check.Message)
+	}
+	fmt.Println("==================================================")
+	if !result.Passed {
+		os.Exit(1)
+	}
+}
+
+func runExportRecoveryKit(outPath string) {
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	payload, err := backup.BuildLocalPayload(cfg, "1.0.0")
+	if err != nil {
+		log.Fatalf("Failed to build payload: %v", err)
+	}
+
+	var files []backup.BackupFile
+	for _, f := range payload.Files {
+		data, _ := base64.StdEncoding.DecodeString(f.DataBase64)
+		files = append(files, backup.BackupFile{
+			Path: f.Path,
+			Data: data,
+			Mode: f.Mode,
+		})
+	}
+
+	capsule, _, err := backup.CreateCapsule("KySignOn", "1.0.0", files, payload.Dependencies, payload.VerificationRecipe, 2, 3)
+	if err != nil {
+		log.Fatalf("Failed to create capsule: %v", err)
+	}
+
+	html := backup.GenerateRecoveryKitHTML(capsule, "KySignOn", cfg.IssuerURL)
+	if outPath == "" || outPath == "-" {
+		fmt.Print(html)
+		return
+	}
+
+	if err := os.WriteFile(outPath, []byte(html), 0600); err != nil {
+		log.Fatalf("Failed to write recovery kit to %s: %v", outPath, err)
+	}
+	fmt.Printf("Disaster Recovery Kit exported to %s\n", outPath)
+}
+
+func runPushBackup(recURL, apiToken string) {
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	if recURL == "" || apiToken == "" {
+		dbStore, err := store.New(cfg.DBPath)
+		if err != nil {
+			log.Fatalf("Failed to open store: %v", err)
+		}
+		if recURL == "" {
+			recURL, _ = dbStore.GetSetting("kyrecovery_url")
+		}
+		if apiToken == "" {
+			apiToken, _ = dbStore.GetSetting("kyrecovery_token")
+		}
+		dbStore.Close()
+	}
+
+	if recURL == "" || apiToken == "" {
+		log.Fatalf("Error: KyRecovery URL and API token are required (pass flags or pair via UI)")
+	}
+
+	payload, err := backup.BuildLocalPayload(cfg, "1.0.0")
+	if err != nil {
+		log.Fatalf("Failed to build payload: %v", err)
+	}
+
+	client := backup.NewKyRecoveryClient()
+	resp, err := client.PushBackup(context.Background(), recURL, apiToken, *payload)
+	if err != nil {
+		log.Fatalf("Failed to push backup to %s: %v", recURL, err)
+	}
+
+	fmt.Printf("Backup push successful! Capsule ID: %s (%d bytes)\n", resp.CapsuleID, resp.SizeBytes)
+}
+

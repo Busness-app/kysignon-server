@@ -9,6 +9,7 @@ import { AdminUsers } from './components/AdminUsers';
 import { AdminSystems } from './components/AdminSystems';
 import { AdminClients } from './components/AdminClients';
 import { AdminAudit } from './components/AdminAudit';
+import { AdminBackup } from './components/AdminBackup';
 import { RefreshCw } from 'lucide-react';
 
 export const App: React.FC = () => {
@@ -88,6 +89,7 @@ export const App: React.FC = () => {
             {activeTab === 'admin-systems' && <AdminSystems />}
             {activeTab === 'admin-clients' && <AdminClients />}
             {activeTab === 'admin-audit' && <AdminAudit />}
+            {activeTab === 'admin-backup' && <AdminBackup />}
           </>
         )}
       </main>

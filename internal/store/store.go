@@ -247,6 +247,12 @@ func (s *Store) migrate() error {
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at DESC);
+
+	CREATE TABLE IF NOT EXISTS system_settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -1548,3 +1554,29 @@ func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, int, error) {
 	}
 	return events, total, nil
 }
+
+// GetSetting retrieves a configuration value from system_settings.
+func (s *Store) GetSetting(key string) (string, error) {
+	var val string
+	err := s.db.QueryRow(`SELECT value FROM system_settings WHERE key = ?`, key).Scan(&val)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return val, nil
+}
+
+// SetSetting upserts a key-value pair in system_settings.
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO system_settings (key, value, updated_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(key) DO UPDATE SET
+			value = excluded.value,
+			updated_at = CURRENT_TIMESTAMP
+	`, key, value)
+	return err
+}
+

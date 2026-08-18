@@ -330,7 +330,35 @@ func (h *AdminHandler) RegisterPairedSystem(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// ListPairedSystems lists connected KySecurity products.
+// CreatePairedSystem directly connects a downstream SCIM target service.
+func (h *AdminHandler) CreatePairedSystem(w http.ResponseWriter, r *http.Request) {
+	admin := GetUserFromContext(r.Context())
+
+	var req sync.CreateSystemRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+		return
+	}
+
+	ps, token, err := h.syncEngine.CreateSystem(&req)
+	if err != nil {
+		http.Error(w, `{"error":"invalid_request","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
+
+	h.audit.Record("admin.system_created", admin.ID, admin.Username, ps.ID, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+		"systemName": ps.Name,
+		"systemType": ps.SystemType,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"system":      ps,
+		"bearerToken": token,
+	})
+}
+
+// ListPairedSystems lists connected KySecurity products and SCIM targets.
 func (h *AdminHandler) ListPairedSystems(w http.ResponseWriter, r *http.Request) {
 	systems, err := h.store.ListAllPairedSystems()
 	if err != nil {

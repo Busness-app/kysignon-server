@@ -162,6 +162,7 @@ func (s *Server) routes() *http.ServeMux {
 
 	mux.Handle("POST /api/admin/systems/pairing-token", adminM(http.HandlerFunc(adminH.GenerateSystemPairingToken)))
 	mux.Handle("GET /api/admin/systems", adminM(http.HandlerFunc(adminH.ListPairedSystems)))
+	mux.Handle("POST /api/admin/systems", adminM(http.HandlerFunc(adminH.CreatePairedSystem)))
 	mux.Handle("POST /api/admin/systems/{id}/resync", adminM(http.HandlerFunc(adminH.ResyncSystem)))
 	mux.Handle("DELETE /api/admin/systems/{id}", adminM(http.HandlerFunc(adminH.DeletePairedSystem)))
 

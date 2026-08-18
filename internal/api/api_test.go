@@ -577,3 +577,80 @@ func TestAdminListAuditEventsPagination(t *testing.T) {
 	}
 }
 
+func TestAdminCreatePairedSystemSCIM(t *testing.T) {
+	server, dbStore, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create Admin & Session
+	adminPassHash, _ := auth.HashPassword("admin-secure-password-123")
+	admin := &store.User{
+		ID:           "admin-user-id",
+		Username:     "admin",
+		DisplayName:  "System Administrator",
+		Email:        "admin@example.com",
+		PasswordHash: adminPassHash,
+		Role:         "admin",
+		Status:       "active",
+	}
+	_ = dbStore.CreateUser(admin)
+
+	adminSessionToken, _ := crypto.GenerateRandomHex(32)
+	_ = dbStore.CreateSession(&store.Session{
+		ID:               "admin-sess-id",
+		UserID:           admin.ID,
+		SessionTokenHash: crypto.HashSHA256(adminSessionToken),
+		IPAddress:        "127.0.0.1",
+		UserAgent:        "TestAdminBrowser",
+		ExpiresAt:        time.Now().UTC().Add(time.Hour),
+	})
+	adminCookie := &http.Cookie{Name: "kysignon_session", Value: adminSessionToken}
+
+	// 1. Create SCIM system directly via POST /api/admin/systems
+	csrfToken := server.middleware.IssueCSRFToken(adminSessionToken)
+	body := `{"name":"Nextcloud SCIM","systemType":"scim","callbackUrl":"https://cloud.example.com/scim/v2","bearerToken":"custom-bearer-secret-123"}`
+	req := httptest.NewRequest("POST", "/api/admin/systems", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrfToken)
+	req.AddCookie(adminCookie)
+	req.AddCookie(&http.Cookie{Name: "kysignon_csrf", Value: csrfToken})
+	rec := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		System      store.PairedSystem `json:"system"`
+		BearerToken string             `json:"bearerToken"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.System.Name != "Nextcloud SCIM" {
+		t.Fatalf("expected system name 'Nextcloud SCIM', got '%s'", resp.System.Name)
+	}
+	if resp.BearerToken != "custom-bearer-secret-123" {
+		t.Fatalf("expected bearer token 'custom-bearer-secret-123', got '%s'", resp.BearerToken)
+	}
+
+	// 2. Verify system is in list
+	listReq := httptest.NewRequest("GET", "/api/admin/systems", nil)
+	listReq.AddCookie(adminCookie)
+	listRec := httptest.NewRecorder()
+	server.httpServer.Handler.ServeHTTP(listRec, listReq)
+
+	var listResp struct {
+		Systems []store.PairedSystem `json:"systems"`
+	}
+	_ = json.Unmarshal(listRec.Body.Bytes(), &listResp)
+	if len(listResp.Systems) != 1 {
+		t.Fatalf("expected 1 system in list, got %d", len(listResp.Systems))
+	}
+	if listResp.Systems[0].CallbackURL != "https://cloud.example.com/scim/v2" {
+		t.Fatalf("unexpected callback URL: %s", listResp.Systems[0].CallbackURL)
+	}
+}
+
+

@@ -493,6 +493,53 @@ type SyncWebhookPayload struct {
 	Meta        *SCIMMeta       `json:"meta,omitempty"`
 }
 
+type CreateSystemRequest struct {
+	Name        string `json:"name"`
+	SystemType  string `json:"systemType"`
+	CallbackURL string `json:"callbackUrl"`
+	BearerToken string `json:"bearerToken"`
+}
+
+// CreateSystem connects a downstream SCIM target service directly.
+func (e *Engine) CreateSystem(req *CreateSystemRequest) (*store.PairedSystem, string, error) {
+	if req.Name == "" {
+		req.Name = req.SystemType
+	}
+	if req.Name == "" {
+		return nil, "", errors.New("name is required")
+	}
+	if err := ValidateCallbackURL(req.CallbackURL); err != nil {
+		return nil, "", err
+	}
+
+	token := req.BearerToken
+	if token == "" {
+		var err error
+		token, err = crypto.GenerateRandomHex(32)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	encrypted, err := crypto.EncryptAESGCM(e.encryptionKey, []byte(token))
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to encrypt bearer token: %w", err)
+	}
+
+	ps := &store.PairedSystem{
+		ID:                  uuid.New().String(),
+		Name:                req.Name,
+		SystemType:          req.SystemType,
+		CallbackURL:         req.CallbackURL,
+		HMACSecretEncrypted: encrypted,
+		Status:              "active",
+	}
+	if err := e.store.CreatePairedSystem(ps); err != nil {
+		return nil, "", err
+	}
+	return ps, token, nil
+}
+
 // retryDelay is exponential with a ceiling, so a system that is down is not hammered every
 // tick until its attempt budget runs out.
 func retryDelay(attempts int) time.Duration {
@@ -548,30 +595,9 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 		scimUser, _ := FormatUserAsSCIM(json.RawMessage(ev.PayloadJSON))
 		var payloadBytes []byte
 		if scimUser != nil {
-			rawUser, _ := json.Marshal(scimUser)
-			payload := SyncWebhookPayload{
-				Schemas:     scimUser.Schemas,
-				ID:          scimUser.ID,
-				EventID:     ev.ID,
-				EventType:   ev.EventType,
-				Timestamp:   ev.CreatedAt.Format(time.RFC3339),
-				User:        rawUser,
-				UserName:    scimUser.UserName,
-				DisplayName: scimUser.DisplayName,
-				Name:        scimUser.Name,
-				Emails:      scimUser.Emails,
-				Roles:       scimUser.Roles,
-				Active:      scimUser.Active,
-				Meta:        scimUser.Meta,
-			}
-			payloadBytes, err = json.Marshal(payload)
+			payloadBytes, err = json.Marshal(scimUser)
 		} else {
-			payloadBytes, err = json.Marshal(SyncWebhookPayload{
-				EventID:   ev.ID,
-				EventType: ev.EventType,
-				Timestamp: ev.CreatedAt.Format(time.RFC3339),
-				User:      json.RawMessage(ev.PayloadJSON),
-			})
+			payloadBytes = []byte(ev.PayloadJSON)
 		}
 		if err != nil {
 			_ = e.store.UpdateSyncEventStatus(ev.ID, "failed", err.Error(), ev.Attempts+1, nil)

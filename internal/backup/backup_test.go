@@ -3,7 +3,9 @@ package backup_test
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/backup"
@@ -122,9 +124,19 @@ func TestCapsuleLifecycleAndRestoreDrill(t *testing.T) {
 		t.Error("expected drill with wrong key to fail")
 	}
 
-	// 5. Test Recovery Kit HTML generation
-	kitHTML := backup.GenerateRecoveryKitHTML(capsule, "KySignOn", "http://localhost:5867")
-	if len(kitHTML) == 0 {
-		t.Error("expected non-empty recovery kit HTML")
+	// 5. A custodian card carries exactly one shard.
+	card := backup.GenerateCustodianCardHTML(capsule.Manifest, capsule.Shares[0], "KySignOn", "https://sso.example.test")
+	if len(card) == 0 {
+		t.Fatal("expected non-empty custodian card")
 	}
+	for _, other := range capsule.Shares[1:] {
+		if strings.Contains(card, hex.EncodeToString(other.Data)) {
+			t.Fatalf("custodian card for shard %d also contains shard %d; a single file holds a quorum",
+				capsule.Shares[0].Index, other.Index)
+		}
+	}
+	if !strings.Contains(card, hex.EncodeToString(capsule.Shares[0].Data)) {
+		t.Error("custodian card is missing its own shard")
+	}
+	_ = dbFile
 }

@@ -6,7 +6,8 @@ const SUITE_CLIENT_IDS = ['kypost', 'kydns', 'kypasswords', 'kynotes', 'kybookma
 
 const isSuiteClient = (id: string) => SUITE_CLIENT_IDS.includes(id.trim().toLowerCase());
 import { OAuthClient } from '../types';
-import { apiRequest } from '../api';
+import { apiJson, apiRequest, errorMessage, isRecord } from '../api';
+import { parseOAuthClients } from '../parsers';
 import { Plus, Trash2, CheckCircle, AlertTriangle } from 'lucide-react';
 
 export const AdminClients: React.FC = () => {
@@ -23,10 +24,9 @@ export const AdminClients: React.FC = () => {
 
   const fetchClients = async () => {
     try {
-      const data = await apiRequest('/api/admin/clients');
-      setClients(data.clients || []);
+      setClients(await apiJson('/api/admin/clients', parseOAuthClients));
     } catch {
-      // ignore
+      // A failed refresh leaves the previous list on screen.
     }
   };
 
@@ -83,11 +83,16 @@ export const AdminClients: React.FC = () => {
         }),
       });
 
-      setCreatedClientId(data.client.id);
-      setCreatedSecret(data.clientSecret || null);
+      const client = isRecord(data) && isRecord(data.client) ? data.client : {};
+      setCreatedClientId(typeof client.id === 'string' ? client.id : clientId.trim());
+      setCreatedSecret(
+        isRecord(data) && typeof data.clientSecret === 'string' && data.clientSecret
+          ? data.clientSecret
+          : null
+      );
       fetchClients();
-    } catch (err: any) {
-      alert(err.message || 'Failed to create client');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to create client'));
     }
   };
 
@@ -96,8 +101,8 @@ export const AdminClients: React.FC = () => {
     try {
       await apiRequest(`/api/admin/clients/${id}`, { method: 'DELETE' });
       fetchClients();
-    } catch (err: any) {
-      alert(err.message || 'Failed to delete client');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to delete client'));
     }
   };
 
@@ -268,7 +273,7 @@ export const AdminClients: React.FC = () => {
                     className="form-select"
                     value={suiteLocked ? 'confidential' : clientType}
                     disabled={suiteLocked}
-                    onChange={(e: any) => setClientType(e.target.value)}
+                    onChange={(e) => setClientType(e.target.value === 'confidential' ? 'confidential' : 'public')}
                   >
                     <option value="confidential">Confidential — server-side, gets a client secret (recommended)</option>
                     <option value="public">Public — no client secret, PKCE only</option>

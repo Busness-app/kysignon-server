@@ -371,3 +371,89 @@ func hexEncode(b []byte) string {
 	}
 	return string(out)
 }
+
+// A failed exchange must not burn a legitimate code. Consuming before validating turned any
+// party who could observe or guess a code into a reliable login-denial: submit it once with
+// a junk verifier and the real client is told it has already been redeemed.
+func TestFailedExchangeDoesNotBurnTheCode(t *testing.T) {
+	e, db, cleanup := setupTestOAuthEngine(t)
+	defer cleanup()
+
+	user := testUser(t, db)
+	client := testClient(t, db, "spa", "public",
+		[]string{"https://app.example.com/cb"}, []string{"openid"})
+	verifier, challenge := pkcePair()
+
+	attempts := []struct {
+		name                                        string
+		clientID, secret, redirectURI, codeVerifier string
+	}{
+		{"wrong PKCE verifier", client.ID, "", "https://app.example.com/cb", "attacker-chosen-verifier-value-000000000000"},
+		{"wrong redirect URI", client.ID, "", "https://evil.example.com/cb", verifier},
+		{"wrong client", "someone-else", "", "https://app.example.com/cb", verifier},
+	}
+
+	for _, attempt := range attempts {
+		code, err := e.CreateAuthorizationCode(client.ID, user.ID, "https://app.example.com/cb", "openid", challenge, "S256")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := e.ExchangeAuthorizationCode(code, attempt.clientID, attempt.secret, attempt.redirectURI, attempt.codeVerifier); err == nil {
+			t.Fatalf("%s: the exchange succeeded", attempt.name)
+		}
+
+		// The legitimate client must still be able to redeem its own code.
+		tok, err := e.ExchangeAuthorizationCode(code, client.ID, "", "https://app.example.com/cb", verifier)
+		if err != nil {
+			t.Errorf("%s burned the code: the legitimate exchange then failed with %v", attempt.name, err)
+			continue
+		}
+		if tok.AccessToken == "" {
+			t.Errorf("%s: legitimate exchange returned no access token", attempt.name)
+		}
+
+		// Single use still holds.
+		if _, err := e.ExchangeAuthorizationCode(code, client.ID, "", "https://app.example.com/cb", verifier); err == nil {
+			t.Errorf("%s: the code was redeemable twice", attempt.name)
+		}
+	}
+}
+
+// Concurrent redemptions of one valid code must yield exactly one token.
+func TestValidCodeIsRedeemableExactlyOnceUnderRace(t *testing.T) {
+	e, db, cleanup := setupTestOAuthEngine(t)
+	defer cleanup()
+
+	user := testUser(t, db)
+	client := testClient(t, db, "spa", "public", []string{"https://app.example.com/cb"}, []string{"openid"})
+	verifier, challenge := pkcePair()
+	code, err := e.CreateAuthorizationCode(client.ID, user.ID, "https://app.example.com/cb", "openid", challenge, "S256")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const racers = 8
+	var wg sync.WaitGroup
+	results := make(chan error, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := e.ExchangeAuthorizationCode(code, client.ID, "", "https://app.example.com/cb", verifier)
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	var succeeded int
+	for err := range results {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Errorf("expected exactly one successful redemption, got %d", succeeded)
+	}
+}

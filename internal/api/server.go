@@ -128,6 +128,7 @@ func (s *Server) routes() *http.ServeMux {
 	authM := s.middleware.RequireAuth
 	mux.Handle("POST /api/auth/logout", authM(http.HandlerFunc(authH.Logout)))
 	mux.Handle("GET /api/auth/me", authM(http.HandlerFunc(authH.Me)))
+	mux.Handle("POST /api/auth/step-up", authM(s.middleware.RateLimit("step_up", 10, 0.2)(http.HandlerFunc(authH.RequestStepUp))))
 
 	mux.Handle("POST /api/user/devices/pairing-token", authM(http.HandlerFunc(devH.GenerateDevicePairingToken)))
 	mux.Handle("GET /api/user/devices", authM(http.HandlerFunc(devH.ListUserDevices)))
@@ -174,7 +175,12 @@ func (s *Server) routes() *http.ServeMux {
 
 	mux.Handle("GET /api/admin/audit-events", adminM(http.HandlerFunc(adminH.ListAuditEvents)))
 	mux.Handle("POST /api/admin/backup/drill", adminM(http.HandlerFunc(backupH.RunDrill)))
-	mux.Handle("GET /api/admin/backup/recovery-kit", adminM(http.HandlerFunc(backupH.ExportRecoveryKit)))
+	// The kit is collected as separate artifacts: the encrypted capsule and one shard per
+	// custodian, each its own authenticated request, so no single download holds a quorum.
+	mux.Handle("POST /api/admin/backup/recovery-kit", adminM(http.HandlerFunc(backupH.CreateRecoveryKit)))
+	mux.Handle("GET /api/admin/backup/recovery-kit/{id}/capsule", adminM(http.HandlerFunc(backupH.DownloadCapsule)))
+	mux.Handle("GET /api/admin/backup/recovery-kit/{id}/shard/{index}", adminM(http.HandlerFunc(backupH.DownloadShard)))
+	mux.Handle("DELETE /api/admin/backup/recovery-kit/{id}", adminM(http.HandlerFunc(backupH.DiscardRecoveryKit)))
 	mux.Handle("POST /api/admin/backup/pair-remote", adminM(http.HandlerFunc(backupH.PairRemote)))
 	mux.Handle("POST /api/admin/backup/push", adminM(http.HandlerFunc(backupH.PushBackup)))
 	mux.Handle("GET /api/admin/backup/status", adminM(http.HandlerFunc(backupH.Status)))

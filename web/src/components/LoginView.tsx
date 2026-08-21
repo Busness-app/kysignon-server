@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { apiRequest } from '../api';
+import { ApiError, apiJson, errorMessage } from '../api';
+import { parseAuthStep, parsePushStatus } from '../parsers';
 import { sameOriginPath } from '../returnTo';
+import type { User } from '../types';
 import { Shield, Smartphone, KeyRound, ArrowRight, RefreshCw, AlertCircle } from 'lucide-react';
 
 interface LoginViewProps {
-  onLoginSuccess: (user: any) => void;
+  onLoginSuccess: (user: User) => void;
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
@@ -35,14 +37,14 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
     setError(null);
 
     try {
-      const resp = await apiRequest('/api/auth/login', {
+      const resp = await apiJson('/api/auth/login', parseAuthStep, {
         method: 'POST',
         body: JSON.stringify({ username, password }),
       });
 
       if (resp.mfaRequired) {
         setMfaRequired(true);
-        setMfaToken(resp.mfaToken);
+        setMfaToken(resp.mfaToken ?? '');
         if (resp.challengeId && resp.matchDigits) {
           setChallengeId(resp.challengeId);
           setMatchDigits(resp.matchDigits);
@@ -53,14 +55,18 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
       } else if (resp.success) {
         finishLogin(resp.user);
       }
-    } catch (err: any) {
-      setError(err.message || 'Authentication failed');
+    } catch (err) {
+      setError(errorMessage(err, 'Authentication failed'));
     } finally {
       setLoading(false);
     }
   };
 
-  const finishLogin = (user: any) => {
+  const finishLogin = (user: User | undefined) => {
+    if (!user) {
+      setError('The server reported a successful sign-in but returned no account');
+      return;
+    }
     if (returnTo) {
       window.location.href = returnTo;
     } else {
@@ -80,34 +86,36 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
     }, 5 * 60 * 1000);
     const interval = setInterval(async () => {
       try {
-        const poll = await apiRequest('/api/auth/mfa/push/poll', {
+        const status = await apiJson('/api/auth/mfa/push/poll', parsePushStatus, {
           method: 'POST',
           body: JSON.stringify({ mfaToken, challengeId }),
         });
 
         if (!isMounted) return;
 
-        if (poll.status === 'approved') {
+        if (status === 'approved') {
           clearInterval(interval);
           clearTimeout(timeout);
           // Complete login
-          const finish = await apiRequest('/api/auth/mfa/push/finish', {
+          const finish = await apiJson('/api/auth/mfa/push/finish', parseAuthStep, {
             method: 'POST',
             body: JSON.stringify({ mfaToken, challengeId }),
           });
           if (finish.success) {
             finishLogin(finish.user);
           }
-        } else if (poll.status === 'denied' || poll.status === 'expired') {
+        } else if (status === 'denied' || status === 'expired') {
           clearInterval(interval);
           clearTimeout(timeout);
-          setError(`Push challenge ${poll.status}. Please try again or use TOTP.`);
+          setError(`Push challenge ${status}. Please try again or use TOTP.`);
           setMfaMode('totp');
         }
-      } catch (err: any) {
+      } catch (err) {
         if (!isMounted) return;
-        const message = err?.message || '';
-        if (message.includes('invalid_mfa_token') || message.toLowerCase().includes('expired')) {
+        const expired =
+          (err instanceof ApiError && err.code === 'invalid_mfa_token') ||
+          errorMessage(err, '').toLowerCase().includes('expired');
+        if (expired) {
           clearInterval(interval);
           clearTimeout(timeout);
           setError('Push challenge expired. Please sign in again or use another MFA method.');
@@ -131,15 +139,15 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
     setError(null);
 
     try {
-      const resp = await apiRequest('/api/auth/mfa/totp/verify', {
+      const resp = await apiJson('/api/auth/mfa/totp/verify', parseAuthStep, {
         method: 'POST',
         body: JSON.stringify({ mfaToken, code: totpCode }),
       });
       if (resp.success) {
         finishLogin(resp.user);
       }
-    } catch (err: any) {
-      setError(err.message || 'Invalid TOTP code');
+    } catch (err) {
+      setError(errorMessage(err, 'Invalid TOTP code'));
     } finally {
       setLoading(false);
     }
@@ -153,15 +161,15 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
     setError(null);
 
     try {
-      const resp = await apiRequest('/api/auth/mfa/recovery/verify', {
+      const resp = await apiJson('/api/auth/mfa/recovery/verify', parseAuthStep, {
         method: 'POST',
         body: JSON.stringify({ mfaToken, code: recoveryCode }),
       });
       if (resp.success) {
         finishLogin(resp.user);
       }
-    } catch (err: any) {
-      setError(err.message || 'Invalid recovery code');
+    } catch (err) {
+      setError(errorMessage(err, 'Invalid recovery code'));
     } finally {
       setLoading(false);
     }

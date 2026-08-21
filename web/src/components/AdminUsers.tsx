@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { User } from '../types';
-import { apiRequest } from '../api';
+import { apiJson, apiRequest, errorMessage } from '../api';
+import { parseUsers } from '../parsers';
 import { Plus, RefreshCw, KeyRound, LogOut, Trash2, Edit, CheckCircle, XCircle } from 'lucide-react';
 
 export const AdminUsers: React.FC = () => {
@@ -21,10 +22,9 @@ export const AdminUsers: React.FC = () => {
 
   const fetchUsers = async () => {
     try {
-      const data = await apiRequest('/api/admin/users');
-      setUsers(data.users || []);
+      setUsers(await apiJson('/api/admin/users', parseUsers));
     } catch {
-      // ignore
+      // A failed refresh leaves the previous list on screen.
     }
   };
 
@@ -45,8 +45,8 @@ export const AdminUsers: React.FC = () => {
       setShowCreateModal(false);
       resetForm();
       fetchUsers();
-    } catch (err: any) {
-      setFormError(err.message || 'Failed to create user');
+    } catch (err) {
+      setFormError(errorMessage(err, 'Failed to create user'));
     } finally {
       setSubmitting(false);
     }
@@ -66,8 +66,8 @@ export const AdminUsers: React.FC = () => {
       setShowEditModal(false);
       resetForm();
       fetchUsers();
-    } catch (err: any) {
-      setFormError(err.message || 'Failed to update user');
+    } catch (err) {
+      setFormError(errorMessage(err, 'Failed to update user'));
     } finally {
       setSubmitting(false);
     }
@@ -102,8 +102,10 @@ export const AdminUsers: React.FC = () => {
       await apiRequest(`/api/admin/users/${u.id}/reset-mfa`, { method: 'POST' });
       alert(`MFA reset successfully for ${u.username}`);
       fetchUsers();
-    } catch (err: any) {
-      alert(err.message || 'Failed to reset MFA');
+    } catch (err) {
+      // The server now fails closed rather than reporting an unearned success, so this
+      // message means nothing was changed.
+      alert(errorMessage(err, 'Failed to reset MFA'));
     }
   };
 
@@ -113,8 +115,8 @@ export const AdminUsers: React.FC = () => {
     try {
       await apiRequest(`/api/admin/users/${u.id}/revoke-sessions`, { method: 'POST' });
       alert(`Sessions revoked for ${u.username}`);
-    } catch (err: any) {
-      alert(err.message || 'Failed to revoke sessions');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to revoke sessions'));
     }
   };
 
@@ -124,8 +126,8 @@ export const AdminUsers: React.FC = () => {
     try {
       await apiRequest(`/api/admin/users/${u.id}`, { method: 'DELETE' });
       fetchUsers();
-    } catch (err: any) {
-      alert(err.message || 'Failed to delete user');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to delete user'));
     }
   };
 
@@ -272,7 +274,7 @@ export const AdminUsers: React.FC = () => {
                   <select
                     className="form-select"
                     value={role}
-                    onChange={(e: any) => setRole(e.target.value)}
+                    onChange={(e) => setRole(e.target.value as User['role'])}
                   >
                     <option value="user">User</option>
                     <option value="admin">Administrator</option>
@@ -283,7 +285,7 @@ export const AdminUsers: React.FC = () => {
                   <select
                     className="form-select"
                     value={status}
-                    onChange={(e: any) => setStatus(e.target.value)}
+                    onChange={(e) => setStatus(e.target.value === 'disabled' ? 'disabled' : 'active')}
                   >
                     <option value="active">Active</option>
                     <option value="disabled">Disabled</option>
@@ -356,7 +358,7 @@ export const AdminUsers: React.FC = () => {
                   <select
                     className="form-select"
                     value={role}
-                    onChange={(e: any) => setRole(e.target.value)}
+                    onChange={(e) => setRole(e.target.value as User['role'])}
                   >
                     <option value="user">User</option>
                     <option value="admin">Administrator</option>
@@ -367,7 +369,7 @@ export const AdminUsers: React.FC = () => {
                   <select
                     className="form-select"
                     value={status}
-                    onChange={(e: any) => setStatus(e.target.value)}
+                    onChange={(e) => setStatus(e.target.value === 'disabled' ? 'disabled' : 'active')}
                   >
                     <option value="active">Active</option>
                     <option value="disabled">Disabled</option>

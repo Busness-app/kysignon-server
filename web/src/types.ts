@@ -88,3 +88,23 @@ export interface BackupStatus {
   app_version: string;
 }
 
+
+export interface RecoveryShard {
+  index: number;
+  collected: boolean;
+}
+
+/**
+ * A pending recovery kit. The capsule and each shard are collected separately, so this
+ * carries only metadata — never key material.
+ */
+export interface RecoveryKit {
+  kitId: string;
+  capsuleId: string;
+  payloadHash: string;
+  threshold: number;
+  totalShares: number;
+  capsuleSize: number;
+  expiresAt: string;
+  shards: RecoveryShard[];
+}

@@ -1,6 +1,13 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { NativeDevice, User } from '../types';
-import { apiRequest } from '../api';
+import { apiJson, apiRequest, errorMessage, isStepUpRequired } from '../api';
+import {
+  parseDevices,
+  parsePairingToken,
+  parseRecoveryCodes,
+  parseStepUpGrant,
+  parseTOTPSetup,
+} from '../parsers';
 import QRCode from 'qrcode';
 import {
   Smartphone,
@@ -12,7 +19,11 @@ import {
   Copy,
   Check,
   Plus,
+  Lock,
 } from 'lucide-react';
+
+/** Which account-security change the step-up prompt is currently gating. */
+type PendingAction = 'totp' | 'recovery-codes';
 
 interface DeviceSettingsProps {
   user: User;
@@ -43,12 +54,21 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
 
+  // Step-up re-authentication. Replacing a factor or reissuing recovery codes needs proof
+  // that this is the account holder, not just a live session.
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [stepUpPassword, setStepUpPassword] = useState('');
+  const [stepUpCode, setStepUpCode] = useState('');
+  const [stepUpError, setStepUpError] = useState<string | null>(null);
+  const [stepUpBusy, setStepUpBusy] = useState(false);
+
+  const hasExistingMFA = (user.mfaMethods?.length ?? 0) > 0;
+
   const fetchDevices = async () => {
     try {
-      const data = await apiRequest('/api/user/devices');
-      setDevices(data.devices || []);
+      setDevices(await apiJson('/api/user/devices', parseDevices));
     } catch {
-      // ignore
+      // A failed refresh leaves the previous list on screen; nothing is lost.
     }
   };
 
@@ -86,8 +106,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
         return;
       }
       try {
-        const data = await apiRequest('/api/user/devices');
-        const nextDevices: NativeDevice[] = data.devices || [];
+        const nextDevices = await apiJson('/api/user/devices', parseDevices);
         setDevices(nextDevices);
         const paired = nextDevices.some((dev) => {
           if (!pairDeviceIdsBefore.has(dev.id) && dev.pushToken) return true;
@@ -111,7 +130,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
     setPairStartedAt(Date.now());
     setPairDeviceIdsBefore(new Set(devices.map((dev) => dev.id)));
     try {
-      const data = await apiRequest('/api/user/devices/pairing-token', { method: 'POST' });
+      const data = await apiJson('/api/user/devices/pairing-token', parsePairingToken, { method: 'POST' });
       setPairPin(data.pinCode);
       const exp = new Date(data.expiresAt).getTime();
       setPairExpiresAt(exp);
@@ -124,17 +143,59 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
           color: { dark: '#0d0f14', light: '#4deeea' },
         });
       }
-    } catch (err: any) {
-      alert(err.message || 'Failed to generate pairing token');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to generate pairing token'));
       closePairModal();
     }
   };
 
-  const handleStartTOTPSetup = async () => {
+  // Both account-security changes go through the same prompt; nothing starts until the
+  // account holder has re-proved who they are.
+  const requestStepUp = (action: PendingAction) => {
+    setPendingAction(action);
+    setStepUpPassword('');
+    setStepUpCode('');
+    setStepUpError(null);
+  };
+
+  const submitStepUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingAction || !stepUpPassword) return;
+    setStepUpBusy(true);
+    setStepUpError(null);
+    try {
+      const grant = await apiJson('/api/auth/step-up', parseStepUpGrant, {
+        method: 'POST',
+        body: JSON.stringify({ password: stepUpPassword, code: stepUpCode }),
+      });
+      const action = pendingAction;
+      setPendingAction(null);
+      setStepUpPassword('');
+      setStepUpCode('');
+      if (action === 'totp') {
+        await startTOTPSetup(grant.stepUpToken);
+      } else {
+        await generateRecoveryCodes(grant.stepUpToken);
+      }
+    } catch (err) {
+      setStepUpError(errorMessage(err, 'Re-authentication failed'));
+    } finally {
+      setStepUpBusy(false);
+    }
+  };
+
+  // The grant is held only for as long as this flow runs, and is spent by the enable step.
+  const [totpGrant, setTotpGrant] = useState('');
+
+  const startTOTPSetup = async (grant: string) => {
     setShowTotpModal(true);
     setTotpError(null);
+    setTotpGrant(grant);
     try {
-      const data = await apiRequest('/api/user/mfa/totp/setup', { method: 'POST' });
+      const data = await apiJson('/api/user/mfa/totp/setup', parseTOTPSetup, {
+        method: 'POST',
+        stepUpToken: grant,
+      });
       setTotpSecret(data.secret);
 
       if (totpCanvasRef.current) {
@@ -144,8 +205,8 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
           color: { dark: '#0d0f14', light: '#4deeea' },
         });
       }
-    } catch (err: any) {
-      setTotpError(err.message || 'Failed to initialize TOTP');
+    } catch (err) {
+      setTotpError(errorMessage(err, 'Failed to initialize TOTP'));
     }
   };
 
@@ -154,26 +215,41 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
     if (!totpCode || totpCode.length < 6) return;
 
     try {
-      const data = await apiRequest('/api/user/mfa/totp/enable', {
+      const codes = await apiJson('/api/user/mfa/totp/enable', parseRecoveryCodes, {
         method: 'POST',
         body: JSON.stringify({ secret: totpSecret, code: totpCode }),
+        stepUpToken: totpGrant,
       });
       setShowTotpModal(false);
-      setRecoveryCodes(data.recoveryCodes || []);
+      setTotpGrant('');
+      setRecoveryCodes(codes);
       setShowRecoveryModal(true);
       onUserUpdate();
-    } catch (err: any) {
-      setTotpError(err.message || 'Invalid code');
+    } catch (err) {
+      if (isStepUpRequired(err)) {
+        setShowTotpModal(false);
+        setTotpGrant('');
+        requestStepUp('totp');
+        return;
+      }
+      setTotpError(errorMessage(err, 'Invalid code'));
     }
   };
 
-  const handleGenerateRecoveryCodes = async () => {
+  const generateRecoveryCodes = async (grant: string) => {
     try {
-      const data = await apiRequest('/api/user/recovery-codes', { method: 'POST' });
-      setRecoveryCodes(data.recoveryCodes || []);
+      const codes = await apiJson('/api/user/recovery-codes', parseRecoveryCodes, {
+        method: 'POST',
+        stepUpToken: grant,
+      });
+      setRecoveryCodes(codes);
       setShowRecoveryModal(true);
-    } catch (err: any) {
-      alert(err.message || 'Failed to generate recovery codes');
+    } catch (err) {
+      if (isStepUpRequired(err)) {
+        requestStepUp('recovery-codes');
+        return;
+      }
+      alert(errorMessage(err, 'Failed to generate recovery codes'));
     }
   };
 
@@ -182,8 +258,8 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
     try {
       await apiRequest(`/api/user/devices/${deviceId}`, { method: 'DELETE' });
       fetchDevices();
-    } catch (err: any) {
-      alert(err.message || 'Failed to delete device');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to delete device'));
     }
   };
 
@@ -263,7 +339,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
             <KeyRound className="icon-cyan" size={20} />
             <h2>Time-Based One-Time Password (TOTP)</h2>
           </div>
-          <button className="secondary-btn sm" onClick={handleStartTOTPSetup}>
+          <button className="secondary-btn sm" onClick={() => requestStepUp('totp')}>
             <span>Configure TOTP</span>
           </button>
         </div>
@@ -280,7 +356,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
             <ShieldAlert className="icon-cyan" size={20} />
             <h2>Emergency Recovery Codes</h2>
           </div>
-          <button className="secondary-btn sm" onClick={handleGenerateRecoveryCodes}>
+          <button className="secondary-btn sm" onClick={() => requestStepUp('recovery-codes')}>
             <span>Generate New Codes</span>
           </button>
         </div>
@@ -290,6 +366,69 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
       </div>
 
       {/* Device Pairing Modal (90s Ephemeral Key / QR) */}
+      {pendingAction && (
+        <div className="modal-backdrop">
+          <div className="modal-card">
+            <div className="modal-header">
+              <h3>Confirm It's You</h3>
+              <button className="close-btn" onClick={() => setPendingAction(null)}>
+                ×
+              </button>
+            </div>
+            <form onSubmit={submitStepUp}>
+              <div className="modal-body">
+                <p className="modal-desc">
+                  {pendingAction === 'totp'
+                    ? 'Replacing your authenticator changes how this account is protected, so re-enter your credentials first.'
+                    : 'New recovery codes invalidate the ones you already stored, so re-enter your credentials first.'}
+                </p>
+
+                <label className="field-label" htmlFor="stepup-password">Password</label>
+                <input
+                  id="stepup-password"
+                  type="password"
+                  className="text-input"
+                  autoComplete="current-password"
+                  autoFocus
+                  value={stepUpPassword}
+                  onChange={(e) => setStepUpPassword(e.target.value)}
+                  required
+                />
+
+                {hasExistingMFA && (
+                  <>
+                    <label className="field-label" htmlFor="stepup-code" style={{ marginTop: '0.75rem' }}>
+                      Current authenticator code (or a recovery code)
+                    </label>
+                    <input
+                      id="stepup-code"
+                      type="text"
+                      className="text-input"
+                      inputMode="text"
+                      autoComplete="one-time-code"
+                      placeholder="123456"
+                      value={stepUpCode}
+                      onChange={(e) => setStepUpCode(e.target.value)}
+                    />
+                  </>
+                )}
+
+                {stepUpError && <div className="form-error">{stepUpError}</div>}
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="secondary-btn" onClick={() => setPendingAction(null)}>
+                  Cancel
+                </button>
+                <button type="submit" className="primary-btn" disabled={stepUpBusy || !stepUpPassword}>
+                  <Lock size={16} />
+                  <span>{stepUpBusy ? 'Verifying...' : 'Continue'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {showPairModal && (
         <div className="modal-backdrop">
           <div className="modal-card">

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { PairedSystem } from '../types';
-import { apiRequest } from '../api';
+import { apiJson, apiRequest, errorMessage } from '../api';
+import { parseCreatedSystem, parsePairedSystems } from '../parsers';
 import {
   RefreshCw,
   Plus,
@@ -68,10 +69,9 @@ export const AdminSystems: React.FC = () => {
 
   const fetchSystems = async () => {
     try {
-      const data = await apiRequest('/api/admin/systems');
-      setSystems(data.systems || []);
+      setSystems(await apiJson('/api/admin/systems', parsePairedSystems));
     } catch {
-      // ignore
+      // A failed refresh leaves the previous list on screen.
     }
   };
 
@@ -97,7 +97,7 @@ export const AdminSystems: React.FC = () => {
     setSubmitting(true);
 
     try {
-      const data = await apiRequest('/api/admin/systems', {
+      const data = await apiJson('/api/admin/systems', parseCreatedSystem, {
         method: 'POST',
         body: JSON.stringify({
           name: targetName.trim(),
@@ -110,8 +110,8 @@ export const AdminSystems: React.FC = () => {
 
       setCreatedToken(data.bearerToken || null);
       fetchSystems();
-    } catch (err: any) {
-      setFormError(err.message || 'Failed to connect SCIM service');
+    } catch (err) {
+      setFormError(errorMessage(err, 'Failed to connect SCIM service'));
     } finally {
       setSubmitting(false);
     }
@@ -135,8 +135,8 @@ export const AdminSystems: React.FC = () => {
       await apiRequest(`/api/admin/systems/${s.id}/resync`, { method: 'POST' });
       alert(`Full account directory resync queued for '${s.name}' via SCIM 2.0`);
       fetchSystems();
-    } catch (err: any) {
-      alert(err.message || 'Failed to trigger resync');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to trigger resync'));
     }
   };
 
@@ -146,8 +146,8 @@ export const AdminSystems: React.FC = () => {
     try {
       await apiRequest(`/api/admin/systems/${s.id}`, { method: 'DELETE' });
       fetchSystems();
-    } catch (err: any) {
-      alert(err.message || 'Failed to disconnect system');
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to disconnect system'));
     }
   };
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { AuditEvent } from '../types';
-import { apiRequest } from '../api';
+import { apiJson } from '../api';
+import { parseAuditPage } from '../parsers';
 import {
   RefreshCw,
   CheckCircle,
@@ -39,17 +40,14 @@ export const AdminAudit: React.FC = () => {
       }
 
       try {
-        const data = await apiRequest(
-          `/api/admin/audit-events?page=${targetPage}&limit=${targetLimit}`
+        const page = await apiJson(
+          `/api/admin/audit-events?page=${targetPage}&limit=${targetLimit}`,
+          parseAuditPage
         );
-        setEvents(data.auditEvents || []);
-        if (typeof data.total === 'number') {
-          setTotal(data.total);
-        } else if (Array.isArray(data.auditEvents)) {
-          setTotal(data.auditEvents.length);
-        }
+        setEvents(page.events);
+        setTotal(page.total);
       } catch {
-        // ignore background poll errors
+        // A failed background poll leaves the current page on screen.
       } finally {
         setLoading(false);
         setIsRefreshing(false);
@@ -266,7 +264,7 @@ export const AdminAudit: React.FC = () => {
               ) : (
                 events.map((e) => {
                   const isExpanded = expandedId === e.id;
-                  let parsedDetails: any = null;
+                  let parsedDetails: unknown = null;
                   if (e.detailsJson) {
                     try {
                       parsedDetails = JSON.parse(e.detailsJson);
@@ -339,7 +337,7 @@ export const AdminAudit: React.FC = () => {
                                 </div>
                               </div>
 
-                              {parsedDetails && (
+                              {parsedDetails !== null && parsedDetails !== undefined && (
                                 <div className="audit-detail-item">
                                   <span className="audit-detail-label">Event Payload / Details</span>
                                   <pre className="audit-json-box">

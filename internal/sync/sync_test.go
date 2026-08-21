@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
+	"github.com/Yoshiofthewire/kysignon-server/internal/netguard"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
@@ -48,8 +49,8 @@ func setupTestSyncEngine(t *testing.T) (*Engine, *store.Store, *store.User, func
 	engine := NewEngine(dbStore, key)
 
 	// Pairing callbacks in these tests point at httptest servers on loopback.
-	AllowPrivateCallbacks = true
-	t.Cleanup(func() { AllowPrivateCallbacks = false })
+	netguard.AllowPrivate = true
+	t.Cleanup(func() { netguard.AllowPrivate = false })
 
 	cleanup := func() {
 		_ = dbStore.Close()
@@ -335,5 +336,3 @@ func mustEncrypt(t *testing.T, e *Engine, secret string) string {
 	}
 	return sealed
 }
-
-

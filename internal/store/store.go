@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -253,6 +254,20 @@ func (s *Store) migrate() error {
 		value TEXT NOT NULL,
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
+
+	-- A step-up token is proof that the live session just re-proved the account's own
+	-- credentials. Account-security changes consume one, so a stolen session alone cannot
+	-- replace MFA or reissue recovery codes.
+	CREATE TABLE IF NOT EXISTS step_up_tokens (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		session_id TEXT NOT NULL,
+		token_hash TEXT NOT NULL UNIQUE,
+		expires_at DATETIME NOT NULL,
+		used_at DATETIME,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_step_up_tokens_hash ON step_up_tokens(token_hash);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -266,7 +281,36 @@ func (s *Store) migrate() error {
 	if err := s.migratePairedSystemsMetadata(); err != nil {
 		return err
 	}
+	if err := s.migrateSyncEventLease(); err != nil {
+		return err
+	}
 	return s.migrateLegacyDevicePairingTokens()
+}
+
+// migrateSyncEventLease adds the delivery lease column to pre-existing databases.
+func (s *Store) migrateSyncEventLease() error {
+	rows, err := s.db.Query(`PRAGMA table_info(account_sync_events)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "lease_until" {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE account_sync_events ADD COLUMN lease_until DATETIME`)
+	return err
 }
 
 func (s *Store) migratePairedSystemsMetadata() error {
@@ -829,7 +873,58 @@ func (s *Store) GetPendingSyncEvents(limit int) ([]AccountSyncEvent, error) {
 	return scanSyncEvents(rows)
 }
 
-// GetDueSyncEvents returns pending events whose backoff has elapsed.
+// ClaimDueSyncEvents takes ownership of due events for the duration of lease before any
+// network I/O happens. Reading without claiming lets two dispatchers — overlapping ticks, or
+// two instances during a rolling deploy — deliver the same event twice. A lease rather than
+// a lock means a dispatcher that crashes mid-delivery releases its events when it expires.
+func (s *Store) ClaimDueSyncEvents(limit int, lease time.Duration) ([]AccountSyncEvent, error) {
+	now := time.Now().UTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`SELECT `+syncEventColumns+` FROM account_sync_events
+		WHERE status = 'pending' AND attempts < 5
+		  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+		  AND (lease_until IS NULL OR lease_until <= ?)
+		ORDER BY created_at ASC LIMIT ?`, now, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	events, err := scanSyncEvents(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(events) == 0 {
+		return nil, tx.Commit()
+	}
+
+	until := now.Add(lease)
+	stmt, err := tx.Prepare(`UPDATE account_sync_events SET lease_until = ?, updated_at = ?
+		WHERE id = ? AND (lease_until IS NULL OR lease_until <= ?)`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+	claimed := make([]AccountSyncEvent, 0, len(events))
+	for _, ev := range events {
+		res, err := stmt.Exec(until, now, ev.ID, now)
+		if err != nil {
+			return nil, err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return nil, err
+		} else if n == 1 {
+			claimed = append(claimed, ev)
+		}
+	}
+	return claimed, tx.Commit()
+}
+
+// GetDueSyncEvents returns pending events whose backoff has elapsed, without claiming them.
+// Use ClaimDueSyncEvents for anything that then delivers them.
 func (s *Store) GetDueSyncEvents(limit int) ([]AccountSyncEvent, error) {
 	rows, err := s.db.Query(`SELECT `+syncEventColumns+` FROM account_sync_events
 		WHERE status = 'pending' AND attempts < 5
@@ -841,13 +936,21 @@ func (s *Store) GetDueSyncEvents(limit int) ([]AccountSyncEvent, error) {
 	return scanSyncEvents(rows)
 }
 
+// UpdateSyncEventStatus records the outcome of an attempt and releases the delivery lease.
 func (s *Store) UpdateSyncEventStatus(eventID, status, lastError string, attempts int, nextAttempt *time.Time) error {
-	query := `UPDATE account_sync_events SET status = ?, last_error = ?, attempts = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?`
+	query := `UPDATE account_sync_events SET status = ?, last_error = ?, attempts = ?, next_attempt_at = ?, lease_until = NULL, updated_at = ? WHERE id = ?`
 	var next any
 	if nextAttempt != nil {
 		next = *nextAttempt
 	}
 	_, err := s.db.Exec(query, status, lastError, attempts, next, time.Now().UTC(), eventID)
+	return err
+}
+
+// ReleaseSyncEventLease drops a claim without recording an attempt, for events this pass
+// decided not to deliver.
+func (s *Store) ReleaseSyncEventLease(eventID string) error {
+	_, err := s.db.Exec(`UPDATE account_sync_events SET lease_until = NULL WHERE id = ?`, eventID)
 	return err
 }
 
@@ -1580,3 +1683,135 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
+// SnapshotTo writes a transactionally consistent copy of the database to destPath through
+// the live connection. Copying the main database file is not a backup procedure in WAL mode:
+// recently committed transactions can live only in the -wal file, so a file copy silently
+// restores an older directory. destPath must not already exist.
+func (s *Store) SnapshotTo(destPath string) error {
+	if _, err := os.Stat(destPath); err == nil {
+		return fmt.Errorf("snapshot destination %s already exists", destPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	// VACUUM INTO takes its own read transaction, so the copy is a single point in time and
+	// includes everything committed to the WAL.
+	if _, err := s.db.Exec(`VACUUM INTO ?`, destPath); err != nil {
+		return fmt.Errorf("database snapshot failed: %w", err)
+	}
+	return nil
+}
+
+// ResetUserMFA removes every authentication factor and revokes everything that factor was
+// backing, in one transaction. A partial reset that reports success is the worst outcome
+// here: the admin believes the account is locked down while the attacker is still holding a
+// live session.
+func (s *Store) ResetUserMFA(userID string, events []AccountSyncEvent) error {
+	now := time.Now().UTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM mfa_methods WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM recovery_codes WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE native_devices SET is_mfa_approver = 0 WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if err := revokeUserAccessTx(tx, userID, now); err != nil {
+		return err
+	}
+	if err := insertSyncEvents(tx, events, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RevokeUserAccess deletes browser sessions, revokes issued access tokens, expires unused
+// device pairing tokens, and burns unused step-up tokens, in one transaction.
+func (s *Store) RevokeUserAccess(userID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := revokeUserAccessTx(tx, userID, time.Now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func revokeUserAccessTx(tx *sql.Tx, userID string, now time.Time) error {
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE issued_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`,
+		now, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE device_pairing_tokens SET expires_at = ? WHERE user_id = ? AND used_at IS NULL`,
+		now, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE step_up_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL`,
+		now, userID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeleteOtherUserSessions logs out every session for a user except keepSessionID, so
+// replacing a factor does not leave a co-resident stolen session logged in.
+func (s *Store) DeleteOtherUserSessions(userID, keepSessionID string) error {
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE user_id = ? AND id != ?`, userID, keepSessionID)
+	return err
+}
+
+// CreateStepUpToken records a freshly minted step-up grant.
+func (s *Store) CreateStepUpToken(t *StepUpToken) error {
+	t.CreatedAt = time.Now().UTC()
+	_, err := s.db.Exec(
+		`INSERT INTO step_up_tokens (id, user_id, session_id, token_hash, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		t.ID, t.UserID, t.SessionID, t.TokenHash, t.ExpiresAt, t.CreatedAt)
+	return err
+}
+
+// ConsumeStepUpToken spends a step-up grant bound to this user and session. The
+// compare-and-swap is what makes it single use.
+func (s *Store) ConsumeStepUpToken(tokenHash, userID, sessionID string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE step_up_tokens SET used_at = ?
+		 WHERE token_hash = ? AND user_id = ? AND session_id = ?
+		   AND used_at IS NULL AND expires_at > ?`,
+		time.Now().UTC(), tokenHash, userID, sessionID, time.Now().UTC())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// HasValidStepUpToken reports whether an unspent grant exists, for operations that gate on
+// step-up without spending it.
+func (s *Store) HasValidStepUpToken(tokenHash, userID, sessionID string) (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM step_up_tokens
+		 WHERE token_hash = ? AND user_id = ? AND session_id = ?
+		   AND used_at IS NULL AND expires_at > ?`,
+		tokenHash, userID, sessionID, time.Now().UTC()).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) DeleteExpiredStepUpTokens() error {
+	_, err := s.db.Exec(`DELETE FROM step_up_tokens WHERE expires_at < ?`, time.Now().UTC())
+	return err
+}

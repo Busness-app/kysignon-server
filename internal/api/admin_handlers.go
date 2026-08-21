@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -204,18 +205,22 @@ func (h *AdminHandler) ResetUserMFA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.DeleteUserMFAMethods(user.ID); err != nil {
-		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
-		return
-	}
-
-	_ = h.store.DeleteUserSessions(user.ID)
-	_ = h.store.RevokeUserTokens(user.ID)
-
-	_ = h.syncEngine.QueueAccountSyncEvent(user.ID, "user.mfa_reset", map[string]any{
+	// Factor removal, session deletion, token revocation, pairing-token expiry and the sync
+	// event all commit together or not at all. Discarding these errors and reporting success
+	// anyway told the admin — and the audit trail — that an account was locked down while the
+	// attacker was still holding a live session.
+	if err := h.syncEngine.ResetUserMFAAndRevoke(user.ID, map[string]any{
 		"id":       user.ID,
 		"username": user.Username,
-	})
+	}); err != nil {
+		log.Printf("MFA reset for user %s failed: %v", user.ID, err)
+		h.audit.Record("admin.user_mfa_reset", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
+			"username": user.Username,
+			"error":    err.Error(),
+		})
+		http.Error(w, `{"error":"internal_error","error_description":"MFA reset failed; nothing was changed"}`, http.StatusInternalServerError)
+		return
+	}
 
 	h.audit.Record("admin.user_mfa_reset", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"username": user.Username,
@@ -230,8 +235,16 @@ func (h *AdminHandler) RevokeUserSessions(w http.ResponseWriter, r *http.Request
 	admin := GetUserFromContext(r.Context())
 	userID := r.PathValue("id")
 
-	_ = h.store.DeleteUserSessions(userID)
-	_ = h.store.RevokeUserTokens(userID)
+	// Revocation is the one place where reporting an unearned success is worse than
+	// reporting failure: the admin stops looking.
+	if err := h.store.RevokeUserAccess(userID); err != nil {
+		log.Printf("session revocation for user %s failed: %v", userID, err)
+		h.audit.Record("admin.sessions_revoked", admin.ID, admin.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
+			"error": err.Error(),
+		})
+		http.Error(w, `{"error":"internal_error","error_description":"Revocation failed; sessions may still be active"}`, http.StatusInternalServerError)
+		return
+	}
 	h.audit.Record("admin.sessions_revoked", admin.ID, admin.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 
 	w.Header().Set("Content-Type", "application/json")

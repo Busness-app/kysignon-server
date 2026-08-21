@@ -1,9 +1,10 @@
 package api
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
 	"github.com/Yoshiofthewire/kysignon-server/internal/backup"
@@ -11,12 +12,16 @@ import (
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 )
 
+// appVersion is reported in capsule manifests and status responses.
+const appVersion = "1.0.0"
+
 type BackupHandler struct {
 	cfg            *config.Config
 	store          *store.Store
 	audit          *audit.Logger
 	middleware     *MiddlewareManager
 	recoveryClient *backup.KyRecoveryClient
+	kits           *backup.KitStore
 }
 
 func NewBackupHandler(cfg *config.Config, s *store.Store, audit *audit.Logger, mm *MiddlewareManager) *BackupHandler {
@@ -26,7 +31,35 @@ func NewBackupHandler(cfg *config.Config, s *store.Store, audit *audit.Logger, m
 		audit:          audit,
 		middleware:     mm,
 		recoveryClient: backup.NewKyRecoveryClient(),
+		kits:           backup.NewKitStore(),
 	}
+}
+
+func (h *BackupHandler) actor(r *http.Request) (string, string) {
+	if admin := GetUserFromContext(r.Context()); admin != nil {
+		return admin.ID, admin.Username
+	}
+	return "", ""
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// buildCapsule collects a consistent snapshot and encapsulates it.
+func (h *BackupHandler) buildCapsule() (*backup.Capsule, []byte, error) {
+	payload, err := backup.BuildLocalPayload(h.cfg, h.store, appVersion)
+	if err != nil {
+		return nil, nil, err
+	}
+	files, err := backup.AsBackupFiles(payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	return backup.CreateCapsule("KySignOn", appVersion, files,
+		payload.Dependencies, payload.VerificationRecipe, payload.Threshold, payload.TotalShares)
 }
 
 // RunDrill executes an automated live disaster recovery restore drill inside a temporary isolated sandbox.
@@ -36,45 +69,14 @@ func (h *BackupHandler) RunDrill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	admin := GetUserFromContext(r.Context())
-	var adminID, adminUsername string
-	if admin != nil {
-		adminID = admin.ID
-		adminUsername = admin.Username
-	}
+	adminID, adminUsername := h.actor(r)
 
-	payload, err := backup.BuildLocalPayload(h.cfg, "1.0.0")
+	capsule, key, err := h.buildCapsule()
 	if err != nil {
 		h.audit.Record("admin.backup_drill_run", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
 			"error": err.Error(),
 		})
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": "Failed to collect backup files: " + err.Error()})
-		return
-	}
-
-	var files []backup.BackupFile
-	for _, f := range payload.Files {
-		data, err := base64.StdEncoding.DecodeString(f.DataBase64)
-		if err != nil {
-			continue
-		}
-		files = append(files, backup.BackupFile{
-			Path: f.Path,
-			Data: data,
-			Mode: f.Mode,
-		})
-	}
-
-	capsule, key, err := backup.CreateCapsule("KySignOn", "1.0.0", files, payload.Dependencies, payload.VerificationRecipe, 2, 3)
-	if err != nil {
-		h.audit.Record("admin.backup_drill_run", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
-			"error": err.Error(),
-		})
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": "Failed to create backup capsule: " + err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Failed to build backup capsule: " + err.Error()})
 		return
 	}
 
@@ -83,9 +85,7 @@ func (h *BackupHandler) RunDrill(w http.ResponseWriter, r *http.Request) {
 		h.audit.Record("admin.backup_drill_run", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
 			"error": err.Error(),
 		})
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": "Failed to execute restore drill: " + err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Failed to execute restore drill: " + err.Error()})
 		return
 	}
 
@@ -98,51 +98,118 @@ func (h *BackupHandler) RunDrill(w http.ResponseWriter, r *http.Request) {
 		"duration_ms": drillResult.DurationMS,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(drillResult)
+	writeJSON(w, http.StatusOK, drillResult)
 }
 
-// ExportRecoveryKit generates a self-contained offline emergency Disaster Recovery Kit HTML document.
-func (h *BackupHandler) ExportRecoveryKit(w http.ResponseWriter, r *http.Request) {
-	admin := GetUserFromContext(r.Context())
-	var adminID, adminUsername string
-	if admin != nil {
-		adminID = admin.ID
-		adminUsername = admin.Username
-	}
-
-	payload, err := backup.BuildLocalPayload(h.cfg, "1.0.0")
-	if err != nil {
-		http.Error(w, "Failed to collect backup payload: "+err.Error(), http.StatusInternalServerError)
+// CreateRecoveryKit builds the capsule and registers its artifacts for separate collection.
+//
+// It deliberately returns no secret material. The encrypted container and each custodian
+// shard are fetched by their own authenticated requests, so no single response or file ever
+// contains a reconstruction quorum.
+func (h *BackupHandler) CreateRecoveryKit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
+	adminID, adminUsername := h.actor(r)
 
-	var files []backup.BackupFile
-	for _, f := range payload.Files {
-		data, _ := base64.StdEncoding.DecodeString(f.DataBase64)
-		files = append(files, backup.BackupFile{
-			Path: f.Path,
-			Data: data,
-			Mode: f.Mode,
+	capsule, _, err := h.buildCapsule()
+	if err != nil {
+		h.audit.Record("admin.backup_recovery_kit_create", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
+			"error": err.Error(),
 		})
-	}
-
-	capsule, _, err := backup.CreateCapsule("KySignOn", "1.0.0", files, payload.Dependencies, payload.VerificationRecipe, 2, 3)
-	if err != nil {
-		http.Error(w, "Failed to create capsule: "+err.Error(), http.StatusInternalServerError)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Failed to build recovery kit: " + err.Error()})
 		return
 	}
 
-	html := backup.GenerateRecoveryKitHTML(capsule, "KySignOn", h.cfg.IssuerURL)
+	kit, err := h.kits.Create(capsule)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
 
-	h.audit.Record("admin.backup_recovery_kit_export", adminID, adminUsername, capsule.Manifest.CapsuleID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
-		"capsule_id": capsule.Manifest.CapsuleID,
+	h.audit.Record("admin.backup_recovery_kit_create", adminID, adminUsername, kit.Manifest.CapsuleID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+		"capsule_id": kit.Manifest.CapsuleID,
+		"kit_id":     kit.ID,
 	})
 
+	writeJSON(w, http.StatusOK, map[string]any{
+		"kit_id":       kit.ID,
+		"capsule_id":   kit.Manifest.CapsuleID,
+		"payload_hash": kit.Manifest.PayloadHash,
+		"threshold":    kit.Manifest.Threshold,
+		"total_shares": kit.Manifest.TotalShares,
+		"capsule_size": len(kit.Capsule),
+		"expires_at":   kit.ExpiresAt,
+		"shards":       kit.Shards(),
+	})
+}
+
+// DownloadCapsule serves the encrypted .kycap container. This is the artifact the previous
+// "self-contained kit" never included, which made every exported key shard useless.
+func (h *BackupHandler) DownloadCapsule(w http.ResponseWriter, r *http.Request) {
+	adminID, adminUsername := h.actor(r)
+	kit, err := h.kits.Get(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+
+	h.audit.Record("admin.backup_capsule_download", adminID, adminUsername, kit.Manifest.CapsuleID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+		"capsule_id": kit.Manifest.CapsuleID,
+	})
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, kit.Manifest.CapsuleID+".kycap"))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(kit.Capsule)
+}
+
+// DownloadShard serves exactly one custodian shard, once.
+func (h *BackupHandler) DownloadShard(w http.ResponseWriter, r *http.Request) {
+	adminID, adminUsername := h.actor(r)
+
+	index, err := strconv.Atoi(r.PathValue("index"))
+	if err != nil || index <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "shard index must be a positive integer"})
+		return
+	}
+	kitID := r.PathValue("id")
+	kit, err := h.kits.Get(kitID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	share, err := h.kits.TakeShard(kitID, index)
+	if err != nil {
+		h.audit.Record("admin.backup_shard_download", adminID, adminUsername, kit.Manifest.CapsuleID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
+			"shard_index": index,
+			"error":       err.Error(),
+		})
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+
+	h.audit.Record("admin.backup_shard_download", adminID, adminUsername, kit.Manifest.CapsuleID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+		"capsule_id":  kit.Manifest.CapsuleID,
+		"shard_index": index,
+	})
+
+	html := backup.GenerateCustodianCardHTML(kit.Manifest, share, "KySignOn", h.cfg.IssuerURL)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="kysignon-recovery-kit.html"`)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`,
+		fmt.Sprintf("kysignon-custodian-shard-%d.html", index)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(html))
+}
+
+// DiscardRecoveryKit zeroizes any shards the operator did not collect.
+func (h *BackupHandler) DiscardRecoveryKit(w http.ResponseWriter, r *http.Request) {
+	adminID, adminUsername := h.actor(r)
+	kitID := r.PathValue("id")
+	h.kits.Discard(kitID)
+	h.audit.Record("admin.backup_recovery_kit_discard", adminID, adminUsername, kitID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	writeJSON(w, http.StatusOK, map[string]any{"discarded": true})
 }
 
 type RemotePairRequest struct {
@@ -173,9 +240,14 @@ func (h *BackupHandler) PairRemote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.RecoveryURL == "" || req.PairingCode == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Both recovery_url and pairing_code are required"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Both recovery_url and pairing_code are required"})
+		return
+	}
+
+	// Validated here as well as in the client so a bad URL is rejected before it is stored
+	// or audited as a pairing attempt.
+	if err := backup.ValidateRecoveryURL(req.RecoveryURL); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -185,14 +257,21 @@ func (h *BackupHandler) PairRemote(w http.ResponseWriter, r *http.Request) {
 			"recovery_url": req.RecoveryURL,
 			"error":        err.Error(),
 		})
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
-	_ = h.store.SetSetting("kyrecovery_url", req.RecoveryURL)
-	_ = h.store.SetSetting("kyrecovery_token", token)
+	// A pairing that cannot be persisted is not a pairing. Reporting success here would
+	// leave the admin believing KyRecovery is configured when the next push has no token.
+	if err := h.store.SetSetting("kyrecovery_url", req.RecoveryURL); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to persist recovery URL: " + err.Error()})
+		return
+	}
+	if err := h.store.SetSetting("kyrecovery_token", token); err != nil {
+		_ = h.store.SetSetting("kyrecovery_url", "")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to persist recovery token: " + err.Error()})
+		return
+	}
 
 	h.audit.Record("admin.backup_remote_pair", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"recovery_url": req.RecoveryURL,
@@ -222,17 +301,13 @@ func (h *BackupHandler) PushBackup(w http.ResponseWriter, r *http.Request) {
 	recURL, _ := h.store.GetSetting("kyrecovery_url")
 	recToken, _ := h.store.GetSetting("kyrecovery_token")
 	if recURL == "" || recToken == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "KyRecovery is not paired"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "KyRecovery is not paired"})
 		return
 	}
 
-	payload, err := backup.BuildLocalPayload(h.cfg, "1.0.0")
+	payload, err := backup.BuildLocalPayload(h.cfg, h.store, appVersion)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to collect backup payload: " + err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to collect backup payload: " + err.Error()})
 		return
 	}
 
@@ -242,9 +317,7 @@ func (h *BackupHandler) PushBackup(w http.ResponseWriter, r *http.Request) {
 			"recovery_url": recURL,
 			"error":        err.Error(),
 		})
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -253,8 +326,7 @@ func (h *BackupHandler) PushBackup(w http.ResponseWriter, r *http.Request) {
 		"size_bytes": resp.SizeBytes,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // Status returns current disaster recovery readiness and pairing status.
@@ -262,11 +334,10 @@ func (h *BackupHandler) Status(w http.ResponseWriter, r *http.Request) {
 	recURL, _ := h.store.GetSetting("kyrecovery_url")
 	recToken, _ := h.store.GetSetting("kyrecovery_token")
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"paired":       recURL != "" && recToken != "",
 		"recovery_url": recURL,
 		"app_name":     "KySignOn",
-		"app_version":  "1.0.0",
+		"app_version":  appVersion,
 	})
 }

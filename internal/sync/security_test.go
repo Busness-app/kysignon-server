@@ -7,9 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	stdsync "sync"
 	"testing"
+	"time"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
+	"github.com/Yoshiofthewire/kysignon-server/internal/netguard"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
@@ -34,8 +37,8 @@ func setupSync(t *testing.T) (*Engine, *store.Store, *store.User, func()) {
 		t.Fatal(err)
 	}
 	// These tests point callbacks at httptest servers on loopback.
-	AllowPrivateCallbacks = true
-	t.Cleanup(func() { AllowPrivateCallbacks = false })
+	netguard.AllowPrivate = true
+	t.Cleanup(func() { netguard.AllowPrivate = false })
 
 	return NewEngine(db, key), db, admin, func() {
 		_ = db.Close()
@@ -47,7 +50,7 @@ func setupSync(t *testing.T) (*Engine, *store.Store, *store.User, func()) {
 func TestCallbackURLIsValidated(t *testing.T) {
 	e, _, _, cleanup := setupSync(t)
 	defer cleanup()
-	AllowPrivateCallbacks = false // the production default
+	netguard.AllowPrivate = false // the production default
 
 	rejected := []string{
 		"http://169.254.169.254/latest/meta-data/",
@@ -225,5 +228,57 @@ func TestHMACSecretIsNotStoredInPlaintext(t *testing.T) {
 	}
 	if got != token {
 		t.Error("the recovered signing secret does not match the one handed to the system")
+	}
+}
+
+// Two dispatchers must not both deliver the same event. Without a claim, overlapping ticks
+// or two instances during a rolling deploy each read the same pending user.created and
+// create duplicate downstream accounts.
+func TestConcurrentDispatchDeliversEachEventOnce(t *testing.T) {
+	e, _, _, cleanup := setupSync(t)
+	defer cleanup()
+
+	var mu stdsync.Mutex
+	seen := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Header.Get("X-KySignOn-Event-Id")]++
+		mu.Unlock()
+		// Hold the connection so the second dispatcher runs while this delivery is in
+		// flight, which is exactly the window an unclaimed read leaves open.
+		time.Sleep(50 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	ps, _, err := e.CreateSystem(&CreateSystemRequest{Name: "dup-check", SystemType: "custom", CallbackURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ResyncAllAccounts(ps.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg stdsync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = e.DispatchPendingEvents(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) == 0 {
+		t.Fatal("no events were delivered at all")
+	}
+	for id, count := range seen {
+		if id == "" {
+			t.Error("an event was delivered with no idempotency key; a recipient cannot deduplicate it")
+		}
+		if count > 1 {
+			t.Errorf("event %s was delivered %d times", id, count)
+		}
 	}
 }

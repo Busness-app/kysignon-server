@@ -49,6 +49,7 @@ func setupTestServer(t *testing.T) (*Server, *store.Store, *sync.Engine, *mfa.En
 		IssuerURL:     "http://localhost:5867",
 		DBPath:        dbPath,
 		DataDir:       tmpDir,
+		RSAKeyPath:    keyPath,
 		EncryptionKey: encKey,
 		SecretKey:     encKey,
 	}
@@ -429,7 +430,8 @@ func setupTestServerWith(t *testing.T, opts ...func(*config.Config)) (*Server, *
 		t.Fatalf("store.New failed: %v", err)
 	}
 
-	km, err := crypto.LoadOrCreateRSAKey(filepath.Join(tmpDir, "test_jwt.key"))
+	keyPath := filepath.Join(tmpDir, "test_jwt.key")
+	km, err := crypto.LoadOrCreateRSAKey(keyPath)
 	if err != nil {
 		t.Fatalf("crypto.LoadOrCreateRSAKey failed: %v", err)
 	}
@@ -440,6 +442,7 @@ func setupTestServerWith(t *testing.T, opts ...func(*config.Config)) (*Server, *
 		IssuerURL:     "http://localhost:5867",
 		DBPath:        dbPath,
 		DataDir:       tmpDir,
+		RSAKeyPath:    keyPath,
 		EncryptionKey: encKey,
 		SecretKey:     encKey,
 	}
@@ -630,5 +633,3 @@ func TestAdminCreatePairedSystemSCIM(t *testing.T) {
 		t.Fatalf("unexpected callback URL: %s", listResp.Systems[0].CallbackURL)
 	}
 }
-
-

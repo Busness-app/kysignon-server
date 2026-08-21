@@ -1,6 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { BackupDrillResult, BackupStatus } from '../types';
-import { apiRequest } from '../api';
+import { BackupDrillResult, BackupStatus, RecoveryKit } from '../types';
+import { apiJson, apiRequest, errorMessage } from '../api';
+import {
+  parseBackupStatus,
+  parseDrillResult,
+  parsePushResult,
+  parseRecoveryKit,
+} from '../parsers';
 import {
   Archive,
   Play,
@@ -33,10 +39,16 @@ export const AdminBackup: React.FC = () => {
   const [pushResult, setPushResult] = useState<string>('');
   const [pushError, setPushError] = useState<string>('');
 
+  const [kit, setKit] = useState<RecoveryKit | null>(null);
+  const [kitLoading, setKitLoading] = useState<boolean>(false);
+  const [kitError, setKitError] = useState<string>('');
+  const [collected, setCollected] = useState<number[]>([]);
+  const [capsuleTaken, setCapsuleTaken] = useState<boolean>(false);
+
   const fetchStatus = async () => {
     setLoadingStatus(true);
     try {
-      const data = await apiRequest('/api/admin/backup/status');
+      const data = await apiJson('/api/admin/backup/status', parseBackupStatus);
       setStatus(data);
       if (data.recovery_url) {
         setRemoteUrl(data.recovery_url);
@@ -56,20 +68,15 @@ export const AdminBackup: React.FC = () => {
     setRunningDrill(true);
     setDrillResult(null);
     try {
-      const data = await apiRequest('/api/admin/backup/drill', { method: 'POST' });
+      const data = await apiJson('/api/admin/backup/drill', parseDrillResult, { method: 'POST' });
       setDrillResult(data);
-    } catch (err: any) {
+    } catch (err) {
+      const message = errorMessage(err, 'Restore drill execution failed');
       setDrillResult({
         passed: false,
         duration_ms: 0,
-        error_message: err.message || 'Restore drill execution failed',
-        checks: [
-          {
-            name: 'Execution',
-            passed: false,
-            message: err.message || 'Connection or execution failure',
-          },
-        ],
+        error_message: message,
+        checks: [{ name: 'Execution', passed: false, message }],
       });
     } finally {
       setRunningDrill(false);
@@ -82,19 +89,19 @@ export const AdminBackup: React.FC = () => {
     setPairStatus('');
     setPairError('');
     try {
-      const data = await apiRequest('/api/admin/backup/pair-remote', {
+      await apiRequest('/api/admin/backup/pair-remote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          recovery_url: remoteUrl,
+          recovery_url: remoteUrl.trim(),
           pairing_code: pairCode,
         }),
       });
-      setPairStatus(`Successfully paired with KyRecovery instance (${data.recovery_url})`);
+      setPairStatus(`Successfully paired with KyRecovery instance (${remoteUrl.trim()})`);
       setPairCode('');
       await fetchStatus();
-    } catch (err: any) {
-      setPairError(err.message || 'Failed to pair with KyRecovery instance');
+    } catch (err) {
+      setPairError(errorMessage(err, 'Failed to pair with KyRecovery instance'));
     } finally {
       setPairingLoading(false);
     }
@@ -105,17 +112,55 @@ export const AdminBackup: React.FC = () => {
     setPushResult('');
     setPushError('');
     try {
-      const resp = await apiRequest('/api/admin/backup/push', { method: 'POST' });
-      setPushResult(`Backup capsule pushed! ID: ${resp.capsule_id} (${resp.size_bytes} bytes)`);
-    } catch (err: any) {
-      setPushError(err.message || 'Failed to push backup payload to remote instance');
+      const resp = await apiJson('/api/admin/backup/push', parsePushResult, { method: 'POST' });
+      setPushResult(`Backup capsule pushed! ID: ${resp.capsuleId} (${resp.sizeBytes} bytes)`);
+    } catch (err) {
+      setPushError(errorMessage(err, 'Failed to push backup payload to remote instance'));
     } finally {
       setPushLoading(false);
     }
   };
 
-  const handleDownloadRecoveryKit = () => {
-    window.open('/api/admin/backup/recovery-kit', '_blank');
+  // Building the kit hands back only metadata. The capsule and each custodian shard are
+  // fetched one at a time below, so no single download ever holds a reconstruction quorum.
+  const handleCreateRecoveryKit = async () => {
+    setKitLoading(true);
+    setKitError('');
+    setCollected([]);
+    setCapsuleTaken(false);
+    try {
+      setKit(await apiJson('/api/admin/backup/recovery-kit', parseRecoveryKit, { method: 'POST' }));
+    } catch (err) {
+      setKit(null);
+      setKitError(errorMessage(err, 'Failed to build the recovery kit'));
+    } finally {
+      setKitLoading(false);
+    }
+  };
+
+  const handleDownloadCapsule = () => {
+    if (!kit) return;
+    window.open(`/api/admin/backup/recovery-kit/${kit.kitId}/capsule`, '_blank');
+    setCapsuleTaken(true);
+  };
+
+  // Each shard is served exactly once, so the button disables itself after collection.
+  const handleDownloadShard = (index: number) => {
+    if (!kit || collected.includes(index)) return;
+    window.open(`/api/admin/backup/recovery-kit/${kit.kitId}/shard/${index}`, '_blank');
+    setCollected((prev) => [...prev, index]);
+  };
+
+  const handleDiscardKit = async () => {
+    if (!kit) return;
+    try {
+      await apiRequest(`/api/admin/backup/recovery-kit/${kit.kitId}`, { method: 'DELETE' });
+    } catch {
+      // The kit expires on its own; a failed discard is not worth blocking the operator.
+    }
+    setKit(null);
+    setCollected([]);
+    setCapsuleTaken(false);
   };
 
   return (
@@ -168,9 +213,9 @@ export const AdminBackup: React.FC = () => {
               {runningDrill ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
               <span>{runningDrill ? 'Running Drill...' : 'Run Live Drill'}</span>
             </button>
-            <button type="button" className="secondary-btn" onClick={handleDownloadRecoveryKit}>
-              <Download size={16} />
-              <span>Download Recovery Kit</span>
+            <button type="button" className="secondary-btn" onClick={handleCreateRecoveryKit} disabled={kitLoading}>
+              {kitLoading ? <Loader2 size={16} className="spin" /> : <Key size={16} />}
+              <span>{kitLoading ? 'Building Kit...' : 'Build Recovery Kit'}</span>
             </button>
           </div>
         </div>
@@ -252,24 +297,84 @@ export const AdminBackup: React.FC = () => {
 
           <div style={{ background: 'var(--bg)', border: '1px solid var(--line)', borderRadius: '8px', padding: '1rem', marginBottom: '1rem' }}>
             <div style={{ fontSize: '0.8125rem', color: 'var(--ink)', lineHeight: '1.5', marginBottom: '1rem' }}>
-              The Recovery Kit contains 3 separate custodian key shards generated via Shamir Secret Sharing over GF(256). Any 2 shards can reconstruct the capsule decryption key offline without KySignOn running.
+              A kit is two kinds of artifact: the encrypted <code>.kycap</code> container, and
+              one document per custodian holding a single Shamir shard. They are downloaded
+              separately and each shard is served only once, so no single file can ever
+              reconstruct the key on its own.
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.75rem', background: 'var(--panel)', borderRadius: '4px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
-                <span style={{ color: 'var(--ink-muted)' }}>Quorum Threshold:</span>
-                <span style={{ color: 'var(--accent)' }}>2 of 3 Custodians Required</span>
+            {kitError && (
+              <div style={{ background: 'var(--danger-soft)', border: '1px solid var(--danger)', color: 'var(--danger)', padding: '0.75rem', borderRadius: '6px', fontSize: '0.8125rem', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <AlertCircle size={16} />
+                <span>{kitError}</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.75rem', background: 'var(--panel)', borderRadius: '4px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
-                <span style={{ color: 'var(--ink-muted)' }}>Encryption Standard:</span>
-                <span style={{ color: 'var(--ink-strong)' }}>AES-256-GCM + SHA-256 Checksum</span>
-              </div>
-            </div>
+            )}
 
-            <button type="button" className="secondary-btn" onClick={handleDownloadRecoveryKit} style={{ width: '100%', justifyContent: 'center' }}>
-              <Download size={16} />
-              <span>Download Printable Kit (.html)</span>
-            </button>
+            {!kit ? (
+              <button type="button" className="secondary-btn" onClick={handleCreateRecoveryKit} disabled={kitLoading} style={{ width: '100%', justifyContent: 'center' }}>
+                {kitLoading ? <Loader2 size={16} className="spin" /> : <Key size={16} />}
+                <span>{kitLoading ? 'Building Kit...' : 'Build Recovery Kit'}</span>
+              </button>
+            ) : (
+              <>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.75rem', background: 'var(--panel)', borderRadius: '4px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
+                    <span style={{ color: 'var(--ink-muted)' }}>Capsule ID:</span>
+                    <span style={{ color: 'var(--accent)', wordBreak: 'break-all' }}>{kit.capsuleId}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.75rem', background: 'var(--panel)', borderRadius: '4px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
+                    <span style={{ color: 'var(--ink-muted)' }}>Quorum Threshold:</span>
+                    <span style={{ color: 'var(--accent)' }}>{kit.threshold} of {kit.totalShares} Custodians Required</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0.75rem', background: 'var(--panel)', borderRadius: '4px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
+                    <span style={{ color: 'var(--ink-muted)' }}>Encryption Standard:</span>
+                    <span style={{ color: 'var(--ink-strong)' }}>AES-256-GCM + SHA-256 Checksum</span>
+                  </div>
+                </div>
+
+                <button type="button" className="primary-btn" onClick={handleDownloadCapsule} style={{ width: '100%', justifyContent: 'center', marginBottom: '0.75rem' }}>
+                  <Download size={16} />
+                  <span>{capsuleTaken ? 'Download Capsule Again' : `Download Encrypted Capsule (${Math.round(kit.capsuleSize / 1024)} KB)`}</span>
+                </button>
+
+                <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)', marginBottom: '0.5rem' }}>
+                  Give each shard to a different custodian. Each is downloadable only once.
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                  {kit.shards.map((shard) => {
+                    const taken = collected.includes(shard.index) || shard.collected;
+                    return (
+                      <button
+                        key={shard.index}
+                        type="button"
+                        className="secondary-btn"
+                        onClick={() => handleDownloadShard(shard.index)}
+                        disabled={taken}
+                        style={{ width: '100%', justifyContent: 'space-between' }}
+                      >
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <Key size={14} />
+                          <span>Custodian Shard #{shard.index}</span>
+                        </span>
+                        {taken ? (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', color: 'var(--success)' }}>
+                            <CheckCircle2 size={14} />
+                            <span>Collected</span>
+                          </span>
+                        ) : (
+                          <Download size={14} />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button type="button" className="secondary-btn" onClick={handleDiscardKit} style={{ width: '100%', justifyContent: 'center' }}>
+                  <XCircle size={16} />
+                  <span>Discard Uncollected Shards</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>

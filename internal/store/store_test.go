@@ -214,4 +214,3 @@ func TestListAuditEventsPagination(t *testing.T) {
 		t.Fatalf("expected 0 events on page 4, got %d", len(events4))
 	}
 }
-

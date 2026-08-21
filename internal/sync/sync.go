@@ -9,23 +9,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
+	"github.com/Yoshiofthewire/kysignon-server/internal/netguard"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
-
-// AllowPrivateCallbacks permits callback URLs on loopback and private ranges. Deployments
-// where every service shares a container network need this; it is off by default because
-// an attacker-chosen callback is otherwise a request forgery primitive aimed at the
-// internal network.
-var AllowPrivateCallbacks = false
 
 type Engine struct {
 	store         *store.Store
@@ -37,82 +30,14 @@ func NewEngine(s *store.Store, encryptionKey []byte) *Engine {
 	return &Engine{
 		store:         s,
 		encryptionKey: encryptionKey,
-		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
-			CheckRedirect: func(r *http.Request, via []*http.Request) error {
-				// A redirect would let a validated callback bounce the payload to an
-				// internal address that failed validation.
-				return errors.New("redirects are not followed for sync delivery")
-			},
-			Transport: &http.Transport{
-				DialContext:         guardedDialer().DialContext,
-				TLSHandshakeTimeout: 5 * time.Second,
-			},
-		},
-	}
-}
-
-// guardedDialer rejects connection attempts to loopback and private networks unless
-// explicitly allowed.
-func guardedDialer() *net.Dialer {
-	return &net.Dialer{
-		Timeout: 5 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			if AllowPrivateCallbacks {
-				return nil
-			}
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return err
-			}
-			ip := net.ParseIP(host)
-			if ip == nil {
-				return fmt.Errorf("refusing to dial unparseable address %q", address)
-			}
-			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-				ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
-				return fmt.Errorf("refusing to deliver to the non-public address %s", ip)
-			}
-			return nil
-		},
+		httpClient:    netguard.Client(5 * time.Second),
 	}
 }
 
 // ValidateCallbackURL rejects anything the server should not be made to POST the user
 // directory at.
 func ValidateCallbackURL(raw string) error {
-	if strings.TrimSpace(raw) == "" {
-		return errors.New("callbackUrl is required")
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("callbackUrl is not a valid URL: %w", err)
-	}
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && AllowPrivateCallbacks) {
-		return errors.New("callbackUrl must use https")
-	}
-	host := parsed.Hostname()
-	if host == "" {
-		return errors.New("callbackUrl must include a host")
-	}
-	if parsed.User != nil {
-		return errors.New("callbackUrl must not embed credentials")
-	}
-	if AllowPrivateCallbacks {
-		return nil
-	}
-
-	// A literal internal address is rejected outright. Hostnames are not resolved here:
-	// resolution at registration proves nothing about resolution at delivery, so the real
-	// enforcement lives in the dialer, which sees the address actually being connected to.
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
-			return fmt.Errorf("callbackUrl points at the non-public address %s; "+
-				"set KYSIGNON_ALLOW_PRIVATE_CALLBACKS=true if that is intended", ip)
-		}
-	}
-	return nil
+	return netguard.ValidateURL(raw, "callbackUrl")
 }
 
 // SigningSecret recovers the webhook/SCIM bearer signing secret for a paired system.
@@ -163,6 +88,16 @@ func (e *Engine) UpdateUserAndQueueSyncEvents(user *store.User, revokeAccess boo
 
 // DeleteUserAndQueueSyncEvents removes a user and queues its deletion atomically, so a
 // downstream product cannot retain an account when the source deletion succeeds.
+// ResetUserMFAAndRevoke atomically strips every factor, revokes everything those factors
+// were protecting, and queues the downstream notification.
+func (e *Engine) ResetUserMFAAndRevoke(userID string, userPayload any) error {
+	events, err := e.newAccountSyncEvents(userID, "user.mfa_reset", userPayload)
+	if err != nil {
+		return err
+	}
+	return e.store.ResetUserMFA(userID, events)
+}
+
 func (e *Engine) DeleteUserAndQueueSyncEvents(userID string, userPayload any) error {
 	events, err := e.newAccountSyncEvents(userID, "user.deleted", userPayload)
 	if err != nil {
@@ -435,9 +370,18 @@ func retryDelay(attempts int) time.Duration {
 	return delay
 }
 
+// deliveryLease bounds how long one dispatcher owns a claimed event. It must exceed the
+// delivery timeout so a slow-but-live delivery is never double-sent, and stay short enough
+// that a crashed dispatcher's events are retried promptly.
+const deliveryLease = 60 * time.Second
+
 // DispatchPendingEvents delivers due events to the system each was queued for.
+//
+// Events are claimed before any network I/O. Reading without claiming let two dispatchers —
+// overlapping ticks, or two instances during a rolling deploy — both deliver the same
+// user.created and create duplicate downstream accounts.
 func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
-	events, err := e.store.GetDueSyncEvents(50)
+	events, err := e.store.ClaimDueSyncEvents(50, deliveryLease)
 	if err != nil || len(events) == 0 {
 		return err
 	}
@@ -451,6 +395,7 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 		if !ok {
 			sys, err = e.store.GetPairedSystemByID(ev.SystemID)
 			if err != nil {
+				_ = e.store.ReleaseSyncEventLease(ev.ID)
 				return err
 			}
 			systems[ev.SystemID] = sys
@@ -468,6 +413,7 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 			continue
 		}
 		if sys.Status == "disabled" {
+			_ = e.store.ReleaseSyncEventLease(ev.ID)
 			continue
 		}
 		secret, ok := secrets[ev.SystemID]
@@ -489,7 +435,7 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 			continue
 		}
 
-		if err := e.deliver(ctx, sys, secret, ev.EventType, ev.UserID, payloadBytes); err != nil {
+		if err := e.deliver(ctx, sys, secret, ev.ID, ev.EventType, ev.UserID, payloadBytes); err != nil {
 			attempts := ev.Attempts + 1
 			_ = e.store.UpdatePairedSystemStatus(sys.ID, "failing")
 			if attempts >= 5 {
@@ -542,7 +488,7 @@ func resolveSCIMURL(sys *store.PairedSystem, eventType, userID string) (method s
 	return http.MethodPost, trimmed, true
 }
 
-func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, eventType, userID string, payload []byte) error {
+func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, eventID, eventType, userID string, payload []byte) error {
 	method, targetURL, isBodyRequired := resolveSCIMURL(sys, eventType, userID)
 
 	var bodyReader *bytes.Reader
@@ -575,6 +521,10 @@ func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, e
 	req.Header.Set("X-KySignOn-Signature", signature)
 	req.Header.Set("X-KySignOn-Timestamp", timestamp)
 	req.Header.Set("X-KySignOn-Event-Type", eventType)
+	// A stable key per queued event. Retries reuse it, so a recipient that saw the request
+	// but whose response was lost can recognise the replay instead of acting twice.
+	req.Header.Set("X-KySignOn-Event-Id", eventID)
+	req.Header.Set("Idempotency-Key", eventID)
 
 	resp, err := e.httpClient.Do(req)
 	if err != nil {

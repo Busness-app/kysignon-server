@@ -8,23 +8,48 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Yoshiofthewire/kysignon-server/internal/netguard"
 )
 
 // KyRecoveryClient implements the Zero-Code Pairing & Push client contract for KyRecovery.
+//
+// The recovery URL is operator-supplied, which makes every request this client makes a
+// potential request forgery aimed at the internal network. It therefore runs on the same
+// guarded transport as SCIM delivery: https only, no redirects, and no dialing of
+// loopback/private/link-local addresses unless the deployment explicitly allows it.
 type KyRecoveryClient struct {
 	client *http.Client
 }
 
 func NewKyRecoveryClient() *KyRecoveryClient {
 	return &KyRecoveryClient{
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: netguard.Client(30 * time.Second),
 	}
+}
+
+// ValidateRecoveryURL rejects a KyRecovery base URL the server must not be made to talk to.
+func ValidateRecoveryURL(raw string) error {
+	if err := netguard.ValidateURL(raw, "recovery_url"); err != nil {
+		return err
+	}
+	// The client appends its own path, so a caller-supplied path is only ever a prefix.
+	// A query string on a base URL is meaningless and would be silently dropped.
+	parsed, _ := url.Parse(raw)
+	if parsed.RawQuery != "" {
+		return errors.New("recovery_url must not contain a query string")
+	}
+	return nil
 }
 
 // ClaimPairing exchanges a 6-digit ephemeral pairing PIN with KyRecovery server for a permanent API bearer token.
 func (c *KyRecoveryClient) ClaimPairing(ctx context.Context, serverURL, pairingCode, appName string) (string, error) {
+	if err := ValidateRecoveryURL(serverURL); err != nil {
+		return "", err
+	}
 	serverURL = strings.TrimRight(serverURL, "/")
 	endpoint := fmt.Sprintf("%s/api/pairing/claim", serverURL)
 
@@ -47,7 +72,9 @@ func (c *KyRecoveryClient) ClaimPairing(ctx context.Context, serverURL, pairingC
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		// The body is echoed to the admin and into the audit log, so it is capped: an
+		// operator-supplied endpoint should not get to choose how much it writes there.
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return "", fmt.Errorf("pairing claim rejected (%d): %s", resp.StatusCode, string(b))
 	}
 
@@ -94,6 +121,9 @@ type PushResponse struct {
 
 // PushBackup pushes a self-declaring backup payload to the remote KyRecovery instance.
 func (c *KyRecoveryClient) PushBackup(ctx context.Context, serverURL, apiToken string, payload PushBackupPayload) (*PushResponse, error) {
+	if err := ValidateRecoveryURL(serverURL); err != nil {
+		return nil, err
+	}
 	serverURL = strings.TrimRight(serverURL, "/")
 	endpoint := fmt.Sprintf("%s/api/backup/push", serverURL)
 
@@ -116,7 +146,7 @@ func (c *KyRecoveryClient) PushBackup(ctx context.Context, serverURL, apiToken s
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("backup push rejected (%d): %s", resp.StatusCode, string(b))
 	}
 

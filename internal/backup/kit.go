@@ -1,0 +1,208 @@
+package backup
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// CapsuleFileFormat identifies the on-disk .kycap container version.
+const CapsuleFileFormat = "kycap/1"
+
+// KitTTL bounds how long a kit's shards stay in memory waiting to be collected.
+const KitTTL = 30 * time.Minute
+
+var (
+	ErrKitNotFound   = errors.New("recovery kit not found or expired")
+	ErrShardNotFound = errors.New("shard not found or already collected")
+)
+
+// capsuleFile is the serialized .kycap container. It deliberately carries no shards: the
+// whole point of splitting the key is that the encrypted payload and the means to decrypt it
+// do not travel together.
+type capsuleFile struct {
+	Format     string   `json:"format"`
+	Manifest   Manifest `json:"manifest"`
+	Ciphertext string   `json:"ciphertext"`
+}
+
+// SerializeCapsule writes the encrypted container: manifest plus ciphertext, no shards.
+func SerializeCapsule(capsule *Capsule) ([]byte, error) {
+	if capsule == nil || len(capsule.Ciphertext) == 0 {
+		return nil, errors.New("cannot serialize a capsule with no ciphertext")
+	}
+	return json.MarshalIndent(capsuleFile{
+		Format:     CapsuleFileFormat,
+		Manifest:   capsule.Manifest,
+		Ciphertext: string(capsule.Ciphertext),
+	}, "", "  ")
+}
+
+// ParseCapsule reads a .kycap container back. The returned capsule has no shards; supply
+// them from the custodian cards.
+func ParseCapsule(raw []byte) (*Capsule, error) {
+	var cf capsuleFile
+	if err := json.Unmarshal(raw, &cf); err != nil {
+		return nil, fmt.Errorf("not a readable .kycap container: %w", err)
+	}
+	if cf.Format != CapsuleFileFormat {
+		return nil, fmt.Errorf("unsupported capsule format %q (expected %s)", cf.Format, CapsuleFileFormat)
+	}
+	if cf.Ciphertext == "" {
+		return nil, errors.New("capsule container has no ciphertext")
+	}
+	return &Capsule{Manifest: cf.Manifest, Ciphertext: []byte(cf.Ciphertext)}, nil
+}
+
+// ParseShardHex reads a custodian shard back into a Share.
+func ParseShardHex(index int, encoded string) (Share, error) {
+	data, err := hex.DecodeString(strings.TrimSpace(encoded))
+	if err != nil {
+		return Share{}, fmt.Errorf("shard %d is not valid hex: %w", index, err)
+	}
+	if len(data) == 0 {
+		return Share{}, fmt.Errorf("shard %d is empty", index)
+	}
+	return Share{Index: index, Data: data}, nil
+}
+
+// Kit is a pending recovery-kit export. The encrypted capsule and each custodian shard are
+// separate artifacts collected by separate authenticated requests, and each shard is
+// forgotten once collected. A single download can therefore never contain a reconstruction
+// quorum, which is the property the 2-of-3 custody model claims but a combined document
+// destroys.
+type Kit struct {
+	ID        string
+	Manifest  Manifest
+	Capsule   []byte
+	ExpiresAt time.Time
+
+	shards    map[int][]byte
+	collected map[int]bool
+}
+
+// ShardState reports whether a custodian shard is still awaiting collection.
+type ShardState struct {
+	Index     int  `json:"index"`
+	Collected bool `json:"collected"`
+}
+
+// Shards lists every shard slot and whether it has been collected.
+func (k *Kit) Shards() []ShardState {
+	out := make([]ShardState, 0, k.Manifest.TotalShares)
+	for i := 1; i <= k.Manifest.TotalShares; i++ {
+		out = append(out, ShardState{Index: i, Collected: k.collected[i]})
+	}
+	return out
+}
+
+// KitStore holds pending kits in memory only. Shards are never written to disk by the
+// server: a plaintext key share on the identity host is the one place it must not be.
+type KitStore struct {
+	mu   sync.Mutex
+	kits map[string]*Kit
+	ttl  time.Duration
+}
+
+func NewKitStore() *KitStore {
+	return &KitStore{kits: map[string]*Kit{}, ttl: KitTTL}
+}
+
+// Create registers a kit for collection and returns it.
+func (ks *KitStore) Create(capsule *Capsule) (*Kit, error) {
+	capsuleBytes, err := SerializeCapsule(capsule)
+	if err != nil {
+		return nil, err
+	}
+	if len(capsule.Shares) == 0 {
+		return nil, errors.New("capsule has no key shards to distribute")
+	}
+
+	kit := &Kit{
+		ID:        uuid.New().String(),
+		Manifest:  capsule.Manifest,
+		Capsule:   capsuleBytes,
+		ExpiresAt: time.Now().UTC().Add(ks.ttl),
+		shards:    map[int][]byte{},
+		collected: map[int]bool{},
+	}
+	for _, share := range capsule.Shares {
+		data := make([]byte, len(share.Data))
+		copy(data, share.Data)
+		kit.shards[share.Index] = data
+	}
+
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.sweepLocked()
+	ks.kits[kit.ID] = kit
+	return kit, nil
+}
+
+// Get returns a live kit.
+func (ks *KitStore) Get(id string) (*Kit, error) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.sweepLocked()
+	kit, ok := ks.kits[id]
+	if !ok {
+		return nil, ErrKitNotFound
+	}
+	return kit, nil
+}
+
+// TakeShard hands out one shard exactly once and forgets it. Handing the same shard out
+// repeatedly would put it in as many places as the caller likes, which is the leak the
+// separation is meant to prevent.
+func (ks *KitStore) TakeShard(id string, index int) (Share, error) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.sweepLocked()
+	kit, ok := ks.kits[id]
+	if !ok {
+		return Share{}, ErrKitNotFound
+	}
+	data, ok := kit.shards[index]
+	if !ok {
+		return Share{}, ErrShardNotFound
+	}
+	delete(kit.shards, index)
+	kit.collected[index] = true
+	return Share{Index: index, Data: data}, nil
+}
+
+// Discard drops a kit and zeroizes any uncollected shards.
+func (ks *KitStore) Discard(id string) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.discardLocked(id)
+}
+
+func (ks *KitStore) discardLocked(id string) {
+	kit, ok := ks.kits[id]
+	if !ok {
+		return
+	}
+	for i, data := range kit.shards {
+		for j := range data {
+			data[j] = 0
+		}
+		delete(kit.shards, i)
+	}
+	delete(ks.kits, id)
+}
+
+func (ks *KitStore) sweepLocked() {
+	now := time.Now().UTC()
+	for id, kit := range ks.kits {
+		if now.After(kit.ExpiresAt) {
+			ks.discardLocked(id)
+		}
+	}
+}

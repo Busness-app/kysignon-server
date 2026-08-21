@@ -76,10 +76,9 @@ func RunRestoreDrill(ctx context.Context, capsule *Capsule, key []byte) (*DrillR
 	}
 
 	// 2. Verify Required Files
-	if reqFiles, ok := recipe["required_files"].([]interface{}); ok {
+	if reqFiles := stringList(recipe["required_files"]); len(reqFiles) > 0 {
 		allFound := true
-		for _, rf := range reqFiles {
-			pathStr := fmt.Sprintf("%v", rf)
+		for _, pathStr := range reqFiles {
 			fullPath := filepath.Join(scratchDir, pathStr)
 			fi, err := os.Stat(fullPath)
 			if err != nil || fi.Size() == 0 {
@@ -103,9 +102,17 @@ func RunRestoreDrill(ctx context.Context, capsule *Capsule, key []byte) (*DrillR
 
 	// 3. SQLite Integrity Check
 	if checkDB, ok := recipe["check_sqlite_integrity"].(bool); ok && checkDB {
-		if sqlitePaths, ok := recipe["sqlite_paths"].([]interface{}); ok {
-			for _, sp := range sqlitePaths {
-				dbRelPath := fmt.Sprintf("%v", sp)
+		sqlitePaths := stringList(recipe["sqlite_paths"])
+		if len(sqlitePaths) == 0 {
+			result.Passed = false
+			result.Checks = append(result.Checks, CheckItem{
+				Name:    "SQLite Verification",
+				Passed:  false,
+				Message: "Recipe requires a SQLite integrity check but names no database",
+			})
+		}
+		{
+			for _, dbRelPath := range sqlitePaths {
 				fullDBPath := filepath.Join(scratchDir, dbRelPath)
 
 				db, err := sql.Open("sqlite", fullDBPath)
@@ -130,7 +137,6 @@ func RunRestoreDrill(ctx context.Context, capsule *Capsule, key []byte) (*DrillR
 						Message: fmt.Sprintf("Integrity failure (%s): %v", integrityResult, err),
 					})
 				} else {
-					// Count tables to ensure schema is present
 					var tableCount int
 					_ = db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table';").Scan(&tableCount)
 
@@ -139,6 +145,10 @@ func RunRestoreDrill(ctx context.Context, capsule *Capsule, key []byte) (*DrillR
 						Passed:  true,
 						Message: fmt.Sprintf("SQLite PRAGMA integrity_check passed (found %d tables)", tableCount),
 					})
+
+					// integrity_check only proves the file is not corrupt. A restore is
+					// only useful if the identity records are actually in it.
+					checkApplicationRecords(ctx, db, dbRelPath, recipe, result)
 				}
 				_ = db.Close()
 			}
@@ -146,10 +156,9 @@ func RunRestoreDrill(ctx context.Context, capsule *Capsule, key []byte) (*DrillR
 	}
 
 	// 4. Validate Expected Environment Dependencies
-	if expEnv, ok := recipe["expected_env"].([]interface{}); ok {
+	if expEnv := stringList(recipe["expected_env"]); len(expEnv) > 0 {
 		var setEnvs []string
-		for _, e := range expEnv {
-			envName := fmt.Sprintf("%v", e)
+		for _, envName := range expEnv {
 			if os.Getenv(envName) != "" {
 				setEnvs = append(setEnvs, envName)
 			}
@@ -164,4 +173,64 @@ func RunRestoreDrill(ctx context.Context, capsule *Capsule, key []byte) (*DrillR
 	// 5. Verification Recipe Completed
 	result.DurationMS = time.Since(start).Milliseconds()
 	return result, nil
+}
+
+// checkApplicationRecords asserts the restored database contains the tables and rows the
+// service cannot start without. This is the difference between "the file parses" and "the
+// identity directory survived".
+func checkApplicationRecords(ctx context.Context, db *sql.DB, dbRelPath string, recipe map[string]interface{}, result *DrillResult) {
+	for _, table := range stringList(recipe["required_tables"]) {
+		{
+			var rows int
+			err := db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&rows)
+			if err != nil || rows != 1 {
+				result.Passed = false
+				result.Checks = append(result.Checks, CheckItem{
+					Name:    fmt.Sprintf("Table Present: %s", table),
+					Passed:  false,
+					Message: fmt.Sprintf("Table %q is missing from the restored database", table),
+				})
+			}
+		}
+	}
+
+	if requireAdmin, ok := recipe["require_any_admin"].(bool); ok && requireAdmin {
+		var admins int
+		err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active'`).Scan(&admins)
+		passed := err == nil && admins > 0
+		if !passed {
+			result.Passed = false
+		}
+		msg := fmt.Sprintf("%d active administrator(s) present in the restored directory", admins)
+		if err != nil {
+			msg = fmt.Sprintf("Could not read the restored user directory: %v", err)
+		} else if admins == 0 {
+			msg = "The restored directory has no active administrator; nobody could log in after a restore"
+		}
+		result.Checks = append(result.Checks, CheckItem{
+			Name:    fmt.Sprintf("Administrator Directory: %s", dbRelPath),
+			Passed:  passed,
+			Message: msg,
+		})
+	}
+}
+
+// stringList reads a recipe list that may be []string (an in-process capsule) or
+// []interface{} (the same recipe after a JSON round trip). Asserting only one of the two
+// silently skipped every check whose list came from the other path.
+func stringList(v interface{}) []string {
+	switch typed := v.(type) {
+	case []string:
+		return typed
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, fmt.Sprintf("%v", item))
+		}
+		return out
+	default:
+		return nil
+	}
 }

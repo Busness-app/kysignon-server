@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
@@ -19,6 +18,7 @@ import (
 	"github.com/Yoshiofthewire/kysignon-server/internal/config"
 	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/mfa"
+	"github.com/Yoshiofthewire/kysignon-server/internal/netguard"
 	"github.com/Yoshiofthewire/kysignon-server/internal/oauth"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/Yoshiofthewire/kysignon-server/internal/sync"
@@ -29,6 +29,8 @@ import (
 // auditRetention bounds how long audit events are kept. On SQLite this is the table that
 // grows fastest and never stops.
 const auditRetention = 180 * 24 * time.Hour
+
+const appVersion = "1.0.0"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -46,7 +48,7 @@ func main() {
 			return
 		case "export-recovery-kit":
 			kitCmd := flag.NewFlagSet("export-recovery-kit", flag.ExitOnError)
-			outPath := kitCmd.String("out", "kysignon-recovery-kit.html", "Output file path (or - for stdout)")
+			outPath := kitCmd.String("out", "kysignon-recovery-kit", "Directory to write the capsule and custodian shard files into")
 			_ = kitCmd.Parse(os.Args[2:])
 			runExportRecoveryKit(*outPath)
 			return
@@ -78,7 +80,7 @@ func main() {
 
 	// Paired systems on a shared container network need private callbacks; on a public
 	// deployment allowing them turns an attacker-chosen callback into an SSRF primitive.
-	sync.AllowPrivateCallbacks = cfg.AllowPrivateCallbacks
+	netguard.AllowPrivate = cfg.AllowPrivateCallbacks
 	if cfg.AllowPrivateCallbacks {
 		log.Println("WARNING: KYSIGNON_ALLOW_PRIVATE_CALLBACKS is on; paired systems may register internal callback URLs")
 	}
@@ -295,42 +297,53 @@ func clearFirstRunPasswordFile(dbStore *store.Store, dataDir string) error {
 	return nil
 }
 
+// openStoreForBackup opens the live database so backups can take a consistent snapshot
+// through it rather than copying the file out from under WAL.
+//
+// It also materializes the RSA signing key the same way the server does. The key is created
+// lazily on first server start, so backing up a freshly bootstrapped install would otherwise
+// fail on a missing file — and a capsule without the signing key cannot restore a working
+// service, which is why its absence is fatal rather than skipped.
+func openStoreForBackup(cfg *config.Config) *store.Store {
+	if _, err := crypto.LoadOrCreateRSAKey(cfg.RSAKeyPath); err != nil {
+		log.Fatalf("Failed to load the RSA signing key at %s: %v", cfg.RSAKeyPath, err)
+	}
+	dbStore, err := store.New(cfg.DBPath)
+	if err != nil {
+		log.Fatalf("Failed to open the database at %s: %v", cfg.DBPath, err)
+	}
+	return dbStore
+}
+
 func runBackupDrill() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
+	dbStore := openStoreForBackup(cfg)
+	defer dbStore.Close()
 
-	payload, err := backup.BuildLocalPayload(cfg, "1.0.0")
+	payload, err := backup.BuildLocalPayload(cfg, dbStore, appVersion)
 	if err != nil {
 		log.Fatalf("Failed to build local backup payload: %v", err)
 	}
-
-	var files []backup.BackupFile
-	for _, f := range payload.Files {
-		data, err := base64.StdEncoding.DecodeString(f.DataBase64)
-		if err != nil {
-			continue
-		}
-		files = append(files, backup.BackupFile{
-			Path: f.Path,
-			Data: data,
-			Mode: f.Mode,
-		})
+	files, err := backup.AsBackupFiles(payload)
+	if err != nil {
+		log.Fatalf("Failed to decode backup payload: %v", err)
 	}
 
-	capsule, key, err := backup.CreateCapsule("KySignOn", "1.0.0", files, payload.Dependencies, payload.VerificationRecipe, 2, 3)
+	capsule, key, err := backup.CreateCapsule("KySignOn", appVersion, files,
+		payload.Dependencies, payload.VerificationRecipe, payload.Threshold, payload.TotalShares)
 	if err != nil {
 		log.Fatalf("Failed to create capsule: %v", err)
 	}
 
-	ctx := context.Background()
-	result, err := backup.RunRestoreDrill(ctx, capsule, key)
+	result, err := backup.RunRestoreDrill(context.Background(), capsule, key)
 	if err != nil {
 		log.Fatalf("Drill execution failed: %v", err)
 	}
 
-	fmt.Printf("\n=== Feature 0: KyBackup Restore Drill Summary ===\n")
+	fmt.Printf("\n=== KyBackup Restore Drill Summary ===\n")
 	statusStr := "PASSED (OK)"
 	if !result.Passed {
 		statusStr = "FAILED"
@@ -338,9 +351,9 @@ func runBackupDrill() {
 	fmt.Printf("Status:   %s\n", statusStr)
 	fmt.Printf("Duration: %d ms\n", result.DurationMS)
 	for _, check := range result.Checks {
-		status := "✓"
+		status := "\u2713"
 		if !check.Passed {
-			status = "✗"
+			status = "\u2717"
 		}
 		fmt.Printf("  [%s] %s: %s\n", status, check.Name, check.Message)
 	}
@@ -350,42 +363,62 @@ func runBackupDrill() {
 	}
 }
 
-func runExportRecoveryKit(outPath string) {
+// runExportRecoveryKit writes the encrypted capsule and one file per custodian into outDir.
+// The shards are deliberately separate files: a single document holding a quorum reduces the
+// advertised 2-of-3 custody model to 1-of-1.
+func runExportRecoveryKit(outDir string) {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
+	if outDir == "" || outDir == "-" {
+		log.Fatalf("Error: -out must name a directory to write the kit into")
+	}
+	dbStore := openStoreForBackup(cfg)
+	defer dbStore.Close()
 
-	payload, err := backup.BuildLocalPayload(cfg, "1.0.0")
+	payload, err := backup.BuildLocalPayload(cfg, dbStore, appVersion)
 	if err != nil {
 		log.Fatalf("Failed to build payload: %v", err)
 	}
-
-	var files []backup.BackupFile
-	for _, f := range payload.Files {
-		data, _ := base64.StdEncoding.DecodeString(f.DataBase64)
-		files = append(files, backup.BackupFile{
-			Path: f.Path,
-			Data: data,
-			Mode: f.Mode,
-		})
+	files, err := backup.AsBackupFiles(payload)
+	if err != nil {
+		log.Fatalf("Failed to decode backup payload: %v", err)
 	}
 
-	capsule, _, err := backup.CreateCapsule("KySignOn", "1.0.0", files, payload.Dependencies, payload.VerificationRecipe, 2, 3)
+	capsule, _, err := backup.CreateCapsule("KySignOn", appVersion, files,
+		payload.Dependencies, payload.VerificationRecipe, payload.Threshold, payload.TotalShares)
 	if err != nil {
 		log.Fatalf("Failed to create capsule: %v", err)
 	}
-
-	html := backup.GenerateRecoveryKitHTML(capsule, "KySignOn", cfg.IssuerURL)
-	if outPath == "" || outPath == "-" {
-		fmt.Print(html)
-		return
+	capsuleBytes, err := backup.SerializeCapsule(capsule)
+	if err != nil {
+		log.Fatalf("Failed to serialize capsule: %v", err)
 	}
 
-	if err := os.WriteFile(outPath, []byte(html), 0600); err != nil {
-		log.Fatalf("Failed to write recovery kit to %s: %v", outPath, err)
+	if err := os.MkdirAll(outDir, 0700); err != nil {
+		log.Fatalf("Failed to create %s: %v", outDir, err)
 	}
-	fmt.Printf("Disaster Recovery Kit exported to %s\n", outPath)
+
+	capsulePath := filepath.Join(outDir, capsule.Manifest.CapsuleID+".kycap")
+	if err := os.WriteFile(capsulePath, capsuleBytes, 0600); err != nil {
+		log.Fatalf("Failed to write capsule: %v", err)
+	}
+	fmt.Printf("Encrypted capsule: %s (%d bytes)\n", capsulePath, len(capsuleBytes))
+
+	for _, share := range capsule.Shares {
+		card := backup.GenerateCustodianCardHTML(capsule.Manifest, share, "KySignOn", cfg.IssuerURL)
+		cardPath := filepath.Join(outDir, fmt.Sprintf("custodian-shard-%d.html", share.Index))
+		if err := os.WriteFile(cardPath, []byte(card), 0600); err != nil {
+			log.Fatalf("Failed to write custodian card %d: %v", share.Index, err)
+		}
+		fmt.Printf("Custodian shard %d:  %s\n", share.Index, cardPath)
+	}
+
+	fmt.Printf("\nDistribute each custodian file to a different custodian, then delete it from\n"+
+		"this host. Any %d of %d shards plus the capsule restores the service:\n"+
+		"  kyrestore -capsule %s -shard 1:<hex> -shard 2:<hex> -out ./restored\n",
+		capsule.Manifest.Threshold, capsule.Manifest.TotalShares, capsulePath)
 }
 
 func runPushBackup(recURL, apiToken string) {
@@ -393,26 +426,20 @@ func runPushBackup(recURL, apiToken string) {
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
+	dbStore := openStoreForBackup(cfg)
+	defer dbStore.Close()
 
-	if recURL == "" || apiToken == "" {
-		dbStore, err := store.New(cfg.DBPath)
-		if err != nil {
-			log.Fatalf("Failed to open store: %v", err)
-		}
-		if recURL == "" {
-			recURL, _ = dbStore.GetSetting("kyrecovery_url")
-		}
-		if apiToken == "" {
-			apiToken, _ = dbStore.GetSetting("kyrecovery_token")
-		}
-		dbStore.Close()
+	if recURL == "" {
+		recURL, _ = dbStore.GetSetting("kyrecovery_url")
 	}
-
+	if apiToken == "" {
+		apiToken, _ = dbStore.GetSetting("kyrecovery_token")
+	}
 	if recURL == "" || apiToken == "" {
 		log.Fatalf("Error: KyRecovery URL and API token are required (pass flags or pair via UI)")
 	}
 
-	payload, err := backup.BuildLocalPayload(cfg, "1.0.0")
+	payload, err := backup.BuildLocalPayload(cfg, dbStore, appVersion)
 	if err != nil {
 		log.Fatalf("Failed to build payload: %v", err)
 	}
@@ -425,4 +452,3 @@ func runPushBackup(recURL, apiToken string) {
 
 	fmt.Printf("Backup push successful! Capsule ID: %s (%d bytes)\n", resp.CapsuleID, resp.SizeBytes)
 }
-

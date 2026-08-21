@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { User, Application } from '../types';
-import { apiRequest } from '../api';
+import { apiJson } from '../api';
+import { parseApplications } from '../parsers';
 import { Globe, Mail, Lock, Bookmark, FileText, ExternalLink, ShieldCheck, Smartphone, ArrowUpRight } from 'lucide-react';
 
 interface UserDashboardProps {
@@ -12,11 +13,9 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
   const [apps, setApps] = useState<Application[]>([]);
 
   useEffect(() => {
-    apiRequest('/api/user/applications')
-      .then((data) => {
-        setApps(data.applications || []);
-      })
-      .catch(() => {});
+    apiJson('/api/user/applications', parseApplications)
+      .then(setApps)
+      .catch(() => setApps([]));
   }, []);
 
   const getDomainUrl = (subdomain: string, localPort: number, fallback: string) => {

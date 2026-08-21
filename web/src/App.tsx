@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { User } from './types';
-import { apiRequest } from './api';
+import { apiJson, apiRequest } from './api';
+import { parseMe } from './parsers';
 import { Navbar } from './components/Navbar';
 import { LoginView } from './components/LoginView';
 import { UserDashboard } from './components/UserDashboard';
@@ -19,8 +20,7 @@ export const App: React.FC = () => {
 
   const checkSession = async () => {
     try {
-      const data = await apiRequest('/api/auth/me');
-      setCurrentUser(data);
+      setCurrentUser(await apiJson('/api/auth/me', parseMe));
     } catch {
       setCurrentUser(null);
     } finally {
@@ -43,7 +43,8 @@ export const App: React.FC = () => {
     try {
       await apiRequest('/api/auth/logout', { method: 'POST' });
     } catch {
-      // ignore
+      // The local session is cleared regardless; a failed logout call must not strand the
+      // user on an authenticated-looking screen.
     }
     setCurrentUser(null);
     setActiveTab('dashboard');

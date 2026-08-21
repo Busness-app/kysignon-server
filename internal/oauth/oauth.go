@@ -245,17 +245,9 @@ func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redi
 		return nil, errors.New("invalid or expired authorization code")
 	}
 
-	// Spend the code before anything else can act on it. A compare-and-swap is what makes
-	// this single-use; a read followed by an unconditional write is a race that hands the
-	// same code to every concurrent caller.
-	spent, err := e.store.ConsumeAuthorizationCode(authCode.ID)
-	if err != nil {
-		return nil, err
-	}
-	if !spent {
-		return nil, errors.New("authorization code has already been redeemed")
-	}
-
+	// Every binding is checked before the code is spent. Consuming first would let anyone
+	// holding the code burn it with a junk verifier, denying the legitimate client its
+	// login; single-use is preserved by the compare-and-swap below, not by ordering.
 	if subtle.ConstantTimeCompare([]byte(authCode.ClientID), []byte(clientID)) != 1 {
 		return nil, errors.New("client mismatch")
 	}
@@ -281,6 +273,17 @@ func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redi
 		if !ValidatePKCE(codeVerifier, authCode.CodeChallenge, authCode.CodeChallengeMethod) {
 			return nil, errors.New("invalid PKCE code verifier")
 		}
+	}
+
+	// Now that the caller has proven entitlement, spend the code. The compare-and-swap is
+	// what makes this single-use; a read followed by an unconditional write is a race that
+	// hands the same code to every concurrent caller.
+	spent, err := e.store.ConsumeAuthorizationCode(authCode.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !spent {
+		return nil, errors.New("authorization code has already been redeemed")
 	}
 
 	user, err := e.store.GetUserByID(authCode.UserID)

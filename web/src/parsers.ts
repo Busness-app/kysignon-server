@@ -287,8 +287,14 @@ export function parseRecoveryKit(value: unknown): RecoveryKit {
     expiresAt: optStr(o, 'expires_at') ?? '',
     shards: list(o.shards, (item) => {
       const s = obj(item, 'a shard entry');
-      return { index: num(s, 'index'), collected: bool(s, 'collected') };
+      return {
+        index: num(s, 'index'),
+        collected: bool(s, 'collected'),
+        heldBySelf: bool(s, 'heldBySelf'),
+      };
     }),
+    maxPerCustodian: num(o, 'max_per_custodian'),
+    soleCustodian: bool(o, 'sole_custodian'),
   };
 }
 

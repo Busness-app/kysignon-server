@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,7 +44,7 @@ func NewServer(
 	auditLogger *audit.Logger,
 	staticFS fs.FS,
 ) *Server {
-	mm := NewMiddlewareManager(s, cfg.TrustedProxyCIDRs, cfg.SecretKey)
+	mm := NewMiddlewareManager(s, cfg.TrustedProxyCIDRs, cfg.ForwardedHeader, cfg.SecretKey)
 	if cfg.SessionIdleTTL > 0 {
 		mm.sessionIdleTTL = cfg.SessionIdleTTL
 	}
@@ -102,11 +104,17 @@ func (s *Server) routes() *http.ServeMux {
 	oauthH := NewOAuthHandler(s.store, s.oauthEngine, s.audit, s.middleware)
 	backupH := NewBackupHandler(s.cfg, s.store, s.audit, s.middleware)
 
-	// Health Check
+	// Liveness: this process is running and can serve a request. Nothing more is claimed,
+	// which is the only honest thing a liveness probe can say.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "alive"})
 	})
+
+	// Readiness: this instance can actually authenticate someone. A load balancer that keeps
+	// sending logins to a server whose database has gone read-only, because the server said
+	// "healthy" from a goroutine that only encodes JSON, is the failure this separates out.
+	mux.HandleFunc("GET /readyz", s.readiness)
 
 	// OIDC Discovery & JWKS
 	mux.HandleFunc("GET /.well-known/openid-configuration", oauthH.OIDCConfiguration)
@@ -152,22 +160,33 @@ func (s *Server) routes() *http.ServeMux {
 		return authM(s.middleware.RequireAdmin(h))
 	}
 
+	// Destructive and secret-bearing admin routes additionally spend a step-up grant.
+	//
+	// "Is this session an admin" is the wrong question for creating an administrator,
+	// resetting someone else's MFA, rotating a client secret, or exporting recovery material:
+	// a stolen cookie answers it. The grant costs the password and an existing factor, which
+	// a session thief does not have, and it is single-use, so one re-authentication buys
+	// exactly one change.
+	adminStepUpM := func(h http.Handler) http.Handler {
+		return adminM(s.requireStepUp(h))
+	}
+
 	mux.Handle("GET /api/admin/users", adminM(http.HandlerFunc(adminH.ListUsers)))
-	mux.Handle("POST /api/admin/users", adminM(http.HandlerFunc(adminH.CreateUser)))
-	mux.Handle("PUT /api/admin/users/{id}", adminM(http.HandlerFunc(adminH.UpdateUser)))
-	mux.Handle("POST /api/admin/users/{id}/reset-mfa", adminM(http.HandlerFunc(adminH.ResetUserMFA)))
+	mux.Handle("POST /api/admin/users", adminStepUpM(http.HandlerFunc(adminH.CreateUser)))
+	mux.Handle("PUT /api/admin/users/{id}", adminStepUpM(http.HandlerFunc(adminH.UpdateUser)))
+	mux.Handle("POST /api/admin/users/{id}/reset-mfa", adminStepUpM(http.HandlerFunc(adminH.ResetUserMFA)))
 	mux.Handle("POST /api/admin/users/{id}/revoke-sessions", adminM(http.HandlerFunc(adminH.RevokeUserSessions)))
-	mux.Handle("DELETE /api/admin/users/{id}", adminM(http.HandlerFunc(adminH.DeleteUser)))
+	mux.Handle("DELETE /api/admin/users/{id}", adminStepUpM(http.HandlerFunc(adminH.DeleteUser)))
 
 	mux.Handle("GET /api/admin/systems", adminM(http.HandlerFunc(adminH.ListPairedSystems)))
-	mux.Handle("POST /api/admin/systems", adminM(http.HandlerFunc(adminH.CreatePairedSystem)))
+	mux.Handle("POST /api/admin/systems", adminStepUpM(http.HandlerFunc(adminH.CreatePairedSystem)))
 	mux.Handle("POST /api/admin/systems/{id}/resync", adminM(http.HandlerFunc(adminH.ResyncSystem)))
-	mux.Handle("DELETE /api/admin/systems/{id}", adminM(http.HandlerFunc(adminH.DeletePairedSystem)))
+	mux.Handle("DELETE /api/admin/systems/{id}", adminStepUpM(http.HandlerFunc(adminH.DeletePairedSystem)))
 
 	mux.Handle("GET /api/admin/clients", adminM(http.HandlerFunc(adminH.ListOAuthClients)))
-	mux.Handle("POST /api/admin/clients", adminM(http.HandlerFunc(adminH.CreateOAuthClient)))
-	mux.Handle("PUT /api/admin/clients/{id}", adminM(http.HandlerFunc(adminH.UpdateOAuthClient)))
-	mux.Handle("DELETE /api/admin/clients/{id}", adminM(http.HandlerFunc(adminH.DeleteOAuthClient)))
+	mux.Handle("POST /api/admin/clients", adminStepUpM(http.HandlerFunc(adminH.CreateOAuthClient)))
+	mux.Handle("PUT /api/admin/clients/{id}", adminStepUpM(http.HandlerFunc(adminH.UpdateOAuthClient)))
+	mux.Handle("DELETE /api/admin/clients/{id}", adminStepUpM(http.HandlerFunc(adminH.DeleteOAuthClient)))
 
 	mux.Handle("GET /api/admin/applications", adminM(http.HandlerFunc(adminH.ListApplications)))
 	mux.Handle("POST /api/admin/applications", adminM(http.HandlerFunc(adminH.CreateApplication)))
@@ -176,13 +195,14 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("GET /api/admin/audit-events", adminM(http.HandlerFunc(adminH.ListAuditEvents)))
 	mux.Handle("POST /api/admin/backup/drill", adminM(http.HandlerFunc(backupH.RunDrill)))
 	// The kit is collected as separate artifacts: the encrypted capsule and one shard per
-	// custodian, each its own authenticated request, so no single download holds a quorum.
-	mux.Handle("POST /api/admin/backup/recovery-kit", adminM(http.HandlerFunc(backupH.CreateRecoveryKit)))
-	mux.Handle("GET /api/admin/backup/recovery-kit/{id}/capsule", adminM(http.HandlerFunc(backupH.DownloadCapsule)))
-	mux.Handle("GET /api/admin/backup/recovery-kit/{id}/shard/{index}", adminM(http.HandlerFunc(backupH.DownloadShard)))
+	// custodian, each its own step-up-authorized request, and no principal may collect more
+	// than threshold-1 shards, so no single administrator can assemble a quorum.
+	mux.Handle("POST /api/admin/backup/recovery-kit", adminStepUpM(http.HandlerFunc(backupH.CreateRecoveryKit)))
+	mux.Handle("GET /api/admin/backup/recovery-kit/{id}/capsule", adminStepUpM(http.HandlerFunc(backupH.DownloadCapsule)))
+	mux.Handle("GET /api/admin/backup/recovery-kit/{id}/shard/{index}", adminStepUpM(http.HandlerFunc(backupH.DownloadShard)))
 	mux.Handle("DELETE /api/admin/backup/recovery-kit/{id}", adminM(http.HandlerFunc(backupH.DiscardRecoveryKit)))
-	mux.Handle("POST /api/admin/backup/pair-remote", adminM(http.HandlerFunc(backupH.PairRemote)))
-	mux.Handle("POST /api/admin/backup/push", adminM(http.HandlerFunc(backupH.PushBackup)))
+	mux.Handle("POST /api/admin/backup/pair-remote", adminStepUpM(http.HandlerFunc(backupH.PairRemote)))
+	mux.Handle("POST /api/admin/backup/push", adminStepUpM(http.HandlerFunc(backupH.PushBackup)))
 	mux.Handle("GET /api/admin/backup/status", adminM(http.HandlerFunc(backupH.Status)))
 
 	// Static CSS & Fonts from filesystem if present
@@ -308,3 +328,84 @@ const defaultFaviconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
   <path d="M32 32.5 V42 M29 42 H35" stroke="#4deeea" stroke-width="2.5" stroke-linecap="round"/>
   <circle cx="32" cy="27" r="2" fill="#4deeea"/>
 </svg>`
+
+// requireStepUp spends the step-up grant carried on this request before the handler runs.
+//
+// The grant is consumed up front rather than after the work: a grant that survives a failed
+// attempt is a grant an attacker can retry with.
+func (s *Server) requireStepUp(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := consumeStepUp(s.store, r); err != nil {
+			user := GetUserFromContext(r.Context())
+			var actorID, actorName string
+			if user != nil {
+				actorID, actorName = user.ID, user.Username
+			}
+			s.audit.Record("admin.step_up_required", actorID, actorName, r.URL.Path, "endpoint",
+				s.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"method": r.Method})
+			writeStepUpError(w, err)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// readiness reports whether this instance can do its job, not merely whether it is running.
+//
+// It is unauthenticated, because a load balancer probe cannot hold a session, so it reports
+// fixed verdicts and never the underlying error. The detail goes to the process log, where
+// an operator can already see it and an anonymous caller cannot.
+func (s *Server) readiness(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	checks := map[string]string{}
+	ready := true
+	fail := func(name string, detail error) {
+		checks[name] = "unavailable"
+		ready = false
+		log.Printf("readiness: %s unavailable: %v", name, detail)
+	}
+
+	// A bounded read against the table every login touches. A volume that has gone read-only
+	// or vanished fails here rather than at the next sign-in.
+	if err := s.store.PingContext(ctx); err != nil {
+		fail("database", err)
+	} else {
+		checks["database"] = "ok"
+	}
+
+	// Key material is loaded once at start; without it no token can be issued and no stored
+	// secret can be read, so serving traffic would only produce failed logins.
+	if s.keyManager == nil || len(s.keyManager.GetJWKS().Keys) == 0 {
+		fail("signing_key", errors.New("RSA signing key is not loaded"))
+	} else {
+		checks["signing_key"] = "ok"
+	}
+	if len(s.cfg.EncryptionKey) != config.KeyLength {
+		fail("encryption_key", errors.New("deployment encryption key is missing or the wrong size"))
+	} else {
+		checks["encryption_key"] = "ok"
+	}
+
+	// A server still authenticating people while keeping no record of it is degraded, not
+	// healthy. It is reported rather than fatal: pulling an identity provider out of rotation
+	// over audit storage would trade an evidence gap for an outage.
+	if degraded, failures, lastErr, _ := s.audit.Health(); degraded {
+		checks["audit"] = "degraded"
+		log.Printf("readiness: audit persistence degraded after %d consecutive failures: %s", failures, lastErr)
+	} else {
+		checks["audit"] = "ok"
+	}
+
+	status := http.StatusOK
+	if !ready {
+		status = http.StatusServiceUnavailable
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": map[bool]string{true: "ready", false: "not_ready"}[ready],
+		"checks": checks,
+	})
+}

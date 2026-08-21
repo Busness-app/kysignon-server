@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -1814,4 +1815,12 @@ func (s *Store) HasValidStepUpToken(tokenHash, userID, sessionID string) (bool, 
 func (s *Store) DeleteExpiredStepUpTokens() error {
 	_, err := s.db.Exec(`DELETE FROM step_up_tokens WHERE expires_at < ?`, time.Now().UTC())
 	return err
+}
+
+// PingContext proves the database is reachable and readable within the caller's deadline.
+// It reads the table every login touches, so a volume that has gone read-only or vanished
+// fails here rather than at the next sign-in.
+func (s *Store) PingContext(ctx context.Context) error {
+	var n int
+	return s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE status = 'active' LIMIT 1`).Scan(&n)
 }

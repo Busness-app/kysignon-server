@@ -7,6 +7,7 @@ const SUITE_CLIENT_IDS = ['kypost', 'kydns', 'kypasswords', 'kynotes', 'kybookma
 const isSuiteClient = (id: string) => SUITE_CLIENT_IDS.includes(id.trim().toLowerCase());
 import { OAuthClient } from '../types';
 import { apiJson, apiRequest, errorMessage, isRecord } from '../api';
+import { isCancelled, useStepUp } from './StepUpPrompt';
 import { parseOAuthClients } from '../parsers';
 import { Plus, Trash2, CheckCircle, AlertTriangle } from 'lucide-react';
 
@@ -61,6 +62,10 @@ export const AdminClients: React.FC = () => {
   // Typing a suite service ID pins the client type, matching the server's rule.
   const suiteLocked = isSuiteClient(clientId);
 
+  // Registering a client mints a secret and deleting one revokes every integration using it.
+  // Neither should be reachable from a session cookie alone.
+  const { requestGrant, stepUpPrompt } = useStepUp();
+
   const handleCreateClient = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!clientName || !redirectUris) return;
@@ -71,8 +76,12 @@ export const AdminClients: React.FC = () => {
       .filter((u) => u.length > 0);
 
     try {
+      const grant = await requestGrant(
+        `Registering '${clientName}' issues a client secret that can request tokens for your users.`
+      );
       const data = await apiRequest('/api/admin/clients', {
         method: 'POST',
+        stepUpToken: grant,
         body: JSON.stringify({
           clientId: clientId.trim() || undefined,
           clientName,
@@ -92,6 +101,7 @@ export const AdminClients: React.FC = () => {
       );
       fetchClients();
     } catch (err) {
+      if (isCancelled(err)) return;
       alert(errorMessage(err, 'Failed to create client'));
     }
   };
@@ -99,9 +109,13 @@ export const AdminClients: React.FC = () => {
   const handleDeleteClient = async (id: string) => {
     if (!confirm('Are you sure you want to delete this OAuth/OIDC client?')) return;
     try {
-      await apiRequest(`/api/admin/clients/${id}`, { method: 'DELETE' });
+      const grant = await requestGrant(
+        `Deleting '${id}' immediately breaks every sign-in that goes through it.`
+      );
+      await apiRequest(`/api/admin/clients/${id}`, { method: 'DELETE', stepUpToken: grant });
       fetchClients();
     } catch (err) {
+      if (isCancelled(err)) return;
       alert(errorMessage(err, 'Failed to delete client'));
     }
   };
@@ -119,6 +133,7 @@ export const AdminClients: React.FC = () => {
 
   return (
     <div className="admin-page">
+      {stepUpPrompt}
       <div className="page-header">
         <div>
           <h1 className="page-title">OAuth 2.0 & OpenID Connect Clients</h1>

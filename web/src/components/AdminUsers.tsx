@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { User } from '../types';
 import { apiJson, apiRequest, errorMessage } from '../api';
+import { isCancelled, useStepUp } from './StepUpPrompt';
 import { parseUsers } from '../parsers';
 import { Plus, RefreshCw, KeyRound, LogOut, Trash2, Edit, CheckCircle, XCircle } from 'lucide-react';
 
@@ -28,6 +29,10 @@ export const AdminUsers: React.FC = () => {
     }
   };
 
+  // Creating, editing, resetting MFA for, or deleting an account are all things a stolen
+  // session must not be able to do on its own, so each one re-proves the operator first.
+  const { requestGrant, stepUpPrompt } = useStepUp();
+
   useEffect(() => {
     fetchUsers();
   }, []);
@@ -38,14 +43,20 @@ export const AdminUsers: React.FC = () => {
     setSubmitting(true);
 
     try {
+      const grant = await requestGrant(
+        `Creating '${username || 'a new account'}' adds a credential to this directory` +
+          (role === 'admin' ? ', with administrator rights.' : '.')
+      );
       await apiRequest('/api/admin/users', {
         method: 'POST',
         body: JSON.stringify({ username, displayName, email, password, role, status }),
+        stepUpToken: grant,
       });
       setShowCreateModal(false);
       resetForm();
       fetchUsers();
     } catch (err) {
+      if (isCancelled(err)) return;
       setFormError(errorMessage(err, 'Failed to create user'));
     } finally {
       setSubmitting(false);
@@ -59,14 +70,19 @@ export const AdminUsers: React.FC = () => {
     setSubmitting(true);
 
     try {
+      const grant = await requestGrant(
+        `Changing '${selectedUser.username}' can alter their password, role, or access.`
+      );
       await apiRequest(`/api/admin/users/${selectedUser.id}`, {
         method: 'PUT',
         body: JSON.stringify({ displayName, email, role, status, password: password || undefined }),
+        stepUpToken: grant,
       });
       setShowEditModal(false);
       resetForm();
       fetchUsers();
     } catch (err) {
+      if (isCancelled(err)) return;
       setFormError(errorMessage(err, 'Failed to update user'));
     } finally {
       setSubmitting(false);
@@ -99,10 +115,14 @@ export const AdminUsers: React.FC = () => {
     if (!confirm(`Are you sure you want to reset MFA for '${u.username}'? This will revoke active sessions and require re-enrollment.`)) return;
 
     try {
-      await apiRequest(`/api/admin/users/${u.id}/reset-mfa`, { method: 'POST' });
+      const grant = await requestGrant(
+        `Resetting MFA for '${u.username}' removes every factor protecting that account.`
+      );
+      await apiRequest(`/api/admin/users/${u.id}/reset-mfa`, { method: 'POST', stepUpToken: grant });
       alert(`MFA reset successfully for ${u.username}`);
       fetchUsers();
     } catch (err) {
+      if (isCancelled(err)) return;
       // The server now fails closed rather than reporting an unearned success, so this
       // message means nothing was changed.
       alert(errorMessage(err, 'Failed to reset MFA'));
@@ -124,15 +144,18 @@ export const AdminUsers: React.FC = () => {
     if (!confirm(`Permanently delete account '${u.username}'? This will also replicate deletion to paired products.`)) return;
 
     try {
-      await apiRequest(`/api/admin/users/${u.id}`, { method: 'DELETE' });
+      const grant = await requestGrant(`Deleting '${u.username}' cannot be undone from here.`);
+      await apiRequest(`/api/admin/users/${u.id}`, { method: 'DELETE', stepUpToken: grant });
       fetchUsers();
     } catch (err) {
+      if (isCancelled(err)) return;
       alert(errorMessage(err, 'Failed to delete user'));
     }
   };
 
   return (
     <div className="admin-page">
+      {stepUpPrompt}
       <div className="page-header">
         <div>
           <h1 className="page-title">User Directory & Replication</h1>

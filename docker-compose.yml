@@ -24,6 +24,10 @@ services:
       KYSIGNON_DATA_DIR: /data
       # Empty by default: no peer may forge its client IP. Set to your proxy's address only.
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      # The one header a trusted proxy is believed on. Set to CF-Connecting-IP behind
+      # Cloudflare. Only one is honoured, so the header your edge does not overwrite can
+      # never become an attacker-chosen client identity.
+      KYSIGNON_FORWARDED_HEADER: ${KYSIGNON_FORWARDED_HEADER:-X-Forwarded-For}
       KYSIGNON_SECURE_COOKIES: ${KYSIGNON_SECURE_COOKIES:-}
       KYSIGNON_SESSION_TTL: ${KYSIGNON_SESSION_TTL:-24h}
       KYSIGNON_SESSION_IDLE_TTL: ${KYSIGNON_SESSION_IDLE_TTL:-30m}
@@ -44,7 +48,9 @@ services:
       - kysignon_data:/data
 
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:5867/healthz || exit 1"]
+      # /readyz, not /healthz: this must go unhealthy when the database or key material is
+      # gone, rather than when the process has stopped answering at all.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:5867/readyz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

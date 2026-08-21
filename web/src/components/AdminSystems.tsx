@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { PairedSystem } from '../types';
 import { apiJson, apiRequest, errorMessage } from '../api';
+import { isCancelled, useStepUp } from './StepUpPrompt';
 import { parseCreatedSystem, parsePairedSystems } from '../parsers';
 import {
   RefreshCw,
@@ -91,14 +92,22 @@ export const AdminSystems: React.FC = () => {
     setFormError(null);
   };
 
+  // Connecting a system mints a bearer token for the account directory; disconnecting one
+  // cuts off replication. Resync is left alone: it is idempotent and carries no secret.
+  const { requestGrant, stepUpPrompt } = useStepUp();
+
   const handleCreateSCIMTarget = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
     setSubmitting(true);
 
     try {
+      const grant = await requestGrant(
+        `Connecting '${targetName.trim() || 'this system'}' issues a bearer token with access to the account directory.`
+      );
       const data = await apiJson('/api/admin/systems', parseCreatedSystem, {
         method: 'POST',
+        stepUpToken: grant,
         body: JSON.stringify({
           name: targetName.trim(),
           systemType,
@@ -111,6 +120,7 @@ export const AdminSystems: React.FC = () => {
       setCreatedToken(data.bearerToken || null);
       fetchSystems();
     } catch (err) {
+      if (isCancelled(err)) return;
       setFormError(errorMessage(err, 'Failed to connect SCIM service'));
     } finally {
       setSubmitting(false);
@@ -144,9 +154,11 @@ export const AdminSystems: React.FC = () => {
     if (!confirm(`Disconnect and remove '${s.name}' from KySignOn Suite sync?`)) return;
 
     try {
-      await apiRequest(`/api/admin/systems/${s.id}`, { method: 'DELETE' });
+      const grant = await requestGrant(`Disconnecting '${s.name}' stops all account replication to it.`);
+      await apiRequest(`/api/admin/systems/${s.id}`, { method: 'DELETE', stepUpToken: grant });
       fetchSystems();
     } catch (err) {
+      if (isCancelled(err)) return;
       alert(errorMessage(err, 'Failed to disconnect system'));
     }
   };
@@ -163,6 +175,7 @@ export const AdminSystems: React.FC = () => {
 
   return (
     <div className="admin-page">
+      {stepUpPrompt}
       <div className="page-header">
         <div>
           <h1 className="page-title">SCIM 2.0 Downstream Directory Sync</h1>

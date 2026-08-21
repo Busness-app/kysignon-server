@@ -430,10 +430,15 @@ func runPushBackup(recURL, apiToken string) {
 	defer dbStore.Close()
 
 	if recURL == "" {
-		recURL, _ = dbStore.GetSetting("kyrecovery_url")
+		recURL, _ = backup.LoadRecoveryURL(dbStore)
 	}
 	if apiToken == "" {
-		apiToken, _ = dbStore.GetSetting("kyrecovery_token")
+		// The stored credential is encrypted under the deployment key; this is the only path
+		// that decrypts it, and it never prints the value.
+		apiToken, err = backup.LoadRecoveryToken(dbStore, cfg.EncryptionKey)
+		if err != nil {
+			log.Fatalf("Failed to read the stored KyRecovery token: %v", err)
+		}
 	}
 	if recURL == "" || apiToken == "" {
 		log.Fatalf("Error: KyRecovery URL and API token are required (pass flags or pair via UI)")

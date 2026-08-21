@@ -10,6 +10,7 @@ import (
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/backup"
 	"github.com/Yoshiofthewire/kysignon-server/internal/config"
+	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
@@ -38,11 +39,31 @@ func TestRestoreFromExportedKitOnly(t *testing.T) {
 	if err := dbStore.CreateUser(admin); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(keyPath, []byte("-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n"), 0600); err != nil {
+	if _, err := crypto.LoadOrCreateRSAKey(keyPath); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := &config.Config{Port: "5867", IssuerURL: "https://sso.example.test", DBPath: dbPath, DataDir: live, RSAKeyPath: keyPath}
+	// The deployment keys. Everything encrypted in the database is encrypted under encKey,
+	// so a capsule that omits it restores rows nobody can read.
+	encKey := bytes.Repeat([]byte{0x1f}, config.KeyLength)
+	secretKey := bytes.Repeat([]byte{0x2e}, config.KeyLength)
+
+	const totpSecret = "JBSWY3DPEHPK3PXP"
+	encryptedSecret, err := crypto.EncryptAESGCM(encKey, []byte(totpSecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbStore.SetMFAMethod(&store.MFAMethod{
+		ID: uuid.New().String(), UserID: admin.ID, MethodType: "totp",
+		EncryptedSecret: encryptedSecret, IsPrimary: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Port: "5867", IssuerURL: "https://sso.example.test", DBPath: dbPath, DataDir: live,
+		RSAKeyPath: keyPath, EncryptionKey: encKey, SecretKey: secretKey,
+	}
 
 	payload, err := backup.BuildLocalPayload(cfg, dbStore, "1.0.0")
 	if err != nil {
@@ -146,8 +167,26 @@ func TestRestoreFromExportedKitOnly(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(restoreDir, "data/jwt_rs256.key")); err != nil {
 		t.Errorf("the recovery kit did not yield the signing key: %v", err)
 	}
-	if len(restored) < 3 {
-		t.Errorf("expected database, signing key and config; got %d files", len(restored))
+	if len(restored) < 5 {
+		t.Errorf("expected database, signing key, both deployment keys and config; got %d files", len(restored))
+	}
+
+	// The point of the whole exercise: the restored directory must be readable, not just
+	// present. A capsule that restores a database of ciphertext nobody holds the key for is
+	// a drill that passes and a recovery that fails.
+	gotEncKey, err := os.ReadFile(filepath.Join(restoreDir, "data/encryption.key"))
+	if err != nil {
+		t.Fatalf("the recovery kit did not yield the encryption key: %v", err)
+	}
+	if !bytes.Equal(gotEncKey, encKey) {
+		t.Fatal("the restored encryption key does not match the one the data was encrypted under")
+	}
+	gotSecretKey, err := os.ReadFile(filepath.Join(restoreDir, "data/secret.key"))
+	if err != nil {
+		t.Fatalf("the recovery kit did not yield the session secret: %v", err)
+	}
+	if !bytes.Equal(gotSecretKey, secretKey) {
+		t.Fatal("the restored session secret does not match the live one")
 	}
 
 	// The restored directory must hold the account that existed before the loss.
@@ -159,6 +198,20 @@ func TestRestoreFromExportedKitOnly(t *testing.T) {
 	u, err := recovered.GetUserByUsername("recovery-admin")
 	if err != nil || u == nil {
 		t.Fatalf("the administrator did not survive the restore: %v", err)
+	}
+
+	// Decrypt the restored MFA state with the restored key, which is the operation the very
+	// next login after a recovery has to perform.
+	method, err := recovered.GetMFAMethod(u.ID, "totp")
+	if err != nil || method == nil {
+		t.Fatalf("the enrolled TOTP factor did not survive the restore: %v", err)
+	}
+	plain, err := crypto.DecryptAESGCM(gotEncKey, method.EncryptedSecret)
+	if err != nil {
+		t.Fatalf("the restored TOTP secret does not decrypt under the restored key: %v", err)
+	}
+	if string(plain) != totpSecret {
+		t.Fatalf("restored TOTP secret is %q, want %q", plain, totpSecret)
 	}
 
 	// The raw main file the old backup path copied would not have restored this account.

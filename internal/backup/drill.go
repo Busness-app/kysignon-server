@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Yoshiofthewire/kysignon-server/internal/config"
+	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	_ "modernc.org/sqlite"
 )
 
@@ -155,7 +157,12 @@ func RunRestoreDrill(ctx context.Context, capsule *Capsule, key []byte) (*DrillR
 		}
 	}
 
-	// 4. Validate Expected Environment Dependencies
+	// 4. Prove the restored bytes are usable, not merely present. This is the difference
+	// between a drill and a recovery test: encrypted MFA state that cannot be decrypted and
+	// a signing key that cannot mint a token both survive every check above unnoticed.
+	proveRestoreIsUsable(ctx, scratchDir, recipe, result)
+
+	// 5. Validate Expected Environment Dependencies
 	if expEnv := stringList(recipe["expected_env"]); len(expEnv) > 0 {
 		var setEnvs []string
 		for _, envName := range expEnv {
@@ -170,7 +177,7 @@ func RunRestoreDrill(ctx context.Context, capsule *Capsule, key []byte) (*DrillR
 		})
 	}
 
-	// 5. Verification Recipe Completed
+	// 6. Verification Recipe Completed
 	result.DurationMS = time.Since(start).Milliseconds()
 	return result, nil
 }
@@ -232,5 +239,142 @@ func stringList(v interface{}) []string {
 		return out
 	default:
 		return nil
+	}
+}
+
+// proveRestoreIsUsable loads the restored key material and exercises it against the restored
+// database: decrypt what the service must decrypt on the next login, and sign and verify a
+// token the way the token endpoint would. Everything here is read-only and confined to the
+// drill sandbox.
+func proveRestoreIsUsable(ctx context.Context, scratchDir string, recipe map[string]interface{}, result *DrillResult) {
+	fail := func(name, msg string) {
+		result.Passed = false
+		result.Checks = append(result.Checks, CheckItem{Name: name, Passed: false, Message: msg})
+	}
+	pass := func(name, msg string) {
+		result.Checks = append(result.Checks, CheckItem{Name: name, Passed: true, Message: msg})
+	}
+
+	if secretPath, _ := recipe["secret_key_file"].(string); secretPath != "" {
+		data, err := os.ReadFile(filepath.Join(scratchDir, secretPath))
+		if err != nil || len(data) != config.KeyLength {
+			fail("Session Secret Restored",
+				fmt.Sprintf("%s is missing or not %d bytes; every session and CSRF token would be invalidated by a restore", secretPath, config.KeyLength))
+		} else {
+			pass("Session Secret Restored", "Session and CSRF secret recovered intact")
+		}
+	}
+
+	if prove, _ := recipe["prove_secret_decryption"].(bool); prove {
+		proveSecretDecryption(ctx, scratchDir, recipe, fail, pass)
+	}
+
+	if prove, _ := recipe["prove_token_signing"].(bool); prove {
+		rsaPath, _ := recipe["rsa_key_file"].(string)
+		if rsaPath == "" {
+			fail("Token Signing", "Recipe asks to prove token signing but names no signing key")
+			return
+		}
+		// LoadOrCreateRSAKey would generate a fresh key if the restored one were unreadable,
+		// which would turn this proof into a tautology, so the file is checked first.
+		full := filepath.Join(scratchDir, rsaPath)
+		if fi, err := os.Stat(full); err != nil || fi.Size() == 0 {
+			fail("Token Signing", fmt.Sprintf("Restored signing key %s is missing or empty", rsaPath))
+			return
+		}
+		km, err := crypto.LoadOrCreateRSAKey(full)
+		if err != nil {
+			fail("Token Signing", fmt.Sprintf("Restored signing key will not load: %v", err))
+			return
+		}
+		token, err := km.SignJWT(map[string]any{
+			"iss": "kysignon-restore-drill",
+			"sub": "drill",
+			"exp": time.Now().Add(time.Minute).Unix(),
+		})
+		if err != nil {
+			fail("Token Signing", fmt.Sprintf("Restored signing key could not sign a token: %v", err))
+			return
+		}
+		if _, err := km.VerifyJWT(token); err != nil {
+			fail("Token Signing", fmt.Sprintf("Token signed by the restored key did not verify: %v", err))
+			return
+		}
+		pass("Token Signing", "Restored RSA key signed and verified a JWT; issued tokens survive a restore")
+	}
+}
+
+// proveSecretDecryption reads the encrypted columns the service cannot start a login without
+// and decrypts them under the restored encryption key.
+func proveSecretDecryption(ctx context.Context, scratchDir string, recipe map[string]interface{}, fail, pass func(string, string)) {
+	keyPath, _ := recipe["encryption_key_file"].(string)
+	if keyPath == "" {
+		fail("MFA Secret Decryption", "Recipe asks to prove decryption but names no encryption key")
+		return
+	}
+	key, err := os.ReadFile(filepath.Join(scratchDir, keyPath))
+	if err != nil || len(key) != config.KeyLength {
+		fail("MFA Secret Decryption",
+			fmt.Sprintf("Restored capsule has no usable %s; every enrolled TOTP secret and paired-system token would be unreadable after a restore", keyPath))
+		return
+	}
+
+	dbPaths := stringList(recipe["sqlite_paths"])
+	if len(dbPaths) == 0 {
+		fail("MFA Secret Decryption", "Recipe asks to prove decryption but names no database")
+		return
+	}
+	db, err := sql.Open("sqlite", filepath.Join(scratchDir, dbPaths[0]))
+	if err != nil {
+		fail("MFA Secret Decryption", fmt.Sprintf("Could not open the restored database: %v", err))
+		return
+	}
+	defer func() { _ = db.Close() }()
+
+	for _, target := range []struct {
+		name  string
+		query string
+		empty string
+	}{
+		{
+			"MFA Secret Decryption",
+			`SELECT encrypted_secret FROM mfa_methods WHERE method_type = 'totp' AND encrypted_secret IS NOT NULL AND encrypted_secret != ''`,
+			"No TOTP secrets are enrolled, so none could be checked",
+		},
+		{
+			"Paired System Token Decryption",
+			`SELECT hmac_secret_encrypted FROM paired_systems WHERE hmac_secret_encrypted IS NOT NULL AND hmac_secret_encrypted != ''`,
+			"No paired systems are configured, so none could be checked",
+		},
+	} {
+		rows, err := db.QueryContext(ctx, target.query)
+		if err != nil {
+			fail(target.name, fmt.Sprintf("Could not read the restored ciphertext: %v", err))
+			continue
+		}
+		var checked, failed int
+		for rows.Next() {
+			var ciphertext string
+			if err := rows.Scan(&ciphertext); err != nil {
+				failed++
+				continue
+			}
+			checked++
+			if _, err := crypto.DecryptAESGCM(key, ciphertext); err != nil {
+				failed++
+			}
+		}
+		_ = rows.Close()
+
+		switch {
+		case failed > 0:
+			fail(target.name, fmt.Sprintf("%d of %d restored secrets did not decrypt under the restored encryption key", failed, checked))
+		case checked == 0:
+			// Nothing to prove is not the same as proven. Say so rather than showing a tick
+			// the operator would read as "MFA state verified".
+			pass(target.name, target.empty)
+		default:
+			pass(target.name, fmt.Sprintf("All %d restored secrets decrypted under the restored encryption key", checked))
+		}
 	}
 }

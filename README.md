@@ -114,10 +114,18 @@ Sign in with `admin` and the retrieved password.
 
 You can verify the status of the server at any time:
 
-* **HTTP Health Check**:
+* **Liveness** (is the process running):
   ```bash
   curl http://localhost:5867/healthz
-  # Response: {"status":"healthy"}
+  # Response: {"status":"alive"}
+  ```
+* **Readiness** (can this instance actually authenticate someone). Point your load balancer
+  at this one. It runs a bounded database read and confirms the signing and encryption keys
+  are loaded, and returns `503` when they are not. `/healthz` deliberately proves none of
+  that; a process that can encode JSON while its database is gone is still down.
+  ```bash
+  curl http://localhost:5867/readyz
+  # Response: {"status":"ready","checks":{"audit":"ok","database":"ok",...}}
   ```
 * **OpenID Connect Discovery**:
   ```bash
@@ -183,10 +191,32 @@ Sync events are queued per paired system; a system only receives what was queued
 **Device pairing requires a P-256 public key.** A device without one can never approve a
 push, and pairing it previously enrolled push MFA that no response could satisfy.
 
-**`TRUSTED_PROXY_CIDRS` defaults to empty.** Forwarding headers, including
-`CF-Connecting-IP`, are ignored unless the immediate peer is a CIDR you named. Set it to
-your proxy's address and nothing wider: every host inside a listed range can choose its own
-rate-limit bucket and its own entry in your audit log.
+**`TRUSTED_PROXY_CIDRS` defaults to empty.** Forwarding headers are ignored unless the
+immediate peer is a CIDR you named. Set it to your proxy's address and nothing wider: every
+host inside a listed range can choose its own rate-limit bucket and its own entry in your
+audit log.
+
+**`KYSIGNON_FORWARDED_HEADER` names the one header that is believed, defaulting to
+`X-Forwarded-For`.** Behind Cloudflare, set it to `CF-Connecting-IP`. Exactly one header is
+honoured per deployment because trying several in turn means whichever one your edge does
+*not* overwrite is the one an attacker gets to choose. The value must parse as an IP
+address, and the chain is walked from the right past hops inside `TRUSTED_PROXY_CIDRS`, so a
+client-supplied entry prepended to the list is never attributed.
+
+**Recovery kit shards are capped per administrator.** No single account can collect enough
+shards to rebuild the capsule key, so a 2-of-3 kit needs two administrators to sign in and
+collect their own. A server with only one administrator may collect all of them — otherwise
+it could never produce a kit at all — and every such collection is recorded as
+`admin.backup_single_custodian_quorum`. Add a second administrator to get real custody
+separation.
+
+**Destructive admin operations require step-up re-authentication.** Creating or editing an
+account, resetting someone's MFA, deleting a user, registering or deleting an OAuth client,
+connecting or removing a paired system, and every recovery-kit or KyRecovery operation each
+spend a single-use grant that costs your password and an enrolled factor. A stolen session
+cookie cannot produce one. Read-only views and the emergency "revoke sessions" button stay
+on the session alone, so locking an account down during an incident is not slowed by a
+second prompt.
 
 **`KYSIGNON_SECRET_KEY` and `KYSIGNON_ENCRYPTION_KEY` must be exactly 64 hex characters.**
 A malformed value is a startup error, never a silently weakened key. Generate with

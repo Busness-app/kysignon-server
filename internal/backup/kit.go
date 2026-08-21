@@ -21,6 +21,8 @@ const KitTTL = 30 * time.Minute
 var (
 	ErrKitNotFound   = errors.New("recovery kit not found or expired")
 	ErrShardNotFound = errors.New("shard not found or already collected")
+	ErrCustodyQuorum = errors.New("this administrator already holds the most shards one custodian may hold; a different administrator must collect the rest")
+	ErrNoCustodian   = errors.New("a shard cannot be released without an identified custodian")
 )
 
 // capsuleFile is the serialized .kycap container. It deliberately carries no shards: the
@@ -85,21 +87,53 @@ type Kit struct {
 
 	shards    map[int][]byte
 	collected map[int]bool
+	// holders records which principal took each shard. Splitting artifacts across separate
+	// HTTP requests does not create separate custodians; only refusing to hand one principal
+	// a reconstructable set does.
+	holders map[int]string
 }
 
 // ShardState reports whether a custodian shard is still awaiting collection.
 type ShardState struct {
 	Index     int  `json:"index"`
 	Collected bool `json:"collected"`
+	// HeldBySelf marks a shard this viewer already holds, so the UI can show who still
+	// needs to sign in rather than offering a button that will be refused.
+	HeldBySelf bool `json:"heldBySelf,omitempty"`
 }
 
-// Shards lists every shard slot and whether it has been collected.
-func (k *Kit) Shards() []ShardState {
+// Shards lists every shard slot, whether it has been collected, and whether the named
+// viewer is the one holding it.
+func (k *Kit) Shards(viewer string) []ShardState {
 	out := make([]ShardState, 0, k.Manifest.TotalShares)
 	for i := 1; i <= k.Manifest.TotalShares; i++ {
-		out = append(out, ShardState{Index: i, Collected: k.collected[i]})
+		out = append(out, ShardState{
+			Index:      i,
+			Collected:  k.collected[i],
+			HeldBySelf: viewer != "" && k.holders[i] == viewer,
+		})
 	}
 	return out
+}
+
+// MaxPerCustodian is the most shards one principal may hold without being able to
+// reconstruct the key alone.
+func (k *Kit) MaxPerCustodian() int {
+	if k.Manifest.Threshold <= 1 {
+		return 1
+	}
+	return k.Manifest.Threshold - 1
+}
+
+// HeldBy counts the shards a principal has already collected from this kit.
+func (k *Kit) HeldBy(custodian string) int {
+	n := 0
+	for _, holder := range k.holders {
+		if holder == custodian {
+			n++
+		}
+	}
+	return n
 }
 
 // KitStore holds pending kits in memory only. Shards are never written to disk by the
@@ -131,6 +165,7 @@ func (ks *KitStore) Create(capsule *Capsule) (*Kit, error) {
 		ExpiresAt: time.Now().UTC().Add(ks.ttl),
 		shards:    map[int][]byte{},
 		collected: map[int]bool{},
+		holders:   map[int]string{},
 	}
 	for _, share := range capsule.Shares {
 		data := make([]byte, len(share.Data))
@@ -157,10 +192,17 @@ func (ks *KitStore) Get(id string) (*Kit, error) {
 	return kit, nil
 }
 
-// TakeShard hands out one shard exactly once and forgets it. Handing the same shard out
-// repeatedly would put it in as many places as the caller likes, which is the leak the
-// separation is meant to prevent.
-func (ks *KitStore) TakeShard(id string, index int) (Share, error) {
+// TakeShard hands out one shard exactly once, to one identified custodian, and forgets it.
+//
+// A custodian may hold at most threshold-1 shards, so no single principal can ever assemble
+// a quorum: the "2-of-3" claim is otherwise satisfied by one administrator clicking three
+// times. allowSoleCustodian lifts that cap for a deployment that genuinely has only one
+// administrator, where the alternative is an unusable recovery kit and therefore no backup
+// at all; the caller is responsible for establishing that and for recording it.
+func (ks *KitStore) TakeShard(id string, index int, custodian string, allowSoleCustodian bool) (Share, error) {
+	if strings.TrimSpace(custodian) == "" {
+		return Share{}, ErrNoCustodian
+	}
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	ks.sweepLocked()
@@ -172,8 +214,12 @@ func (ks *KitStore) TakeShard(id string, index int) (Share, error) {
 	if !ok {
 		return Share{}, ErrShardNotFound
 	}
+	if !allowSoleCustodian && kit.HeldBy(custodian) >= kit.MaxPerCustodian() {
+		return Share{}, ErrCustodyQuorum
+	}
 	delete(kit.shards, index)
 	kit.collected[index] = true
+	kit.holders[index] = custodian
 	return Share{Index: index, Data: data}, nil
 }
 
@@ -195,6 +241,7 @@ func (ks *KitStore) discardLocked(id string) {
 		}
 		delete(kit.shards, i)
 	}
+	kit.holders = map[int]string{}
 	delete(ks.kits, id)
 }
 

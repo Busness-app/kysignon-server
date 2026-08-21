@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -75,6 +76,11 @@ func run(capsulePath, outDir string, shards []backup.Share) error {
 	// ExtractCapsule verifies the payload hash before writing anything, so a wrong quorum
 	// or a tampered container fails instead of producing a plausible-looking restore.
 	files, err := backup.ExtractCapsule(capsule, key, outDir)
+	if errors.Is(err, backup.ErrTargetNotEmpty) {
+		return fmt.Errorf("%s already has contents; point -out at a new, empty directory. "+
+			"A restore unpacks signing and encryption keys, and writing those over an "+
+			"existing tree is how a pre-planted symlink redirects them somewhere else", outDir)
+	}
 	if err != nil {
 		return fmt.Errorf("restore failed: %w", err)
 	}

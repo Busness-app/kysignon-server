@@ -25,12 +25,14 @@ const (
 const limiterIdleTTL = 10 * time.Minute
 
 // defaultMaxLimiters caps the bucket map so a stream of distinct clients cannot exhaust
-// memory. Reaching it forces a sweep, and buckets are dropped if the sweep frees nothing.
+// memory. Reaching it forces a sweep; if the sweep frees nothing, new buckets are refused
+// rather than existing ones evicted.
 const defaultMaxLimiters = 100_000
 
 type MiddlewareManager struct {
 	store             *store.Store
 	trustedCIDRs      []*net.IPNet
+	forwardedHeader   string
 	rateLimiters      map[string]*RateLimiter
 	rateLimitersMutex sync.Mutex
 	lastSweep         time.Time
@@ -49,7 +51,7 @@ type RateLimiter struct {
 	mu         sync.Mutex
 }
 
-func NewMiddlewareManager(s *store.Store, trustedCIDRs []string, csrfKey []byte) *MiddlewareManager {
+func NewMiddlewareManager(s *store.Store, trustedCIDRs []string, forwardedHeader string, csrfKey []byte) *MiddlewareManager {
 	var parsedCIDRs []*net.IPNet
 	for _, cidr := range trustedCIDRs {
 		if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
@@ -58,14 +60,15 @@ func NewMiddlewareManager(s *store.Store, trustedCIDRs []string, csrfKey []byte)
 	}
 
 	return &MiddlewareManager{
-		store:          s,
-		trustedCIDRs:   parsedCIDRs,
-		rateLimiters:   make(map[string]*RateLimiter),
-		lastSweep:      time.Now(),
-		maxLimiters:    defaultMaxLimiters,
-		csrfKey:        csrfKey,
-		sessionIdleTTL: 30 * time.Minute,
-		now:            time.Now,
+		store:           s,
+		trustedCIDRs:    parsedCIDRs,
+		forwardedHeader: http.CanonicalHeaderKey(strings.TrimSpace(forwardedHeader)),
+		rateLimiters:    make(map[string]*RateLimiter),
+		lastSweep:       time.Now(),
+		maxLimiters:     defaultMaxLimiters,
+		csrfKey:         csrfKey,
+		sessionIdleTTL:  30 * time.Minute,
+		now:             time.Now,
 	}
 }
 
@@ -79,41 +82,53 @@ func (m *MiddlewareManager) isTrustedProxy(r *http.Request) bool {
 	if err != nil {
 		remoteHost = r.RemoteAddr
 	}
-	remoteIP := net.ParseIP(remoteHost)
-	if remoteIP == nil {
+	return m.isTrustedIP(net.ParseIP(remoteHost))
+}
+
+// isTrustedIP reports whether an address belongs to a configured proxy.
+func (m *MiddlewareManager) isTrustedIP(ip net.IP) bool {
+	if ip == nil {
 		return false
 	}
 	for _, cidr := range m.trustedCIDRs {
-		if cidr.Contains(remoteIP) {
+		if cidr.Contains(ip) {
 			return true
 		}
 	}
 	return false
 }
 
-// ClientIP returns the address the request should be attributed to. Forwarding headers are
-// only honoured from a configured proxy; otherwise any peer could pick its own rate-limit
-// bucket and its own entry in the audit log.
+// ClientIP returns the address the request should be attributed to.
+//
+// Exactly one forwarding header is honoured, and only from a configured proxy. Trying
+// several headers in turn is what turns an attacker-supplied string into an identity: the
+// edge overwrites the one it owns, and the attacker supplies whichever of the others the
+// server happens to prefer. The value must parse as an IP, so a rate-limit bucket and an
+// audit entry are always a real address rather than whatever the caller typed.
 func (m *MiddlewareManager) ClientIP(r *http.Request) string {
 	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		remoteHost = r.RemoteAddr
 	}
 
-	if !m.isTrustedProxy(r) {
+	if !m.isTrustedProxy(r) || m.forwardedHeader == "" {
 		return remoteHost
 	}
 
-	if cfIP := r.Header.Get("CF-Connecting-IP"); cfIP != "" {
-		return strings.TrimSpace(cfIP)
-	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
-			return strings.TrimSpace(first)
+	// Walk the forwarded chain from the right. Everything appended by a proxy we trust is
+	// skipped; the first entry that is not one of ours is the closest hop we can attribute,
+	// and anything further left was written by someone we have no reason to believe.
+	// A single-value header (CF-Connecting-IP, X-Real-IP) is simply a chain of length one.
+	parts := strings.Split(r.Header.Get(m.forwardedHeader), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := net.ParseIP(strings.TrimSpace(parts[i]))
+		if ip == nil {
+			// A malformed entry means the chain cannot be trusted past this point.
+			return remoteHost
 		}
-	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
+		if !m.isTrustedIP(ip) {
+			return ip.String()
+		}
 	}
 	return remoteHost
 }
@@ -156,16 +171,6 @@ func (m *MiddlewareManager) sweepLimiters(now time.Time) {
 			delete(m.rateLimiters, key)
 		}
 	}
-
-	// If nothing aged out, the map is under active pressure. Shed arbitrary entries rather
-	// than grow without bound; a shed bucket only ever grants a client a fresh allowance,
-	// which is the same thing the cap-less version did for every request anyway.
-	for key := range m.rateLimiters {
-		if len(m.rateLimiters) < m.maxLimiters {
-			break
-		}
-		delete(m.rateLimiters, key)
-	}
 }
 
 // SecurityHeaders applies security and CSP headers.
@@ -199,6 +204,15 @@ func (m *MiddlewareManager) RateLimit(bucket string, maxTokens, refillRate float
 			m.sweepLimiters(now)
 			limiter, exists := m.rateLimiters[key]
 			if !exists {
+				// At capacity, refuse the new bucket rather than evicting a live one.
+				// Evicting under pressure hands a fresh full allowance to exactly the
+				// clients being throttled, so a botnet could reset its own limits on demand.
+				// Shedding new arrivals is the failure mode that does not reward the attack.
+				if len(m.rateLimiters) >= m.maxLimiters {
+					m.rateLimitersMutex.Unlock()
+					http.Error(w, `{"error":"rate_limit_exceeded","error_description":"Too many requests"}`, http.StatusTooManyRequests)
+					return
+				}
 				limiter = &RateLimiter{
 					tokens:     maxTokens,
 					maxTokens:  maxTokens,

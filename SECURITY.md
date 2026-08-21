@@ -141,13 +141,30 @@ When a reverse proxy sits in front of KyPost, the server sees the proxy's addres
 
 **If `TRUSTED_PROXY_CIDRS` is empty, forwarded headers are discarded entirely.** Every caller is keyed as the proxy, so all users share one lockout bucket and push notifications show the gateway address instead of the user signing in.
 
-**If `TRUSTED_PROXY_CIDRS` is set, KyPost trusts `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-For` from that CIDR.** This marks cookies `Secure` and keys lockouts off the real caller. Cloudflare Tunnel also reads `CF-Connecting-IP` in preference to `X-Forwarded-For` (the edge appends your IP to XFF, but cloudflared may append its own hop after it).
+**If `TRUSTED_PROXY_CIDRS` is set, KySignOn trusts `X-Forwarded-Proto` and exactly one client-address header from that CIDR.** This marks cookies `Secure` and keys lockouts off the real caller.
+
+The address header is named by `KYSIGNON_FORWARDED_HEADER` and defaults to `X-Forwarded-For`. Behind Cloudflare, set `KYSIGNON_FORWARDED_HEADER=CF-Connecting-IP`.
+
+Only one header is consulted, on purpose. Trying several in turn (`CF-Connecting-IP`, then `X-Forwarded-For`, then `X-Real-IP`) means the one your edge does not overwrite is a free-form string the client controls, and that string becomes a rate-limit bucket key and an audit-log identity. Naming the contract removes the choice.
+
+Two further rules apply to the value:
+
+- It must parse as an IP address. An unparseable entry is discarded and the request is attributed to the peer, so a caller cannot mint a fresh rate-limit bucket per request by sending a new nonsense value each time.
+- The chain is read right to left, skipping hops inside `TRUSTED_PROXY_CIDRS`, and the first address you did not write is the client. Reading the leftmost entry instead would attribute the request to whatever the client prepended to the list.
 
 **Name the proxy's address specifically, not a wide range.** Any peer inside the range you name can forge their own client IP and bypass every rate limit and lockout. Example:
 
 - Proxy on same host: `TRUSTED_PROXY_CIDRS=127.0.0.1/32`
 - Proxy pinned on `kypost-net`: `TRUSTED_PROXY_CIDRS=10.89.0.10/32` (replace with your proxy's actual Docker network IP)
-- Cloudflare Tunnel: `TRUSTED_PROXY_CIDRS=0.0.0.0/0` is unavoidable; Tunnel is the proxy and only Cloudflare can reach it
+- Cloudflare Tunnel: `TRUSTED_PROXY_CIDRS=0.0.0.0/0` is unavoidable; Tunnel is the proxy and only Cloudflare can reach it. Pair it with `KYSIGNON_FORWARDED_HEADER=CF-Connecting-IP`.
+
+### Rate limiting under pressure
+
+Rate-limit buckets live in this process's memory and are capped. When the cap is reached, **new** buckets are refused with `429` and existing ones are left alone.
+
+The alternative — evicting buckets to make room — hands a fresh full allowance to precisely the clients currently being throttled, so a botnet large enough to fill the map can reset its own limits on demand. Shedding new arrivals is the failure mode that does not reward the attack.
+
+This also means process-local rate limiting is a backstop, not a perimeter. A deployment expecting real volumetric abuse should throttle at the edge, where the state is shared across every instance.
 
 This replaces the old `TRUST_PROXY_HEADERS=true`, which trusted forwarded headers on *every* connection from any peer and was only ever safe when nothing but the proxy could reach the port.
 

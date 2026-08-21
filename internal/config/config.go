@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,8 +26,12 @@ type Config struct {
 	EncryptionKey     []byte
 	RSAKeyPath        string
 	TrustedProxyCIDRs []string
-	BootstrapUser     string
-	BootstrapPass     string
+	// ForwardedHeader names the single header a trusted proxy uses to report the client
+	// address. Exactly one header is honoured per deployment: trying several in turn means
+	// the one the edge does not overwrite is the one an attacker gets to choose.
+	ForwardedHeader string
+	BootstrapUser   string
+	BootstrapPass   string
 	// SecureCookies forces the Secure flag on session cookies. Needed when TLS terminates
 	// at a proxy that does not forward X-Forwarded-Proto.
 	SecureCookies bool
@@ -77,6 +82,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	forwardedHeader, err := loadForwardedHeader()
+	if err != nil {
+		return nil, err
+	}
 	sessionTTL, err := loadPositiveDuration("KYSIGNON_SESSION_TTL", 24*time.Hour)
 	if err != nil {
 		return nil, err
@@ -106,6 +115,7 @@ func Load() (*Config, error) {
 		EncryptionKey:         encKey,
 		RSAKeyPath:            rsaKeyPath,
 		TrustedProxyCIDRs:     trustedCIDRs,
+		ForwardedHeader:       forwardedHeader,
 		BootstrapUser:         getEnv("BOOTSTRAP_ADMIN_USER", "admin"),
 		BootstrapPass:         os.Getenv("BOOTSTRAP_ADMIN_PASS"),
 		SecureCookies:         issuer.Scheme == "https" || strings.EqualFold(os.Getenv("KYSIGNON_SECURE_COOKIES"), "true"),
@@ -197,6 +207,25 @@ func loadOrGenerateKeyFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to persist generated key to %s: %w", path, err)
 	}
 	return key, nil
+}
+
+// DefaultForwardedHeader is the forwarding contract assumed when the operator names none.
+const DefaultForwardedHeader = "X-Forwarded-For"
+
+// loadForwardedHeader picks the one header a trusted proxy is believed on. Behind
+// Cloudflare set KYSIGNON_FORWARDED_HEADER=CF-Connecting-IP; behind most other proxies the
+// default is correct.
+func loadForwardedHeader() (string, error) {
+	raw := strings.TrimSpace(os.Getenv("KYSIGNON_FORWARDED_HEADER"))
+	if raw == "" {
+		return DefaultForwardedHeader, nil
+	}
+	// A header name with spaces or separators is a typo, and a typo here silently attributes
+	// every request to the proxy instead of the client.
+	if strings.ContainsAny(raw, " \t:,;\r\n") {
+		return "", fmt.Errorf("KYSIGNON_FORWARDED_HEADER %q is not a valid header name", raw)
+	}
+	return http.CanonicalHeaderKey(raw), nil
 }
 
 // loadTrustedProxies parses TRUSTED_PROXY_CIDRS. It defaults to empty: forwarding headers

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { BackupDrillResult, BackupStatus, RecoveryKit } from '../types';
 import { apiJson, apiRequest, errorMessage } from '../api';
+import { isCancelled, useStepUp } from './StepUpPrompt';
 import {
   parseBackupStatus,
   parseDrillResult,
@@ -44,6 +45,10 @@ export const AdminBackup: React.FC = () => {
   const [kitError, setKitError] = useState<string>('');
   const [collected, setCollected] = useState<number[]>([]);
   const [capsuleTaken, setCapsuleTaken] = useState<boolean>(false);
+
+  // Every artifact here is either a secret or the means to reach one, so each is fetched
+  // with its own single-use step-up grant rather than on the session cookie alone.
+  const { requestGrant, stepUpPrompt } = useStepUp();
 
   const fetchStatus = async () => {
     setLoadingStatus(true);
@@ -89,6 +94,9 @@ export const AdminBackup: React.FC = () => {
     setPairStatus('');
     setPairError('');
     try {
+      const grant = await requestGrant(
+        'Pairing stores a standing credential for the service that will hold every future backup.'
+      );
       await apiRequest('/api/admin/backup/pair-remote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -96,11 +104,13 @@ export const AdminBackup: React.FC = () => {
           recovery_url: remoteUrl.trim(),
           pairing_code: pairCode,
         }),
+        stepUpToken: grant,
       });
       setPairStatus(`Successfully paired with KyRecovery instance (${remoteUrl.trim()})`);
       setPairCode('');
       await fetchStatus();
     } catch (err) {
+      if (isCancelled(err)) return;
       setPairError(errorMessage(err, 'Failed to pair with KyRecovery instance'));
     } finally {
       setPairingLoading(false);
@@ -112,9 +122,14 @@ export const AdminBackup: React.FC = () => {
     setPushResult('');
     setPushError('');
     try {
-      const resp = await apiJson('/api/admin/backup/push', parsePushResult, { method: 'POST' });
+      const grant = await requestGrant('Pushing a backup sends your identity directory to the paired recovery service.');
+      const resp = await apiJson('/api/admin/backup/push', parsePushResult, {
+        method: 'POST',
+        stepUpToken: grant,
+      });
       setPushResult(`Backup capsule pushed! ID: ${resp.capsuleId} (${resp.sizeBytes} bytes)`);
     } catch (err) {
+      if (isCancelled(err)) return;
       setPushError(errorMessage(err, 'Failed to push backup payload to remote instance'));
     } finally {
       setPushLoading(false);
@@ -129,8 +144,18 @@ export const AdminBackup: React.FC = () => {
     setCollected([]);
     setCapsuleTaken(false);
     try {
-      setKit(await apiJson('/api/admin/backup/recovery-kit', parseRecoveryKit, { method: 'POST' }));
+      const grant = await requestGrant('Building a recovery kit produces the key shards that can restore this server.');
+      setKit(
+        await apiJson('/api/admin/backup/recovery-kit', parseRecoveryKit, {
+          method: 'POST',
+          stepUpToken: grant,
+        })
+      );
     } catch (err) {
+      if (isCancelled(err)) {
+        setKitLoading(false);
+        return;
+      }
       setKit(null);
       setKitError(errorMessage(err, 'Failed to build the recovery kit'));
     } finally {
@@ -138,17 +163,70 @@ export const AdminBackup: React.FC = () => {
     }
   };
 
-  const handleDownloadCapsule = () => {
-    if (!kit) return;
-    window.open(`/api/admin/backup/recovery-kit/${kit.kitId}/capsule`, '_blank');
-    setCapsuleTaken(true);
+  /**
+   * Downloads one artifact under a fresh step-up grant.
+   *
+   * A plain link cannot carry the grant header, so the response is fetched and saved from a
+   * blob instead. The grant is what a stolen session cannot produce, which is the only thing
+   * standing between a session cookie and the recovery quorum.
+   */
+  const downloadArtifact = async (path: string, filename: string, reason: string) => {
+    const grant = await requestGrant(reason);
+    // The step-up header doubles as the CSRF defence on these state-changing GETs: a
+    // cross-site caller cannot set a custom header without a preflight, and this server
+    // sends no CORS headers to permit one.
+    const res = await fetch(path, {
+      credentials: 'same-origin',
+      headers: { 'X-KySignOn-StepUp': grant },
+    });
+    if (!res.ok) {
+      const body: unknown = await res.json().catch(() => ({}));
+      const message =
+        typeof body === 'object' && body !== null && 'error' in body
+          ? String((body as { error: unknown }).error)
+          : `Download failed (HTTP ${res.status})`;
+      throw new Error(message);
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
-  // Each shard is served exactly once, so the button disables itself after collection.
-  const handleDownloadShard = (index: number) => {
+  const handleDownloadCapsule = async () => {
+    if (!kit) return;
+    setKitError('');
+    try {
+      await downloadArtifact(
+        `/api/admin/backup/recovery-kit/${kit.kitId}/capsule`,
+        `${kit.capsuleId}.kycap`,
+        'The capsule holds your entire encrypted directory, including the keys needed to read it.'
+      );
+      setCapsuleTaken(true);
+    } catch (err) {
+      if (isCancelled(err)) return;
+      setKitError(errorMessage(err, 'Failed to download the capsule'));
+    }
+  };
+
+  // Each shard is served exactly once, and no administrator may collect enough of them to
+  // rebuild the key alone, so a refusal here means a different custodian has to sign in.
+  const handleDownloadShard = async (index: number) => {
     if (!kit || collected.includes(index)) return;
-    window.open(`/api/admin/backup/recovery-kit/${kit.kitId}/shard/${index}`, '_blank');
-    setCollected((prev) => [...prev, index]);
+    setKitError('');
+    try {
+      await downloadArtifact(
+        `/api/admin/backup/recovery-kit/${kit.kitId}/shard/${index}`,
+        `kysignon-custodian-shard-${index}.html`,
+        `Shard #${index} is one custodian's piece of the key that decrypts the capsule.`
+      );
+      setCollected((prev) => [...prev, index]);
+    } catch (err) {
+      if (isCancelled(err)) return;
+      setKitError(errorMessage(err, `Failed to download shard #${index}`));
+    }
   };
 
   const handleDiscardKit = async () => {
@@ -165,6 +243,7 @@ export const AdminBackup: React.FC = () => {
 
   return (
     <div className="admin-view">
+      {stepUpPrompt}
       <div className="view-header">
         <div className="header-title-group">
           <div className="title-with-icon">
@@ -204,7 +283,9 @@ export const AdminBackup: React.FC = () => {
                 </span>
               </div>
               <p style={{ margin: 0, color: 'var(--ink)', fontSize: '0.875rem' }}>
-                Self-contained capsule encapsulation includes SQLite database, RSA discovery keys, and configuration manifest.
+                Capsule encapsulation includes the SQLite database, the RSA signing key, the
+                deployment encryption and session keys, and the configuration manifest &mdash; everything
+                a restored server needs to read its own data.
               </p>
             </div>
           </div>
@@ -231,7 +312,8 @@ export const AdminBackup: React.FC = () => {
                 <span>Automated Restore Drill</span>
               </h3>
               <p style={{ margin: '0.25rem 0 0 0', color: 'var(--ink)', fontSize: '0.8125rem' }}>
-                Extracts capsule into an ephemeral 0700 sandbox and tests DB integrity.
+                Extracts the capsule into an ephemeral 0700 sandbox, then proves the restore is
+              usable: MFA secrets decrypt and the signing key issues a verifiable token.
               </p>
             </div>
             <button type="button" className="primary-btn" onClick={runDrill} disabled={runningDrill} style={{ padding: '0.4rem 0.8rem', fontSize: '0.8125rem' }}>
@@ -337,19 +419,37 @@ export const AdminBackup: React.FC = () => {
                   <span>{capsuleTaken ? 'Download Capsule Again' : `Download Encrypted Capsule (${Math.round(kit.capsuleSize / 1024)} KB)`}</span>
                 </button>
 
-                <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)', marginBottom: '0.5rem' }}>
-                  Give each shard to a different custodian. Each is downloadable only once.
-                </div>
+                {kit.soleCustodian ? (
+                  <div style={{ background: 'var(--danger-soft)', border: '1px solid var(--danger)', color: 'var(--danger)', padding: '0.75rem', borderRadius: '6px', fontSize: '0.75rem', marginBottom: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+                    <AlertCircle size={16} style={{ flexShrink: 0 }} />
+                    <span>
+                      This server has one administrator, so you can collect every shard yourself
+                      &mdash; which means the {kit.threshold}-of-{kit.totalShares} custody split is
+                      not actually in effect, and each collection is recorded as such. Add a second
+                      administrator to restore it.
+                    </span>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '0.75rem', color: 'var(--ink-muted)', marginBottom: '0.5rem' }}>
+                    Each shard is downloadable once, and you may collect at most{' '}
+                    {kit.maxPerCustodian} of {kit.totalShares}. The rest must be collected by a
+                    different administrator signed in as themselves, so no one person ever holds
+                    enough to rebuild the key.
+                  </div>
+                )}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.75rem' }}>
                   {kit.shards.map((shard) => {
                     const taken = collected.includes(shard.index) || shard.collected;
+                    const heldHere = collected.length;
+                    const atCap = !kit.soleCustodian && heldHere >= kit.maxPerCustodian;
                     return (
                       <button
                         key={shard.index}
                         type="button"
                         className="secondary-btn"
                         onClick={() => handleDownloadShard(shard.index)}
-                        disabled={taken}
+                        disabled={taken || atCap}
+                        title={atCap ? 'Another administrator must collect this shard' : undefined}
                         style={{ width: '100%', justifyContent: 'space-between' }}
                       >
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -360,6 +460,10 @@ export const AdminBackup: React.FC = () => {
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', color: 'var(--success)' }}>
                             <CheckCircle2 size={14} />
                             <span>Collected</span>
+                          </span>
+                        ) : atCap ? (
+                          <span style={{ color: 'var(--ink-muted)', fontSize: '0.75rem' }}>
+                            Needs another custodian
                           </span>
                         ) : (
                           <Download size={14} />

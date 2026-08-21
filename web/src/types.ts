@@ -92,6 +92,8 @@ export interface BackupStatus {
 export interface RecoveryShard {
   index: number;
   collected: boolean;
+  /** True when this administrator is the one already holding the shard. */
+  heldBySelf: boolean;
 }
 
 /**
@@ -107,4 +109,8 @@ export interface RecoveryKit {
   capsuleSize: number;
   expiresAt: string;
   shards: RecoveryShard[];
+  /** The most shards one administrator may hold without being able to rebuild the key. */
+  maxPerCustodian: number;
+  /** True when this deployment has a single administrator, so custody cannot be split. */
+  soleCustodian: boolean;
 }

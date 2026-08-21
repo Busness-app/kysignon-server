@@ -51,6 +51,10 @@ func TestAdminBackupEndpoints(t *testing.T) {
 	adminCookie := &http.Cookie{Name: "kysignon_session", Value: adminSessionToken}
 	csrfCookie := &http.Cookie{Name: "kysignon_csrf", Value: csrfToken}
 
+	// Every secret-bearing backup route consumes a single-use step-up grant, so each request
+	// below mints its own the way the UI prompts for one per action.
+	stepUp := func() string { return mintStepUp(t, srv, adminSessionToken) }
+
 	t.Run("Status endpoint", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/admin/backup/status", nil)
 		req.AddCookie(adminCookie)
@@ -94,6 +98,7 @@ func TestAdminBackupEndpoints(t *testing.T) {
 		req.AddCookie(adminCookie)
 		req.AddCookie(csrfCookie)
 		req.Header.Set("X-CSRF-Token", csrfToken)
+		req.Header.Set(StepUpHeader, stepUp())
 		w := httptest.NewRecorder()
 		srv.httpServer.Handler.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
@@ -117,6 +122,7 @@ func TestAdminBackupEndpoints(t *testing.T) {
 		// absent is the failure the whole feature was built to avoid.
 		capReq := httptest.NewRequest("GET", "/api/admin/backup/recovery-kit/"+kit.KitID+"/capsule", nil)
 		capReq.AddCookie(adminCookie)
+		capReq.Header.Set(StepUpHeader, stepUp())
 		capW := httptest.NewRecorder()
 		srv.httpServer.Handler.ServeHTTP(capW, capReq)
 		if capW.Code != http.StatusOK {
@@ -138,6 +144,7 @@ func TestAdminBackupEndpoints(t *testing.T) {
 		for i := 1; i <= kit.TotalShares; i++ {
 			shardReq := httptest.NewRequest("GET", fmt.Sprintf("/api/admin/backup/recovery-kit/%s/shard/%d", kit.KitID, i), nil)
 			shardReq.AddCookie(adminCookie)
+			shardReq.Header.Set(StepUpHeader, stepUp())
 			shardW := httptest.NewRecorder()
 			srv.httpServer.Handler.ServeHTTP(shardW, shardReq)
 			if shardW.Code != http.StatusOK {
@@ -147,6 +154,7 @@ func TestAdminBackupEndpoints(t *testing.T) {
 
 			replay := httptest.NewRequest("GET", fmt.Sprintf("/api/admin/backup/recovery-kit/%s/shard/%d", kit.KitID, i), nil)
 			replay.AddCookie(adminCookie)
+			replay.Header.Set(StepUpHeader, stepUp())
 			replayW := httptest.NewRecorder()
 			srv.httpServer.Handler.ServeHTTP(replayW, replay)
 			if replayW.Code == http.StatusOK {
@@ -188,6 +196,7 @@ func TestAdminBackupEndpoints(t *testing.T) {
 			req.AddCookie(adminCookie)
 			req.AddCookie(csrfCookie)
 			req.Header.Set("X-CSRF-Token", csrfToken)
+			req.Header.Set(StepUpHeader, stepUp())
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			srv.httpServer.Handler.ServeHTTP(w, req)

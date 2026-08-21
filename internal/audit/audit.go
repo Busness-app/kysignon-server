@@ -2,8 +2,10 @@ package audit
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
@@ -14,6 +16,11 @@ type Logger struct {
 	store  *store.Store
 	stdout *log.Logger
 	stderr *log.Logger
+
+	mu           sync.Mutex
+	lastFailure  time.Time
+	failureCount uint64
+	lastError    string
 }
 
 func NewLogger(s *store.Store) *Logger {
@@ -36,14 +43,29 @@ type LogEntry struct {
 	UserAgent     string         `json:"userAgent,omitempty"`
 	Outcome       string         `json:"outcome"`
 	Details       map[string]any `json:"details,omitempty"`
+	// AuditPersistError is set when the durable write failed, which makes this console line
+	// the only remaining copy of the event.
+	AuditPersistError string `json:"auditPersistError,omitempty"`
 }
 
-func (l *Logger) Record(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome string, details map[string]any) {
+// Record writes one audit event to durable storage and to the process log.
+//
+// It returns the storage error rather than swallowing it. An identity authority that reports
+// "credential rotated" while the durable record of who rotated it silently vanished has no
+// audit trail, only the appearance of one; callers performing a security-sensitive mutation
+// are expected to check this and fail closed.
+func (l *Logger) Record(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome string, details map[string]any) error {
 	now := time.Now().UTC()
 	var detailsJSON string
 	if details != nil {
-		b, _ := json.Marshal(details)
-		detailsJSON = string(b)
+		b, err := json.Marshal(details)
+		if err != nil {
+			// Detail that will not serialize must not take the whole event with it, but it
+			// must not disappear unremarked either.
+			detailsJSON = fmt.Sprintf(`{"audit_detail_error":%q}`, err.Error())
+		} else {
+			detailsJSON = string(b)
+		}
 	}
 
 	event := &store.AuditEvent{
@@ -60,8 +82,10 @@ func (l *Logger) Record(action, actorID, actorUsername, targetID, targetType, ip
 		CreatedAt:     now,
 	}
 
+	var storeErr error
 	if l.store != nil {
-		_ = l.store.RecordAuditEvent(event)
+		storeErr = l.store.RecordAuditEvent(event)
+		l.noteResult(now, storeErr)
 	}
 
 	entry := LogEntry{
@@ -82,10 +106,45 @@ func (l *Logger) Record(action, actorID, actorUsername, targetID, targetType, ip
 		entry.Level = "WARN"
 	}
 
-	raw, _ := json.Marshal(entry)
-	if entry.Level == "WARN" {
-		l.stderr.Println(string(raw))
-	} else {
-		l.stdout.Println(string(raw))
+	if storeErr != nil {
+		// Escalate: the console line is now the only surviving copy of this event.
+		entry.Level = "ERROR"
+		entry.AuditPersistError = storeErr.Error()
 	}
+
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		// Losing the console copy too would make the failure itself invisible.
+		l.stderr.Printf(`{"level":"ERROR","action":%q,"outcome":%q,"auditLogError":%q}`, action, outcome, err.Error())
+		return storeErr
+	}
+	if entry.Level == "INFO" {
+		l.stdout.Println(string(raw))
+	} else {
+		l.stderr.Println(string(raw))
+	}
+	return storeErr
+}
+
+// noteResult tracks whether durable audit writes are succeeding, so readiness can report a
+// server that is still serving logins while quietly keeping no record of them.
+func (l *Logger) noteResult(now time.Time, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err == nil {
+		l.failureCount = 0
+		l.lastError = ""
+		return
+	}
+	l.failureCount++
+	l.lastFailure = now
+	l.lastError = err.Error()
+}
+
+// Health reports the state of durable audit persistence. degraded is true while the most
+// recent write failed.
+func (l *Logger) Health() (degraded bool, failures uint64, lastError string, lastFailure time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.failureCount > 0, l.failureCount, l.lastError, l.lastFailure
 }

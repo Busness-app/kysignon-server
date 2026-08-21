@@ -101,6 +101,17 @@ func VerifyHMACSHA256(key []byte, data []byte, expectedHex string) bool {
 	return hmac.Equal(h.Sum(nil), sig)
 }
 
+// DeriveKey produces a distinct 32-byte key for a named purpose from a master key.
+//
+// It is domain separation: a ciphertext encrypted for one label cannot be decrypted, or
+// silently relocated, under another. Use a stable label such as
+// "kysignon:setting:kyrecovery_token".
+func DeriveKey(master []byte, label string) []byte {
+	h := hmac.New(sha256.New, master)
+	h.Write([]byte(label))
+	return h.Sum(nil)
+}
+
 // EncryptAESGCM encrypts plaintext using AES-256-GCM with a prepended nonce.
 func EncryptAESGCM(key []byte, plaintext []byte) (string, error) {
 	if len(key) != 32 {

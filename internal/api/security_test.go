@@ -108,7 +108,7 @@ func TestLiveSessionStillMintsAuthorizationCode(t *testing.T) {
 
 // The limiter keys on client IP. If a peer can name its own IP, the limiter is decorative.
 func TestForwardedHeadersIgnoredFromUntrustedPeers(t *testing.T) {
-	mm := NewMiddlewareManager(nil, nil, testCSRFKey) // no trusted proxies, the shipped default
+	mm := NewMiddlewareManager(nil, nil, config.DefaultForwardedHeader, testCSRFKey) // no trusted proxies, the shipped default
 
 	req := httptest.NewRequest("POST", "/api/auth/login", nil)
 	req.RemoteAddr = "10.89.0.9:5555"
@@ -121,7 +121,7 @@ func TestForwardedHeadersIgnoredFromUntrustedPeers(t *testing.T) {
 }
 
 func TestForwardedHeadersHonouredFromTrustedProxy(t *testing.T) {
-	mm := NewMiddlewareManager(nil, []string{"10.89.0.1/32"}, testCSRFKey)
+	mm := NewMiddlewareManager(nil, []string{"10.89.0.1/32"}, config.DefaultForwardedHeader, testCSRFKey)
 
 	req := httptest.NewRequest("POST", "/api/auth/login", nil)
 	req.RemoteAddr = "10.89.0.1:5555"
@@ -133,14 +133,16 @@ func TestForwardedHeadersHonouredFromTrustedProxy(t *testing.T) {
 }
 
 func TestRateLimiterCannotBeBypassedByHeaderRotation(t *testing.T) {
-	mm := NewMiddlewareManager(nil, nil, testCSRFKey)
+	mm := NewMiddlewareManager(nil, nil, config.DefaultForwardedHeader, testCSRFKey)
 	passed := 0
 	h := mm.RateLimit("login", 3, 0)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { passed++ }))
 
 	for i := 0; i < 50; i++ {
 		req := httptest.NewRequest("POST", "/api/auth/login", nil)
 		req.RemoteAddr = "10.89.0.9:5555"
-		req.Header.Set("CF-Connecting-IP", uuid.New().String())
+		// Well-formed addresses, so the limiter is being asked to reject them on the
+		// forwarding rule rather than on a parse failure.
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", i%250+1))
 		h.ServeHTTP(httptest.NewRecorder(), req)
 	}
 	if passed > 3 {
@@ -148,23 +150,83 @@ func TestRateLimiterCannotBeBypassedByHeaderRotation(t *testing.T) {
 	}
 }
 
+// The deployment names one forwarding contract. Any other header is just a string a caller
+// sent, and believing it is how an attacker picks their own rate-limit bucket.
+func TestOnlyTheConfiguredForwardedHeaderIsHonoured(t *testing.T) {
+	mm := NewMiddlewareManager(nil, []string{"10.89.0.1/32"}, "X-Forwarded-For", testCSRFKey)
+
+	req := httptest.NewRequest("POST", "/api/auth/login", nil)
+	req.RemoteAddr = "10.89.0.1:5555"
+	req.Header.Set("X-Forwarded-For", "203.0.113.8")
+	req.Header.Set("CF-Connecting-IP", "198.51.100.1")
+	req.Header.Set("X-Real-IP", "198.51.100.2")
+
+	if got := mm.ClientIP(req); got != "203.0.113.8" {
+		t.Errorf("ClientIP = %q, want 203.0.113.8; a header the deployment does not use was believed", got)
+	}
+}
+
+func TestCloudflareDeploymentUsesItsOwnHeader(t *testing.T) {
+	mm := NewMiddlewareManager(nil, []string{"10.89.0.1/32"}, "CF-Connecting-IP", testCSRFKey)
+
+	req := httptest.NewRequest("POST", "/api/auth/login", nil)
+	req.RemoteAddr = "10.89.0.1:5555"
+	req.Header.Set("CF-Connecting-IP", "203.0.113.8")
+	req.Header.Set("X-Forwarded-For", "198.51.100.1")
+
+	if got := mm.ClientIP(req); got != "203.0.113.8" {
+		t.Errorf("ClientIP = %q, want the configured CF-Connecting-IP value", got)
+	}
+}
+
+// An unparseable value is not an identity. Keying a limiter or an audit row on an arbitrary
+// string lets a caller mint a fresh bucket per request.
+func TestMalformedForwardedValueFallsBackToPeer(t *testing.T) {
+	mm := NewMiddlewareManager(nil, []string{"10.89.0.1/32"}, config.DefaultForwardedHeader, testCSRFKey)
+
+	for _, bad := range []string{"not-an-ip", "", "203.0.113.8, garbage, 10.89.0.1", "<script>"} {
+		req := httptest.NewRequest("POST", "/api/auth/login", nil)
+		req.RemoteAddr = "10.89.0.1:5555"
+		req.Header.Set("X-Forwarded-For", bad)
+		if got := mm.ClientIP(req); got != "10.89.0.1" {
+			t.Errorf("ClientIP for %q = %q, want the peer 10.89.0.1", bad, got)
+		}
+	}
+}
+
+// With two proxies in front, the rightmost entries are ours and the client is the first hop
+// we did not write. Taking the leftmost entry instead would attribute the request to
+// whatever the client prepended.
+func TestForwardedChainSkipsTrustedHops(t *testing.T) {
+	mm := NewMiddlewareManager(nil, []string{"10.89.0.0/24"}, config.DefaultForwardedHeader, testCSRFKey)
+
+	req := httptest.NewRequest("POST", "/api/auth/login", nil)
+	req.RemoteAddr = "10.89.0.1:5555"
+	// The client claimed 198.51.100.9; the edge appended the address it actually saw.
+	req.Header.Set("X-Forwarded-For", "198.51.100.9, 203.0.113.8, 10.89.0.2")
+
+	if got := mm.ClientIP(req); got != "203.0.113.8" {
+		t.Errorf("ClientIP = %q, want 203.0.113.8; a client-supplied entry was attributed", got)
+	}
+}
+
 // An unbounded limiter map is a memory-exhaustion primitive against the whole suite:
 // each distinct client IP allocates a bucket that is never reclaimed.
 func TestRateLimiterEvictsIdleEntries(t *testing.T) {
-	mm := NewMiddlewareManager(nil, []string{"10.0.0.0/8"}, testCSRFKey)
+	mm := NewMiddlewareManager(nil, []string{"10.0.0.0/8"}, config.DefaultForwardedHeader, testCSRFKey)
 	clock := time.Now()
 	mm.now = func() time.Time { return clock }
 
 	h := mm.RateLimit("login", 5, 1)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	hit := func() {
+	hit := func(i int) {
 		req := httptest.NewRequest("POST", "/api/auth/login", nil)
 		req.RemoteAddr = "10.0.0.1:5555"
-		req.Header.Set("CF-Connecting-IP", uuid.New().String())
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.%d.%d", i/250, i%250+1))
 		h.ServeHTTP(httptest.NewRecorder(), req)
 	}
 
 	for i := 0; i < 500; i++ {
-		hit()
+		hit(i)
 	}
 	if got := mm.TrackedLimiters(); got < 500 {
 		t.Fatalf("expected 500 live buckets, got %d", got)
@@ -172,7 +234,7 @@ func TestRateLimiterEvictsIdleEntries(t *testing.T) {
 
 	// Long after every bucket has refilled, they carry no state worth keeping.
 	clock = clock.Add(30 * time.Minute)
-	hit()
+	hit(0)
 
 	if got := mm.TrackedLimiters(); got > 10 {
 		t.Errorf("limiter map still holds %d entries 30 minutes after last use; it must be reclaimed", got)
@@ -180,18 +242,62 @@ func TestRateLimiterEvictsIdleEntries(t *testing.T) {
 }
 
 func TestRateLimiterIsHardCapped(t *testing.T) {
-	mm := NewMiddlewareManager(nil, []string{"10.0.0.0/8"}, testCSRFKey)
+	mm := NewMiddlewareManager(nil, []string{"10.0.0.0/8"}, config.DefaultForwardedHeader, testCSRFKey)
 	mm.maxLimiters = 50
 	h := mm.RateLimit("login", 5, 0)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 
 	for i := 0; i < 500; i++ {
 		req := httptest.NewRequest("POST", "/api/auth/login", nil)
 		req.RemoteAddr = "10.0.0.1:5555"
-		req.Header.Set("CF-Connecting-IP", uuid.New().String())
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.%d.%d", i/250, i%250+1))
 		h.ServeHTTP(httptest.NewRecorder(), req)
 	}
 	if got := mm.TrackedLimiters(); got > 50 {
 		t.Errorf("limiter map grew to %d entries past its %d cap", got, 50)
+	}
+}
+
+// Reaching the cap must not reset the clients already being throttled. Evicting live buckets
+// under pressure means a botnet can hand its own members a fresh allowance on demand.
+func TestRateLimiterAtCapacityDoesNotResetActiveOffenders(t *testing.T) {
+	mm := NewMiddlewareManager(nil, []string{"10.0.0.0/8"}, config.DefaultForwardedHeader, testCSRFKey)
+	mm.maxLimiters = 20
+	clock := time.Now()
+	mm.now = func() time.Time { return clock }
+
+	passed := 0
+	h := mm.RateLimit("login", 2, 0)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { passed++ }))
+
+	offender := func() *http.Request {
+		req := httptest.NewRequest("POST", "/api/auth/login", nil)
+		req.RemoteAddr = "10.0.0.1:5555"
+		req.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.1")
+		return req
+	}
+
+	// Spend the offender's allowance.
+	for i := 0; i < 5; i++ {
+		h.ServeHTTP(httptest.NewRecorder(), offender())
+	}
+	if passed != 2 {
+		t.Fatalf("offender got %d requests through a 2-token bucket", passed)
+	}
+
+	// Now flood the map with distinct clients until it is at capacity.
+	for i := 1; i < 400; i++ {
+		req := httptest.NewRequest("POST", "/api/auth/login", nil)
+		req.RemoteAddr = "10.0.0.1:5555"
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.%d.%d, 10.0.0.1", i/250+1, i%250+1))
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	before := passed
+	for i := 0; i < 5; i++ {
+		h.ServeHTTP(httptest.NewRecorder(), offender())
+	}
+	if passed != before {
+		t.Errorf("the throttled client got %d more requests through after the map filled; "+
+			"its bucket was evicted and refilled", passed-before)
 	}
 }
 
@@ -388,7 +494,7 @@ func TestSessionCookieIsSecureWhenConfigured(t *testing.T) {
 
 // X-Forwarded-Proto from an untrusted peer must not decide cookie flags.
 func TestUntrustedForwardedProtoDoesNotSetSecure(t *testing.T) {
-	mm := NewMiddlewareManager(nil, nil, testCSRFKey)
+	mm := NewMiddlewareManager(nil, nil, config.DefaultForwardedHeader, testCSRFKey)
 	req := httptest.NewRequest("POST", "/api/auth/login", nil)
 	req.RemoteAddr = "203.0.113.5:1"
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -465,6 +571,7 @@ func TestDisablingUserRevokesOutstandingTokens(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/api/admin/users/"+victim.ID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", csrf)
+	req.Header.Set(StepUpHeader, mintStepUp(t, srv, adminCookie))
 	req.AddCookie(&http.Cookie{Name: "kysignon_session", Value: adminCookie})
 	req.AddCookie(&http.Cookie{Name: "kysignon_csrf", Value: csrf})
 	rr := httptest.NewRecorder()
@@ -562,8 +669,41 @@ func TestIssuedCSRFTokenIsAccepted(t *testing.T) {
 	}
 }
 
-// adminRequest performs an authenticated admin call with a correctly issued CSRF token.
+// mintStepUp issues a fresh single-use step-up grant for the session behind sessionToken,
+// standing in for the operator re-entering their password and authenticator code.
+func mintStepUp(t *testing.T, srv *Server, sessionToken string) string {
+	t.Helper()
+	sess, err := srv.store.GetSessionByTokenHash(crypto.HashSHA256(sessionToken), time.Hour)
+	if err != nil || sess == nil {
+		t.Fatalf("no live session behind the test cookie: %v", err)
+	}
+	raw, err := crypto.GenerateRandomHex(32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.CreateStepUpToken(&store.StepUpToken{
+		ID: uuid.New().String(), UserID: sess.UserID, SessionID: sess.ID,
+		TokenHash: crypto.HashSHA256(raw), ExpiresAt: time.Now().UTC().Add(StepUpTTL),
+	}); err != nil {
+		t.Fatalf("CreateStepUpToken: %v", err)
+	}
+	return raw
+}
+
+// adminRequest performs an authenticated admin call with a correctly issued CSRF token and a
+// fresh step-up grant, which is what the destructive admin routes now require.
 func adminRequest(t *testing.T, srv *Server, method, path, cookie, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return adminRequestWithStepUp(t, srv, method, path, cookie, body, mintStepUp(t, srv, cookie))
+}
+
+// adminRequestNoStepUp is the same call without a grant, for asserting the gate exists.
+func adminRequestNoStepUp(t *testing.T, srv *Server, method, path, cookie, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return adminRequestWithStepUp(t, srv, method, path, cookie, body, "")
+}
+
+func adminRequestWithStepUp(t *testing.T, srv *Server, method, path, cookie, body, stepUp string) *httptest.ResponseRecorder {
 	t.Helper()
 	csrf := srv.middleware.IssueCSRFToken(cookie)
 	var reader *strings.Reader
@@ -577,6 +717,9 @@ func adminRequest(t *testing.T, srv *Server, method, path, cookie, body string) 
 	req.Header.Set("X-CSRF-Token", csrf)
 	req.AddCookie(&http.Cookie{Name: "kysignon_session", Value: cookie})
 	req.AddCookie(&http.Cookie{Name: "kysignon_csrf", Value: csrf})
+	if stepUp != "" {
+		req.Header.Set(StepUpHeader, stepUp)
+	}
 	rr := httptest.NewRecorder()
 	srv.httpServer.Handler.ServeHTTP(rr, req)
 	return rr

@@ -55,74 +55,14 @@ type LogEntry struct {
 // audit trail, only the appearance of one; callers performing a security-sensitive mutation
 // are expected to check this and fail closed.
 func (l *Logger) Record(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome string, details map[string]any) error {
-	now := time.Now().UTC()
-	var detailsJSON string
-	if details != nil {
-		b, err := json.Marshal(details)
-		if err != nil {
-			// Detail that will not serialize must not take the whole event with it, but it
-			// must not disappear unremarked either.
-			detailsJSON = fmt.Sprintf(`{"audit_detail_error":%q}`, err.Error())
-		} else {
-			detailsJSON = string(b)
-		}
-	}
-
-	event := &store.AuditEvent{
-		ID:            uuid.New().String(),
-		ActorID:       actorID,
-		ActorUsername: actorUsername,
-		Action:        action,
-		TargetID:      targetID,
-		TargetType:    targetType,
-		IPAddress:     ip,
-		UserAgent:     userAgent,
-		Outcome:       outcome,
-		DetailsJSON:   detailsJSON,
-		CreatedAt:     now,
-	}
+	event := buildEvent(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome, details)
 
 	var storeErr error
 	if l.store != nil {
 		storeErr = l.store.RecordAuditEvent(event)
-		l.noteResult(now, storeErr)
+		l.noteResult(event.CreatedAt, storeErr)
 	}
-
-	entry := LogEntry{
-		Timestamp:     now.Format(time.RFC3339Nano),
-		Level:         "INFO",
-		Action:        action,
-		ActorID:       actorID,
-		ActorUsername: actorUsername,
-		TargetID:      targetID,
-		TargetType:    targetType,
-		IPAddress:     ip,
-		UserAgent:     userAgent,
-		Outcome:       outcome,
-		Details:       details,
-	}
-
-	if outcome == "failure" || outcome == "denied" {
-		entry.Level = "WARN"
-	}
-
-	if storeErr != nil {
-		// Escalate: the console line is now the only surviving copy of this event.
-		entry.Level = "ERROR"
-		entry.AuditPersistError = storeErr.Error()
-	}
-
-	raw, err := json.Marshal(entry)
-	if err != nil {
-		// Losing the console copy too would make the failure itself invisible.
-		l.stderr.Printf(`{"level":"ERROR","action":%q,"outcome":%q,"auditLogError":%q}`, action, outcome, err.Error())
-		return storeErr
-	}
-	if entry.Level == "INFO" {
-		l.stdout.Println(string(raw))
-	} else {
-		l.stderr.Println(string(raw))
-	}
+	l.emit(event, details, storeErr)
 	return storeErr
 }
 
@@ -147,4 +87,98 @@ func (l *Logger) Health() (degraded bool, failures uint64, lastError string, las
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.failureCount > 0, l.failureCount, l.lastError, l.lastFailure
+}
+
+// Pending is an audit event that has been built but not yet persisted, so a caller can
+// commit it inside the same transaction as the mutation it describes.
+//
+// Recording the event after the mutation commits cannot make the pair atomic; it only moves
+// which half is lost when the second write fails. A security mutation and the record of who
+// made it belong in one commit or neither.
+type Pending struct {
+	Row     *store.AuditEvent
+	details map[string]any
+	logger  *Logger
+}
+
+// Prepare builds an audit event for a mutation that will persist it in its own transaction.
+// Nothing is written until the caller hands Row to a transactional store method and then
+// calls Committed.
+func (l *Logger) Prepare(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome string, details map[string]any) *Pending {
+	return &Pending{Row: buildEvent(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome, details), details: details, logger: l}
+}
+
+// Committed emits the console copy of an event whose durable row committed with its
+// mutation. There is no persistence error to report: the row is already there.
+func (p *Pending) Committed() {
+	if p == nil || p.logger == nil {
+		return
+	}
+	p.logger.noteResult(p.Row.CreatedAt, nil)
+	p.logger.emit(p.Row, p.details, nil)
+}
+
+func buildEvent(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome string, details map[string]any) *store.AuditEvent {
+	var detailsJSON string
+	if details != nil {
+		b, err := json.Marshal(details)
+		if err != nil {
+			// Detail that will not serialize must not take the whole event with it, but it
+			// must not disappear unremarked either.
+			detailsJSON = fmt.Sprintf(`{"audit_detail_error":%q}`, err.Error())
+		} else {
+			detailsJSON = string(b)
+		}
+	}
+	return &store.AuditEvent{
+		ID:            uuid.New().String(),
+		ActorID:       actorID,
+		ActorUsername: actorUsername,
+		Action:        action,
+		TargetID:      targetID,
+		TargetType:    targetType,
+		IPAddress:     ip,
+		UserAgent:     userAgent,
+		Outcome:       outcome,
+		DetailsJSON:   detailsJSON,
+		CreatedAt:     time.Now().UTC(),
+	}
+}
+
+// emit writes the console copy of an event. storeErr is non-nil only on the non-atomic
+// path, where the console line may be the last surviving copy.
+func (l *Logger) emit(event *store.AuditEvent, details map[string]any, storeErr error) {
+	entry := LogEntry{
+		Timestamp:     event.CreatedAt.Format(time.RFC3339Nano),
+		Level:         "INFO",
+		Action:        event.Action,
+		ActorID:       event.ActorID,
+		ActorUsername: event.ActorUsername,
+		TargetID:      event.TargetID,
+		TargetType:    event.TargetType,
+		IPAddress:     event.IPAddress,
+		UserAgent:     event.UserAgent,
+		Outcome:       event.Outcome,
+		Details:       details,
+	}
+	if event.Outcome == "failure" || event.Outcome == "denied" {
+		entry.Level = "WARN"
+	}
+	if storeErr != nil {
+		// Escalate: the console line is now the only surviving copy of this event.
+		entry.Level = "ERROR"
+		entry.AuditPersistError = storeErr.Error()
+	}
+
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		// Losing the console copy too would make the failure itself invisible.
+		l.stderr.Printf(`{"level":"ERROR","action":%q,"outcome":%q,"auditLogError":%q}`, event.Action, event.Outcome, err.Error())
+		return
+	}
+	if entry.Level == "INFO" {
+		l.stdout.Println(string(raw))
+	} else {
+		l.stderr.Println(string(raw))
+	}
 }

@@ -198,9 +198,50 @@ func TestOneCustodianCannotCollectAQuorum(t *testing.T) {
 	if _, err := ks.TakeShard(kit.ID, 2, "admin-b", false); err != nil {
 		t.Fatalf("a second custodian was refused: %v", err)
 	}
-	// And a shard is still handed out only once.
-	if _, err := ks.TakeShard(kit.ID, 1, "admin-b", false); !errors.Is(err, ErrShardNotFound) {
-		t.Fatalf("a collected shard was served again: %v", err)
+	// A shard is still bound to exactly one custodian: a second principal is refused.
+	if _, err := ks.TakeShard(kit.ID, 1, "admin-b", false); !errors.Is(err, ErrShardHeld) {
+		t.Fatalf("a shard was handed to a second principal: %v", err)
+	}
+}
+
+// A failed download must not cost the operator the shard. Collection binds a shard to its
+// custodian; it does not destroy it, so the holder can retry until the kit expires.
+func TestShardRetryByItsHolderIsIdempotent(t *testing.T) {
+	ks := NewKitStore()
+	capsule, _, err := CreateCapsule("KySignOn", "1.0.0",
+		[]BackupFile{{Path: "data/kysignon.db", Data: []byte("db"), Mode: 0600}}, nil, nil, 2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kit, err := ks.Create(capsule)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := ks.TakeShard(kit.ID, 1, "admin-a", false)
+	if err != nil {
+		t.Fatalf("the first shard was refused: %v", err)
+	}
+	// The response never reached the browser and the administrator clicks again — as many
+	// times as it takes. Any bound on retries is a bound on how many failures it takes to
+	// lose the shard, so there must not be one.
+	for attempt := 2; attempt <= 5; attempt++ {
+		again, err := ks.TakeShard(kit.ID, 1, "admin-a", false)
+		if err != nil {
+			t.Fatalf("retry %d by the shard's holder was refused: %v", attempt, err)
+		}
+		if !bytes.Equal(first.Data, again.Data) || first.Index != again.Index {
+			t.Fatalf("retry %d returned different shard material", attempt)
+		}
+	}
+	// Retrying does not consume additional custody budget.
+	if _, err := ks.TakeShard(kit.ID, 2, "admin-a", false); !errors.Is(err, ErrCustodyQuorum) {
+		t.Fatalf("a retry inflated the holder's custody count: %v", err)
+	}
+	// And the material really is gone once the kit is discarded.
+	ks.Discard(kit.ID)
+	if _, err := ks.TakeShard(kit.ID, 1, "admin-a", false); !errors.Is(err, ErrKitNotFound) {
+		t.Fatalf("a discarded kit still served shards: %v", err)
 	}
 }
 

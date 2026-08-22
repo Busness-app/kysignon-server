@@ -46,6 +46,23 @@ function bool(source: Record<string, unknown>, key: string): boolean {
   return source[key] === true;
 }
 
+/**
+ * Reads a field that must be one of a fixed set of values.
+ *
+ * Folding an unrecognised value into a default is how a boundary check becomes a boundary
+ * fiction: a server that grows a `locked` or `pending` status, or an error body arriving
+ * where a user was expected, would be rendered as a healthy active account. An identity UI
+ * has to refuse to guess what a security state means.
+ */
+function oneOf<T extends string>(
+  source: Record<string, unknown>,
+  key: string,
+  allowed: readonly T[],
+): T {
+  const v = source[key];
+  return allowed.includes(v as T) ? (v as T) : fail(`field "${key}" to be one of ${allowed.join(', ')}`);
+}
+
 function arr(value: unknown, what: string): unknown[] {
   return Array.isArray(value) ? value : fail(what);
 }
@@ -63,14 +80,13 @@ function list<T>(value: unknown, parse: (item: unknown) => T): T[] {
 
 export function parseUser(value: unknown): User {
   const o = obj(value, 'a user object');
-  const role = o.role === 'admin' ? 'admin' : 'user';
   return {
     id: str(o, 'id'),
     username: str(o, 'username'),
     displayName: optStr(o, 'displayName') ?? str(o, 'username'),
     email: optStr(o, 'email') ?? '',
-    role,
-    status: o.status === 'disabled' ? 'disabled' : 'active',
+    role: oneOf(o, 'role', ['admin', 'user'] as const),
+    status: oneOf(o, 'status', ['active', 'disabled'] as const),
     mfaMethods: strArray(o.mfaMethods),
     createdAt: optStr(o, 'createdAt'),
   };
@@ -170,7 +186,6 @@ export function parsePairedSystems(value: unknown): PairedSystem[] {
   const o = obj(value, 'a systems response');
   return list(o.systems, (item) => {
     const s = obj(item, 'a paired system object');
-    const status = s.status === 'failing' || s.status === 'disabled' ? s.status : 'active';
     return {
       id: str(s, 'id'),
       name: str(s, 'name'),
@@ -178,7 +193,7 @@ export function parsePairedSystems(value: unknown): PairedSystem[] {
       description: optStr(s, 'description'),
       iconUrl: optStr(s, 'iconUrl'),
       callbackUrl: optStr(s, 'callbackUrl') ?? '',
-      status,
+      status: oneOf(s, 'status', ['active', 'failing', 'disabled'] as const),
       lastSyncedAt: optStr(s, 'lastSyncedAt'),
       createdAt: optStr(s, 'createdAt') ?? '',
     };
@@ -205,7 +220,7 @@ export function parseOAuthClients(value: unknown): OAuthClient[] {
     return {
       id: str(c, 'id'),
       clientName: optStr(c, 'clientName') ?? str(c, 'id'),
-      clientType: c.clientType === 'confidential' ? 'confidential' : 'public',
+      clientType: oneOf(c, 'clientType', ['confidential', 'public'] as const),
       redirectUrisJson: optStr(c, 'redirectUrisJson') ?? '[]',
       allowedScopesJson: optStr(c, 'allowedScopesJson') ?? '[]',
       launchUrl: optStr(c, 'launchUrl'),
@@ -229,8 +244,6 @@ export function parseAuditPage(value: unknown): AuditPage {
   const o = obj(value, 'an audit response');
   const events = list(o.auditEvents, (item) => {
     const e = obj(item, 'an audit event');
-    const outcome =
-      e.outcome === 'failure' || e.outcome === 'denied' ? e.outcome : 'success';
     return {
       id: str(e, 'id'),
       actorId: optStr(e, 'actorId'),
@@ -240,7 +253,7 @@ export function parseAuditPage(value: unknown): AuditPage {
       targetType: optStr(e, 'targetType'),
       ipAddress: optStr(e, 'ipAddress') ?? '',
       userAgent: optStr(e, 'userAgent') ?? '',
-      outcome,
+      outcome: oneOf(e, 'outcome', ['success', 'failure', 'denied'] as const),
       detailsJson: optStr(e, 'detailsJson'),
       createdAt: optStr(e, 'createdAt') ?? '',
     } satisfies AuditEvent;

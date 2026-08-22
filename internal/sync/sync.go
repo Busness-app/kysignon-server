@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -69,41 +70,41 @@ func (e *Engine) QueueAccountSyncEvent(userID, eventType string, userPayload any
 
 // CreateUserAndQueueSyncEvents atomically records a new source-of-truth account and every
 // downstream delivery obligation.
-func (e *Engine) CreateUserAndQueueSyncEvents(user *store.User, userPayload any) error {
+func (e *Engine) CreateUserAndQueueSyncEvents(user *store.User, userPayload any, audit *store.AuditEvent) error {
 	events, err := e.newAccountSyncEvents(user.ID, "user.created", userPayload)
 	if err != nil {
 		return err
 	}
-	return e.store.CreateUserWithSyncEvents(user, events)
+	return e.store.CreateUserWithSyncEvents(user, events, audit)
 }
 
 // UpdateUserAndQueueSyncEvents atomically records an account mutation and its outbox events.
-func (e *Engine) UpdateUserAndQueueSyncEvents(user *store.User, revokeAccess bool, userPayload any) error {
+func (e *Engine) UpdateUserAndQueueSyncEvents(user *store.User, revokeAccess bool, userPayload any, audit *store.AuditEvent) error {
 	events, err := e.newAccountSyncEvents(user.ID, "user.updated", userPayload)
 	if err != nil {
 		return err
 	}
-	return e.store.UpdateUserWithSyncEvents(user, revokeAccess, events)
+	return e.store.UpdateUserWithSyncEvents(user, revokeAccess, events, audit)
 }
 
 // DeleteUserAndQueueSyncEvents removes a user and queues its deletion atomically, so a
 // downstream product cannot retain an account when the source deletion succeeds.
 // ResetUserMFAAndRevoke atomically strips every factor, revokes everything those factors
 // were protecting, and queues the downstream notification.
-func (e *Engine) ResetUserMFAAndRevoke(userID string, userPayload any) error {
+func (e *Engine) ResetUserMFAAndRevoke(userID string, userPayload any, audit *store.AuditEvent) error {
 	events, err := e.newAccountSyncEvents(userID, "user.mfa_reset", userPayload)
 	if err != nil {
 		return err
 	}
-	return e.store.ResetUserMFA(userID, events)
+	return e.store.ResetUserMFA(userID, events, audit)
 }
 
-func (e *Engine) DeleteUserAndQueueSyncEvents(userID string, userPayload any) error {
+func (e *Engine) DeleteUserAndQueueSyncEvents(userID string, userPayload any, audit *store.AuditEvent) error {
 	events, err := e.newAccountSyncEvents(userID, "user.deleted", userPayload)
 	if err != nil {
 		return err
 	}
-	return e.store.DeleteUserWithSyncEvents(userID, events)
+	return e.store.DeleteUserWithSyncEvents(userID, events, audit)
 }
 
 func (e *Engine) newAccountSyncEvents(userID, eventType string, userPayload any) ([]store.AccountSyncEvent, error) {
@@ -409,46 +410,72 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 		// A system that has been deleted can never receive this event. Anything else stays
 		// queued: "nobody is listening yet" is not the same as "delivered".
 		if sys == nil {
-			_ = e.store.UpdateSyncEventStatus(ev.ID, "failed", "paired system no longer exists", ev.Attempts, nil)
+			if err := e.store.UpdateSyncEventStatus(ev.ID, "failed", "paired system no longer exists", ev.Attempts, nil); err != nil {
+				return err
+			}
 			continue
 		}
 		if sys.Status == "disabled" {
-			_ = e.store.ReleaseSyncEventLease(ev.ID)
+			if err := e.store.ReleaseSyncEventLease(ev.ID); err != nil {
+				return err
+			}
 			continue
 		}
 		secret, ok := secrets[ev.SystemID]
 		if !ok {
 			next := time.Now().UTC().Add(retryDelay(ev.Attempts))
-			_ = e.store.UpdateSyncEventStatus(ev.ID, "pending", "signing secret unavailable", ev.Attempts+1, &next)
-			continue
-		}
-
-		scimUser, _ := FormatUserAsSCIM(json.RawMessage(ev.PayloadJSON))
-		var payloadBytes []byte
-		if scimUser != nil {
-			payloadBytes, err = json.Marshal(scimUser)
-		} else {
-			payloadBytes = []byte(ev.PayloadJSON)
-		}
-		if err != nil {
-			_ = e.store.UpdateSyncEventStatus(ev.ID, "failed", err.Error(), ev.Attempts+1, nil)
-			continue
-		}
-
-		if err := e.deliver(ctx, sys, secret, ev.ID, ev.EventType, ev.UserID, payloadBytes); err != nil {
-			attempts := ev.Attempts + 1
-			_ = e.store.UpdatePairedSystemStatus(sys.ID, "failing")
-			if attempts >= 5 {
-				_ = e.store.UpdateSyncEventStatus(ev.ID, "failed", err.Error(), attempts, nil)
-			} else {
-				next := time.Now().UTC().Add(retryDelay(ev.Attempts))
-				_ = e.store.UpdateSyncEventStatus(ev.ID, "pending", err.Error(), attempts, &next)
+			if err := e.store.UpdateSyncEventStatus(ev.ID, "pending", "signing secret unavailable", ev.Attempts+1, &next); err != nil {
+				return err
 			}
 			continue
 		}
 
-		_ = e.store.UpdatePairedSystemStatus(sys.ID, "active")
-		_ = e.store.UpdateSyncEventStatus(ev.ID, "delivered", "", ev.Attempts+1, nil)
+		scimUser, _ := FormatUserAsSCIM(json.RawMessage(ev.PayloadJSON))
+		// Scoped to this event on purpose. Assigning to the function-scoped err let a
+		// marshal failure on one event survive into the next iteration and fail an event
+		// that was perfectly deliverable.
+		var payloadBytes []byte
+		var merr error
+		if scimUser != nil {
+			payloadBytes, merr = json.Marshal(scimUser)
+		} else {
+			payloadBytes = []byte(ev.PayloadJSON)
+		}
+		if merr != nil {
+			if serr := e.store.UpdateSyncEventStatus(ev.ID, "failed", merr.Error(), ev.Attempts+1, nil); serr != nil {
+				return serr
+			}
+			continue
+		}
+
+		if derr := e.deliver(ctx, sys, secret, ev.ID, ev.EventType, ev.UserID, payloadBytes); derr != nil {
+			attempts := ev.Attempts + 1
+			if serr := e.store.UpdatePairedSystemStatus(sys.ID, "failing"); serr != nil {
+				return serr
+			}
+			if attempts >= 5 {
+				if serr := e.store.UpdateSyncEventStatus(ev.ID, "failed", derr.Error(), attempts, nil); serr != nil {
+					return serr
+				}
+			} else {
+				next := time.Now().UTC().Add(retryDelay(ev.Attempts))
+				if serr := e.store.UpdateSyncEventStatus(ev.ID, "pending", derr.Error(), attempts, &next); serr != nil {
+					return serr
+				}
+			}
+			continue
+		}
+
+		// The remote accepted the event but the local record of that fact has not landed
+		// yet. If this write fails the lease eventually expires and the event is delivered
+		// again, so delivery is at-least-once and recipients must be idempotent; surfacing
+		// the error is what lets the operator see that happening.
+		if serr := e.store.UpdatePairedSystemStatus(sys.ID, "active"); serr != nil {
+			return serr
+		}
+		if serr := e.store.UpdateSyncEventStatus(ev.ID, "delivered", "", ev.Attempts+1, nil); serr != nil {
+			return serr
+		}
 	}
 
 	return nil
@@ -586,7 +613,12 @@ func (e *Engine) StartWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = e.DispatchPendingEvents(ctx)
+			if err := e.DispatchPendingEvents(ctx); err != nil && ctx.Err() == nil {
+				// Delivery failures are recorded per event; this is the local persistence
+				// layer failing, which leaves events leased and silently un-retried until
+				// the lease expires. It has to be visible somewhere.
+				log.Printf(`{"level":"ERROR","component":"sync","error":%q}`, err.Error())
+			}
 		}
 	}
 }

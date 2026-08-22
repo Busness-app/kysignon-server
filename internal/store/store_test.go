@@ -63,7 +63,7 @@ func TestDeleteUserWithSyncEventsMigratesLegacyForeignKey(t *testing.T) {
 	if err := s.DeleteUserWithSyncEvents("deleted-user", []AccountSyncEvent{{
 		ID: "deletion-event", UserID: "deleted-user", SystemID: "system",
 		EventType: "user.deleted", PayloadJSON: `{"id":"deleted-user"}`, Status: "pending",
-	}}); err != nil {
+	}}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -94,7 +94,7 @@ func TestUpdateUserWithSyncEventsPreservesLastAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	u.Role = "user"
-	if err := s.UpdateUserWithSyncEvents(u, false, nil); !errors.Is(err, ErrLastActiveAdmin) {
+	if err := s.UpdateUserWithSyncEvents(u, false, nil, nil); !errors.Is(err, ErrLastActiveAdmin) {
 		t.Fatalf("demoting final admin error = %v", err)
 	}
 }

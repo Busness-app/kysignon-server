@@ -110,7 +110,7 @@ func calculateTOTPCode(secret []byte, counter int64) string {
 }
 
 // SaveUserTOTP encrypts and saves a user's TOTP secret.
-func (e *Engine) SaveUserTOTP(userID, secretBase32 string) error {
+func (e *Engine) SaveUserTOTP(userID, secretBase32 string, audit *store.AuditEvent) error {
 	encrypted, err := crypto.EncryptAESGCM(e.encryptionKey, []byte(secretBase32))
 	if err != nil {
 		return fmt.Errorf("failed to encrypt TOTP secret: %w", err)
@@ -124,7 +124,7 @@ func (e *Engine) SaveUserTOTP(userID, secretBase32 string) error {
 		IsPrimary:       true,
 	}
 
-	return e.store.SetMFAMethod(method)
+	return e.store.SetMFAMethod(method, audit)
 }
 
 // VerifyUserTOTP verifies a TOTP code for an enrolled user.
@@ -153,7 +153,7 @@ func (e *Engine) VerifyUserTOTP(userID, code string) (bool, error) {
 }
 
 // GenerateRecoveryCodes creates 8 one-time recovery codes for a user.
-func (e *Engine) GenerateRecoveryCodes(userID string) ([]string, error) {
+func (e *Engine) GenerateRecoveryCodes(userID string, audit *store.AuditEvent) ([]string, error) {
 	var plainCodes []string
 	var recoveryCodes []store.RecoveryCode
 
@@ -175,7 +175,7 @@ func (e *Engine) GenerateRecoveryCodes(userID string) ([]string, error) {
 		})
 	}
 
-	if err := e.store.ReplaceRecoveryCodes(userID, recoveryCodes); err != nil {
+	if err := e.store.ReplaceRecoveryCodes(userID, recoveryCodes, audit); err != nil {
 		return nil, err
 	}
 

@@ -56,7 +56,7 @@ func TestRestoreFromExportedKitOnly(t *testing.T) {
 	if err := dbStore.SetMFAMethod(&store.MFAMethod{
 		ID: uuid.New().String(), UserID: admin.ID, MethodType: "totp",
 		EncryptedSecret: encryptedSecret, IsPrimary: true,
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 

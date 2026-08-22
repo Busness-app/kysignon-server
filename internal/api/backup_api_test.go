@@ -139,7 +139,10 @@ func TestAdminBackupEndpoints(t *testing.T) {
 			t.Fatalf("the capsule download also carried %d key shards", len(parsed.Shares))
 		}
 
-		// Each shard is its own download, and each is handed out exactly once.
+		// Each shard is its own download, bound to the custodian who collected it. A repeat
+		// fetch by that same holder must succeed: a failed response — audit write, full
+		// disk, dropped connection — cannot be allowed to destroy the only copy of a
+		// recovery shard.
 		var cards []string
 		for i := 1; i <= kit.TotalShares; i++ {
 			shardReq := httptest.NewRequest("GET", fmt.Sprintf("/api/admin/backup/recovery-kit/%s/shard/%d", kit.KitID, i), nil)
@@ -157,8 +160,11 @@ func TestAdminBackupEndpoints(t *testing.T) {
 			replay.Header.Set(StepUpHeader, stepUp())
 			replayW := httptest.NewRecorder()
 			srv.httpServer.Handler.ServeHTTP(replayW, replay)
-			if replayW.Code == http.StatusOK {
-				t.Errorf("shard %d was handed out a second time", i)
+			if replayW.Code != http.StatusOK {
+				t.Errorf("the holder of shard %d could not retry a failed download: %d %s", i, replayW.Code, replayW.Body.String())
+			}
+			if replayW.Body.String() != shardW.Body.String() {
+				t.Errorf("the retry of shard %d returned different material", i)
 			}
 		}
 

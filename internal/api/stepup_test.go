@@ -245,10 +245,10 @@ func TestResetUserMFAIsAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.srv.mfaEngine.SaveUserTOTP(f.user.ID, secret); err != nil {
+	if err := f.srv.mfaEngine.SaveUserTOTP(f.user.ID, secret, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.srv.mfaEngine.GenerateRecoveryCodes(f.user.ID); err != nil {
+	if _, err := f.srv.mfaEngine.GenerateRecoveryCodes(f.user.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	jti := uuid.New().String()
@@ -261,7 +261,7 @@ func TestResetUserMFAIsAtomic(t *testing.T) {
 
 	if err := f.srv.syncEngine.ResetUserMFAAndRevoke(f.user.ID, map[string]any{
 		"id": f.user.ID, "username": f.user.Username,
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("ResetUserMFAAndRevoke: %v", err)
 	}
 

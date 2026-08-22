@@ -70,7 +70,7 @@ func TestTOTPEnrollmentAndVerification(t *testing.T) {
 		t.Fatalf("unexpected secret or uri: %s, %s", secret, uri)
 	}
 
-	if err := engine.SaveUserTOTP(user.ID, secret); err != nil {
+	if err := engine.SaveUserTOTP(user.ID, secret, nil); err != nil {
 		t.Fatalf("SaveUserTOTP failed: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestRecoveryCodesGenerationAndSingleUse(t *testing.T) {
 	engine, _, user, cleanup := setupTestMFAEngine(t)
 	defer cleanup()
 
-	codes, err := engine.GenerateRecoveryCodes(user.ID)
+	codes, err := engine.GenerateRecoveryCodes(user.ID, nil)
 	if err != nil {
 		t.Fatalf("GenerateRecoveryCodes failed: %v", err)
 	}

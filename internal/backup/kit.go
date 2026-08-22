@@ -20,7 +20,8 @@ const KitTTL = 30 * time.Minute
 
 var (
 	ErrKitNotFound   = errors.New("recovery kit not found or expired")
-	ErrShardNotFound = errors.New("shard not found or already collected")
+	ErrShardNotFound = errors.New("shard not found")
+	ErrShardHeld     = errors.New("this shard was already released to a different custodian; it cannot be handed to a second principal")
 	ErrCustodyQuorum = errors.New("this administrator already holds the most shards one custodian may hold; a different administrator must collect the rest")
 	ErrNoCustodian   = errors.New("a shard cannot be released without an identified custodian")
 )
@@ -75,10 +76,10 @@ func ParseShardHex(index int, encoded string) (Share, error) {
 }
 
 // Kit is a pending recovery-kit export. The encrypted capsule and each custodian shard are
-// separate artifacts collected by separate authenticated requests, and each shard is
-// forgotten once collected. A single download can therefore never contain a reconstruction
-// quorum, which is the property the 2-of-3 custody model claims but a combined document
-// destroys.
+// separate artifacts collected by separate authenticated requests, and each shard is bound
+// to the one custodian who collected it. A single download can therefore never contain a
+// reconstruction quorum, which is the property the 2-of-3 custody model claims but a
+// combined document destroys.
 type Kit struct {
 	ID        string
 	Manifest  Manifest
@@ -192,7 +193,18 @@ func (ks *KitStore) Get(id string) (*Kit, error) {
 	return kit, nil
 }
 
-// TakeShard hands out one shard exactly once, to one identified custodian, and forgets it.
+// TakeShard binds one shard to one identified custodian and returns it. The same custodian
+// may fetch the same shard again; a different principal never can.
+//
+// Custody separation is a property of *who holds a shard*, not of how many times it was
+// downloaded. Deleting the bytes on the first successful hand-off bought nothing — the
+// holder check below already prevents a second principal from taking it — and cost
+// everything: an audit-write failure, a full disk, or a client that disconnected mid-
+// response destroyed the only copy of the shard and left the kit unrecoverable. Re-issuing
+// to the custodian who already holds it hands them nothing they do not already have, so the
+// download path is idempotent and no failure on it can destroy recovery material.
+//
+// Shards still leave memory only via Discard or TTL expiry, and are never written to disk.
 //
 // A custodian may hold at most threshold-1 shards, so no single principal can ever assemble
 // a quorum: the "2-of-3" claim is otherwise satisfied by one administrator clicking three
@@ -214,10 +226,17 @@ func (ks *KitStore) TakeShard(id string, index int, custodian string, allowSoleC
 	if !ok {
 		return Share{}, ErrShardNotFound
 	}
+	if holder, taken := kit.holders[index]; taken {
+		if holder != custodian {
+			return Share{}, ErrShardHeld
+		}
+		// A repeat fetch by the existing holder: already counted against their cap, and it
+		// discloses nothing new.
+		return Share{Index: index, Data: data}, nil
+	}
 	if !allowSoleCustodian && kit.HeldBy(custodian) >= kit.MaxPerCustodian() {
 		return Share{}, ErrCustodyQuorum
 	}
-	delete(kit.shards, index)
 	kit.collected[index] = true
 	kit.holders[index] = custodian
 	return Share{Index: index, Data: data}, nil

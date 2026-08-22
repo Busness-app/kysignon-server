@@ -70,7 +70,7 @@ func newPushFixture(t *testing.T) (*pushFixture, func()) {
 	}
 	if err := dbStore.SetMFAMethod(&store.MFAMethod{
 		ID: uuid.New().String(), UserID: user.ID, MethodType: "push",
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("SetMFAMethod failed: %v", err)
 	}
 

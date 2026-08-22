@@ -102,15 +102,15 @@ func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Status:       req.Status,
 	}
 
-	if err := h.syncEngine.CreateUserAndQueueSyncEvents(user, userSyncPayload(user)); err != nil {
-		http.Error(w, `{"error":"user_exists","error_description":"Username or email already exists"}`, http.StatusConflict)
-		return
-	}
-
-	h.audit.Record("admin.user_created", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+	created := h.audit.Prepare("admin.user_created", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"username": user.Username,
 		"role":     user.Role,
 	})
+	if err := h.syncEngine.CreateUserAndQueueSyncEvents(user, userSyncPayload(user), created.Row); err != nil {
+		http.Error(w, `{"error":"user_exists","error_description":"Username or email already exists"}`, http.StatusConflict)
+		return
+	}
+	created.Committed()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -149,6 +149,7 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	if req.Email = strings.TrimSpace(req.Email); req.Email != "" {
 		user.Email = req.Email
 	}
+	wasAdmin := user.Role == "admin"
 	if req.Role == "user" || req.Role == "admin" {
 		user.Role = req.Role
 	}
@@ -167,8 +168,20 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		user.PasswordHash = passHash
 	}
 
-	revokeAccess := passwordChanged || (wasActive && user.Status == "disabled")
-	if err := h.syncEngine.UpdateUserAndQueueSyncEvents(user, revokeAccess, userSyncPayload(user)); err != nil {
+	// Demotion is a revocation. An issued ID token carries "role":"admin" as a signed claim,
+	// so a relying party keeps granting administrator access for the life of that token
+	// unless the tokens behind it are revoked along with the row.
+	demoted := wasAdmin && user.Role != "admin"
+	revokeAccess := passwordChanged || (wasActive && user.Status == "disabled") || demoted
+
+	updated := h.audit.Prepare("admin.user_updated", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+		"username":      user.Username,
+		"role":          user.Role,
+		"status":        user.Status,
+		"demoted":       demoted,
+		"accessRevoked": revokeAccess,
+	})
+	if err := h.syncEngine.UpdateUserAndQueueSyncEvents(user, revokeAccess, userSyncPayload(user), updated.Row); err != nil {
 		if errors.Is(err, store.ErrLastActiveAdmin) {
 			http.Error(w, `{"error":"cannot_remove_last_admin"}`, http.StatusBadRequest)
 		} else {
@@ -183,9 +196,7 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.audit.Record("admin.user_updated", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
-		"username": user.Username,
-	})
+	updated.Committed()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -209,10 +220,13 @@ func (h *AdminHandler) ResetUserMFA(w http.ResponseWriter, r *http.Request) {
 	// event all commit together or not at all. Discarding these errors and reporting success
 	// anyway told the admin — and the audit trail — that an account was locked down while the
 	// attacker was still holding a live session.
+	reset := h.audit.Prepare("admin.user_mfa_reset", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+		"username": user.Username,
+	})
 	if err := h.syncEngine.ResetUserMFAAndRevoke(user.ID, map[string]any{
 		"id":       user.ID,
 		"username": user.Username,
-	}); err != nil {
+	}, reset.Row); err != nil {
 		log.Printf("MFA reset for user %s failed: %v", user.ID, err)
 		h.audit.Record("admin.user_mfa_reset", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
 			"username": user.Username,
@@ -222,9 +236,7 @@ func (h *AdminHandler) ResetUserMFA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.audit.Record("admin.user_mfa_reset", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
-		"username": user.Username,
-	})
+	reset.Committed()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -262,10 +274,13 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	deleted := h.audit.Prepare("admin.user_deleted", admin.ID, admin.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+		"username": user.Username,
+	})
 	if err := h.syncEngine.DeleteUserAndQueueSyncEvents(userID, map[string]any{
 		"id":       userID,
 		"username": user.Username,
-	}); err != nil {
+	}, deleted.Row); err != nil {
 		if errors.Is(err, store.ErrLastActiveAdmin) {
 			http.Error(w, `{"error":"cannot_delete_last_admin","error_description":"Cannot delete the only active administrator"}`, http.StatusBadRequest)
 		} else {
@@ -274,9 +289,7 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.audit.Record("admin.user_deleted", admin.ID, admin.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
-		"username": user.Username,
-	})
+	deleted.Committed()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -346,12 +359,18 @@ func (h *AdminHandler) DeletePairedSystem(w http.ResponseWriter, r *http.Request
 	admin := GetUserFromContext(r.Context())
 	systemID := r.PathValue("id")
 
-	if err := h.store.DeletePairedSystem(systemID); err != nil {
+	deleted := h.audit.Prepare("admin.system_deleted", admin.ID, admin.Username, systemID, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	removed, err := h.store.DeletePairedSystem(systemID, deleted.Row)
+	if err != nil {
+		log.Printf("paired system %s deletion failed: %v", systemID, err)
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
-
-	h.audit.Record("admin.system_deleted", admin.ID, admin.Username, systemID, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	if !removed {
+		http.Error(w, `{"error":"system_not_found"}`, http.StatusNotFound)
+		return
+	}
+	deleted.Committed()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -531,6 +550,7 @@ func (h *AdminHandler) UpdateOAuthClient(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"client_not_found"}`, http.StatusNotFound)
 		return
 	}
+	wasEnabled, wasConfidential := client.Enabled, client.ClientType == "confidential"
 
 	if req.ClientName != nil && strings.TrimSpace(*req.ClientName) != "" {
 		client.ClientName = strings.TrimSpace(*req.ClientName)
@@ -614,18 +634,26 @@ func (h *AdminHandler) UpdateOAuthClient(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if err := h.store.UpdateOAuthClient(client); err != nil {
-		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
-		return
-	}
+	// Disabling a client, downgrading it to public, or rotating its secret each withdraw the
+	// authority its outstanding tokens were issued under. Leaving those tokens valid turns
+	// every one of these into a rename.
+	revokeTokens := rotate ||
+		(wasEnabled && !client.Enabled) ||
+		(wasConfidential && client.ClientType != "confidential")
 
-	h.audit.Record("admin.oauth_client_updated", admin.ID, admin.Username, client.ID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
+	updated := h.audit.Prepare("admin.oauth_client_updated", admin.ID, admin.Username, client.ID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"clientType":     client.ClientType,
 		"secretRotated":  rotate,
 		"redirectsSet":   req.RedirectURIs != nil,
 		"scopesSet":      req.AllowedScopes != nil,
 		"enabledChanged": req.Enabled != nil,
+		"tokensRevoked":  revokeTokens,
 	})
+	if err := h.store.UpdateOAuthClientWithAudit(client, revokeTokens, updated.Row); err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	updated.Committed()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -640,8 +668,21 @@ func (h *AdminHandler) DeleteOAuthClient(w http.ResponseWriter, r *http.Request)
 	admin := GetUserFromContext(r.Context())
 	clientID := r.PathValue("id")
 
-	_ = h.store.DeleteOAuthClient(clientID)
-	h.audit.Record("admin.oauth_client_deleted", admin.ID, admin.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	// The delete, the revocation of every token this client issued, and the record of who
+	// did it are one commit. Reporting "deleted" for a client that is still registered and
+	// still serving is the failure mode that matters here: the admin stops looking.
+	deleted := h.audit.Prepare("admin.oauth_client_deleted", admin.ID, admin.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	removed, err := h.store.DeleteOAuthClient(clientID, deleted.Row)
+	if err != nil {
+		log.Printf("oauth client %s deletion failed: %v", clientID, err)
+		http.Error(w, `{"error":"internal_error","error_description":"Deletion failed; the client is still registered"}`, http.StatusInternalServerError)
+		return
+	}
+	if !removed {
+		http.Error(w, `{"error":"client_not_found"}`, http.StatusNotFound)
+		return
+	}
+	deleted.Committed()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -739,8 +780,18 @@ func (h *AdminHandler) DeleteApplication(w http.ResponseWriter, r *http.Request)
 	admin := GetUserFromContext(r.Context())
 	appID := r.PathValue("id")
 
-	_ = h.store.DeleteApplication(appID)
-	h.audit.Record("admin.application_deleted", admin.ID, admin.Username, appID, "application", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	deleted := h.audit.Prepare("admin.application_deleted", admin.ID, admin.Username, appID, "application", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	removed, err := h.store.DeleteApplication(appID, deleted.Row)
+	if err != nil {
+		log.Printf("application %s deletion failed: %v", appID, err)
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if !removed {
+		http.Error(w, `{"error":"application_not_found"}`, http.StatusNotFound)
+		return
+	}
+	deleted.Committed()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})

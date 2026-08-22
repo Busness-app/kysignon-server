@@ -175,6 +175,11 @@ func TestSecondAdminIsRequiredToCollectAQuorum(t *testing.T) {
 	if got := shard(cookieB, 2); got.Code != http.StatusOK {
 		t.Fatalf("the second custodian was refused: %d %s", got.Code, got.Body.String())
 	}
+	// A shard belongs to the one custodian who collected it. Retrying is for its holder;
+	// it is never a way for a second principal to accumulate a quorum.
+	if got := shard(cookieB, 1); got.Code != http.StatusForbidden {
+		t.Fatalf("a shard held by another administrator was served: %d %s", got.Code, got.Body.String())
+	}
 }
 
 // A single-admin homelab still needs a recovery kit; the alternative is no backup at all.

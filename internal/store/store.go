@@ -462,7 +462,7 @@ func (s *Store) CreateUser(u *User) error {
 }
 
 // CreateUserWithSyncEvents is the transactional outbox path for directory creation.
-func (s *Store) CreateUserWithSyncEvents(u *User, events []AccountSyncEvent) error {
+func (s *Store) CreateUserWithSyncEvents(u *User, events []AccountSyncEvent, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -474,6 +474,9 @@ func (s *Store) CreateUserWithSyncEvents(u *User, events []AccountSyncEvent) err
 		return err
 	}
 	if err := insertSyncEvents(tx, events, now); err != nil {
+		return err
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -537,7 +540,7 @@ func (s *Store) UpdateUser(u *User) error {
 
 // UpdateUserWithSyncEvents preserves the active-admin invariant and writes its outbox event
 // in the same transaction as the account change.
-func (s *Store) UpdateUserWithSyncEvents(u *User, revokeAccess bool, events []AccountSyncEvent) error {
+func (s *Store) UpdateUserWithSyncEvents(u *User, revokeAccess bool, events []AccountSyncEvent, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -572,6 +575,9 @@ func (s *Store) UpdateUserWithSyncEvents(u *User, revokeAccess bool, events []Ac
 	if err := insertSyncEvents(tx, events, now); err != nil {
 		return err
 	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -601,7 +607,7 @@ func (s *Store) DeleteUser(userID string) error {
 // DeleteUserWithSyncEvents atomically removes a user and queues its deletion for every
 // active paired system. Older queued user events are discarded so a downstream system
 // cannot receive stale updates after the deletion.
-func (s *Store) DeleteUserWithSyncEvents(userID string, events []AccountSyncEvent) error {
+func (s *Store) DeleteUserWithSyncEvents(userID string, events []AccountSyncEvent, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -635,6 +641,9 @@ func (s *Store) DeleteUserWithSyncEvents(userID string, events []AccountSyncEven
 	}
 
 	if err := insertSyncEvents(tx, events, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -824,9 +833,29 @@ func (s *Store) UpdatePairedSystemStatus(systemID, status string) error {
 	return err
 }
 
-func (s *Store) DeletePairedSystem(systemID string) error {
-	_, err := s.db.Exec(`DELETE FROM paired_systems WHERE id = ?`, systemID)
-	return err
+// DeletePairedSystem unpairs a downstream system and records the removal in the same
+// transaction, reporting whether a row actually went away.
+func (s *Store) DeletePairedSystem(systemID string, audit *AuditEvent) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM paired_systems WHERE id = ?`, systemID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // Account Sync Events
@@ -1144,7 +1173,7 @@ func (s *Store) ClearNativeDevicePushToken(deviceID, userID string) error {
 	return err
 }
 
-func (s *Store) SetMFAMethod(m *MFAMethod) error {
+func (s *Store) SetMFAMethod(m *MFAMethod, audit *AuditEvent) error {
 	query := `
 	INSERT INTO mfa_methods (id, user_id, method_type, encrypted_secret, is_primary, created_at)
 	VALUES (?, ?, ?, ?, ?, ?)
@@ -1153,8 +1182,18 @@ func (s *Store) SetMFAMethod(m *MFAMethod) error {
 		is_primary = excluded.is_primary
 	`
 	m.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, m.ID, m.UserID, m.MethodType, m.EncryptedSecret, m.IsPrimary, m.CreatedAt)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(query, m.ID, m.UserID, m.MethodType, m.EncryptedSecret, m.IsPrimary, m.CreatedAt); err != nil {
+		return err
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ConsumeTOTPCounter records that a TOTP time-step has been used. It reports false if the
@@ -1341,7 +1380,7 @@ func (s *Store) DeleteExpiredMFATokens() error {
 // ReplaceRecoveryCodes atomically swaps a user's recovery codes for a new set. Adding to
 // the old set instead would leave leaked codes valid forever, which is the opposite of
 // what a user pressing "regenerate" is asking for.
-func (s *Store) ReplaceRecoveryCodes(userID string, codes []RecoveryCode) error {
+func (s *Store) ReplaceRecoveryCodes(userID string, codes []RecoveryCode, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1363,6 +1402,9 @@ func (s *Store) ReplaceRecoveryCodes(userID string, codes []RecoveryCode) error 
 		if _, err := stmt.Exec(code.ID, code.UserID, code.CodeHash, now); err != nil {
 			return err
 		}
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -1452,13 +1494,74 @@ func (s *Store) ListOAuthClients() ([]OAuthClient, error) {
 }
 
 func (s *Store) UpdateOAuthClient(c *OAuthClient) error {
-	query := `UPDATE oauth_clients SET client_name = ?, client_type = ?, client_secret_hash = ?, redirect_uris_json = ?, allowed_scopes_json = ?, launch_url = ?, enabled = ? WHERE id = ?`
-	_, err := s.db.Exec(query, c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.LaunchURL, c.Enabled, c.ID)
-	return err
+	return s.UpdateOAuthClientWithAudit(c, false, nil)
 }
 
-func (s *Store) DeleteOAuthClient(id string) error {
-	_, err := s.db.Exec(`DELETE FROM oauth_clients WHERE id = ?`, id)
+// UpdateOAuthClientWithAudit edits a client and, when revokeTokens is set, revokes every
+// access token it ever issued, in one transaction with the audit row.
+//
+// Disabling a client, downgrading it to public, or rotating its secret all revoke the
+// authority the old configuration carried. Leaving previously issued bearer tokens valid
+// would make each of those a rename rather than a revocation.
+//
+// This registry only binds tokens this server is asked to validate. A relying party that
+// verifies the JWT signature offline and never calls /oauth/userinfo or introspection will
+// keep accepting a revoked token until it expires; short access-token TTLs, not this
+// table, are what bound that window.
+func (s *Store) UpdateOAuthClientWithAudit(c *OAuthClient, revokeTokens bool, audit *AuditEvent) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE oauth_clients SET client_name = ?, client_type = ?, client_secret_hash = ?, redirect_uris_json = ?, allowed_scopes_json = ?, launch_url = ?, enabled = ? WHERE id = ?`,
+		c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.LaunchURL, c.Enabled, c.ID); err != nil {
+		return err
+	}
+	if revokeTokens {
+		if err := revokeClientTokensTx(tx, c.ID, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeleteOAuthClient removes a client, revokes every token it issued, and records the
+// deletion, in one transaction. It reports whether a client was actually removed, so a
+// caller cannot report "deleted" for a client that is still registered and serving.
+func (s *Store) DeleteOAuthClient(id string, audit *AuditEvent) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM oauth_clients WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := revokeClientTokensTx(tx, id, time.Now().UTC()); err != nil {
+		return false, err
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func revokeClientTokensTx(tx *sql.Tx, clientID string, now time.Time) error {
+	_, err := tx.Exec(
+		`UPDATE issued_tokens SET revoked_at = ? WHERE client_id = ? AND revoked_at IS NULL`,
+		now, clientID)
 	return err
 }
 
@@ -1598,16 +1701,62 @@ func (s *Store) UpdateApplication(app *Application) error {
 	return err
 }
 
-func (s *Store) DeleteApplication(id string) error {
-	_, err := s.db.Exec(`DELETE FROM applications WHERE id = ?`, id)
-	return err
+// DeleteApplication removes a launcher entry and records the removal in the same
+// transaction, reporting whether a row actually went away.
+func (s *Store) DeleteApplication(id string, audit *AuditEvent) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM applications WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // Audit Events
 func (s *Store) RecordAuditEvent(e *AuditEvent) error {
-	query := `INSERT INTO audit_events (id, actor_id, actor_username, action, target_id, target_type, ip_address, user_agent, outcome, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	e.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, e.ID, e.ActorID, e.ActorUsername, e.Action, e.TargetID, e.TargetType, e.IPAddress, e.UserAgent, e.Outcome, e.DetailsJSON, e.CreatedAt)
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = time.Now().UTC()
+	}
+	_, err := insertAuditEvent(s.db, e)
+	return err
+}
+
+// execer is satisfied by both *sql.DB and *sql.Tx, so a security mutation can commit its
+// audit row in the same transaction as the change it describes.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+const insertAuditEventSQL = `INSERT INTO audit_events (id, actor_id, actor_username, action, target_id, target_type, ip_address, user_agent, outcome, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+func insertAuditEvent(q execer, e *AuditEvent) (sql.Result, error) {
+	return q.Exec(insertAuditEventSQL, e.ID, e.ActorID, e.ActorUsername, e.Action, e.TargetID, e.TargetType, e.IPAddress, e.UserAgent, e.Outcome, e.DetailsJSON, e.CreatedAt)
+}
+
+// recordAuditTx writes the audit row for a mutation inside that mutation's transaction.
+// A nil event means the caller has no audit obligation for this path.
+func recordAuditTx(tx *sql.Tx, e *AuditEvent) error {
+	if e == nil {
+		return nil
+	}
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = time.Now().UTC()
+	}
+	_, err := insertAuditEvent(tx, e)
 	return err
 }
 
@@ -1706,7 +1855,7 @@ func (s *Store) SnapshotTo(destPath string) error {
 // backing, in one transaction. A partial reset that reports success is the worst outcome
 // here: the admin believes the account is locked down while the attacker is still holding a
 // live session.
-func (s *Store) ResetUserMFA(userID string, events []AccountSyncEvent) error {
+func (s *Store) ResetUserMFA(userID string, events []AccountSyncEvent, audit *AuditEvent) error {
 	now := time.Now().UTC()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1727,6 +1876,9 @@ func (s *Store) ResetUserMFA(userID string, events []AccountSyncEvent) error {
 		return err
 	}
 	if err := insertSyncEvents(tx, events, now); err != nil {
+		return err
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -248,6 +248,7 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 			"displayName": user.DisplayName,
 			"email":       user.Email,
 			"role":        user.Role,
+			"status":      user.Status,
 		},
 	})
 }
@@ -521,6 +522,7 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		"displayName": user.DisplayName,
 		"email":       user.Email,
 		"role":        user.Role,
+		"status":      user.Status,
 		"mfaMethods":  methodTypes,
 		"createdAt":   user.CreatedAt,
 	})

@@ -229,16 +229,23 @@ func (h *DeviceHandler) EnableTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.mfaEngine.SaveUserTOTP(user.ID, req.Secret); err != nil {
+	// Enrolling a factor and the record of who enrolled it commit together. An account that
+	// gained an authenticator with no durable trail of where it came from is exactly the
+	// state an attacker who has borrowed a session wants to leave behind.
+	enabled := h.audit.Prepare("mfa.totp_enabled", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	if err := h.mfaEngine.SaveUserTOTP(user.ID, req.Secret, enabled.Row); err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
+	enabled.Committed()
 
-	recoveryCodes, err := h.mfaEngine.GenerateRecoveryCodes(user.ID)
+	issued := h.audit.Prepare("mfa.recovery_codes_generated", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"reason": "totp_enrollment"})
+	recoveryCodes, err := h.mfaEngine.GenerateRecoveryCodes(user.ID, issued.Row)
 	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
+	issued.Committed()
 
 	// Replacing a factor logs out every other session. If this replacement was an attacker
 	// with a stolen cookie, the legitimate user keeps nothing; if it was the legitimate
@@ -248,8 +255,6 @@ func (h *DeviceHandler) EnableTOTP(w http.ResponseWriter, r *http.Request) {
 			log.Printf("failed to revoke sibling sessions after TOTP replacement for %s: %v", user.ID, err)
 		}
 	}
-
-	h.audit.Record("mfa.totp_enabled", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -273,13 +278,13 @@ func (h *DeviceHandler) GenerateRecoveryCodes(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	codes, err := h.mfaEngine.GenerateRecoveryCodes(user.ID)
+	regenerated := h.audit.Prepare("mfa.recovery_codes_generated", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	codes, err := h.mfaEngine.GenerateRecoveryCodes(user.ID, regenerated.Row)
 	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
-
-	h.audit.Record("mfa.recovery_codes_generated", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	regenerated.Committed()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

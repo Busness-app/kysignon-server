@@ -161,11 +161,11 @@ func TestRegeneratingRecoveryCodesRevokesTheOldSet(t *testing.T) {
 	defer cleanup()
 	u := mfaUser(t, db)
 
-	first, err := e.GenerateRecoveryCodes(u.ID)
+	first, err := e.GenerateRecoveryCodes(u.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := e.GenerateRecoveryCodes(u.ID)
+	second, err := e.GenerateRecoveryCodes(u.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestRecoveryCodeIsSingleUse(t *testing.T) {
 	defer cleanup()
 	u := mfaUser(t, db)
 
-	codes, err := e.GenerateRecoveryCodes(u.ID)
+	codes, err := e.GenerateRecoveryCodes(u.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestRecoveryCodeIsSingleUseUnderConcurrency(t *testing.T) {
 	e, db, _, cleanup := setupTestMFAEngine(t)
 	defer cleanup()
 	u := mfaUser(t, db)
-	codes, err := e.GenerateRecoveryCodes(u.ID)
+	codes, err := e.GenerateRecoveryCodes(u.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestTOTPCodeCannotBeReplayed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.SaveUserTOTP(u.ID, secret); err != nil {
+	if err := e.SaveUserTOTP(u.ID, secret, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -282,7 +282,7 @@ func TestMFATokenIsSpentAfterTooManyFailures(t *testing.T) {
 	u := mfaUser(t, db)
 
 	secret, _, _ := e.GenerateTOTPSecret(u.Username, "KySignOn")
-	if err := e.SaveUserTOTP(u.ID, secret); err != nil {
+	if err := e.SaveUserTOTP(u.ID, secret, nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := e.IssueMFAToken(u.ID, "")

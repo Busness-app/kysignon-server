@@ -199,7 +199,12 @@ func (h *BackupHandler) DownloadCapsule(w http.ResponseWriter, r *http.Request) 
 	_, _ = w.Write(kit.Capsule)
 }
 
-// DownloadShard serves exactly one custodian shard, once.
+// DownloadShard serves one custodian shard to the custodian it belongs to.
+//
+// A failed response must never cost the operator the shard, so the fetch is idempotent: the
+// holder may retry until the kit expires, and no other principal is ever served it. That is
+// what makes it safe to refuse the request when the audit write fails below — refusing
+// destroys nothing.
 func (h *BackupHandler) DownloadShard(w http.ResponseWriter, r *http.Request) {
 	adminID, adminUsername := h.actor(r)
 
@@ -228,7 +233,7 @@ func (h *BackupHandler) DownloadShard(w http.ResponseWriter, r *http.Request) {
 	share, err := h.kits.TakeShard(kitID, index, adminID, soleCustodian)
 	if err != nil {
 		status := http.StatusNotFound
-		if errors.Is(err, backup.ErrCustodyQuorum) || errors.Is(err, backup.ErrNoCustodian) {
+		if errors.Is(err, backup.ErrCustodyQuorum) || errors.Is(err, backup.ErrNoCustodian) || errors.Is(err, backup.ErrShardHeld) {
 			status = http.StatusForbidden
 		}
 		h.audit.Record("admin.backup_shard_download", adminID, adminUsername, kit.Manifest.CapsuleID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{

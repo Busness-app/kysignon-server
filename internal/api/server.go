@@ -129,8 +129,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/auth/mfa/push/finish", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(authH.FinishPushLogin)))
 	mux.Handle("POST /api/mfa/push/respond", s.middleware.RateLimit("push_respond", 15, 0.5)(http.HandlerFunc(authH.RespondPush)))
 
-	// Native Device Pairing Registration (Unauthenticated with 90s PIN/token)
+	// Native device routes authenticate with a short-lived pairing token or enrolled device key.
 	mux.Handle("POST /api/notifications/native/register", s.middleware.RateLimit("device_reg", 10, 0.2)(http.HandlerFunc(devH.RegisterNativeDevice)))
+	mux.Handle("PUT /api/notifications/native/devices/{id}/push-token", s.middleware.RateLimit("push_token", 10, 0.2)(http.HandlerFunc(devH.RefreshNativeDevicePushToken)))
 
 	// Authenticated User Routes
 	authM := s.middleware.RequireAuth

@@ -8,8 +8,10 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
+	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
 	"github.com/Yoshiofthewire/kysignon-server/internal/mfa"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 )
@@ -95,6 +97,69 @@ func (h *DeviceHandler) RegisterNativeDevice(w http.ResponseWriter, r *http.Requ
 		"deviceId": dev.ID,
 		"device":   dev,
 	})
+}
+
+const (
+	maxPushTokenBytes  = 4096
+	pushTokenClockSkew = 5 * time.Minute
+)
+
+type pushTokenRefreshRequest struct {
+	PushToken string `json:"pushToken"`
+	IssuedAt  int64  `json:"issuedAt"`
+	Signature string `json:"signature"`
+}
+
+// RefreshNativeDevicePushToken lets an already-paired device replace a rotated FCM token.
+// Its enrolled P-256 key is the credential; an FCM token is only a delivery address.
+func (h *DeviceHandler) RefreshNativeDevicePushToken(w http.ResponseWriter, r *http.Request) {
+	deviceID := r.PathValue("id")
+	var req pushTokenRefreshRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid_request","error_description":"Malformed JSON body"}`, http.StatusBadRequest)
+		return
+	}
+	req.PushToken = strings.TrimSpace(req.PushToken)
+	if req.PushToken == "" || len(req.PushToken) > maxPushTokenBytes || req.IssuedAt <= 0 {
+		http.Error(w, `{"error":"invalid_request","error_description":"A valid pushToken and issuedAt are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	now := time.Now().UTC()
+	issuedAt := time.UnixMilli(req.IssuedAt)
+	if issuedAt.Before(now.Add(-pushTokenClockSkew)) || issuedAt.After(now.Add(pushTokenClockSkew)) {
+		http.Error(w, `{"error":"stale_request","error_description":"issuedAt is outside the allowed clock window"}`, http.StatusBadRequest)
+		return
+	}
+
+	dev, err := h.store.GetNativeDevice(deviceID)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	issuerOrigin := strings.TrimRight(h.issuerURL, "/")
+	if parsed, err := url.Parse(h.issuerURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		issuerOrigin = parsed.Scheme + "://" + parsed.Host
+	}
+	message := mfa.PushTokenRefreshMessage(issuerOrigin, deviceID, req.PushToken, req.IssuedAt)
+	if dev == nil || dev.PublicKey == "" || !crypto.VerifyECDSAP256(dev.PublicKey, message, req.Signature) {
+		http.Error(w, `{"error":"device_authentication_failed"}`, http.StatusUnauthorized)
+		return
+	}
+
+	pending := h.audit.Prepare("device.push_token_refreshed", dev.UserID, "", dev.ID, "device",
+		h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	updated, err := h.store.UpdateNativeDevicePushToken(dev.ID, req.PushToken, req.IssuedAt, now, pending.Row)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if !updated {
+		http.Error(w, `{"error":"replayed_request"}`, http.StatusConflict)
+		return
+	}
+	pending.Committed()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ListUserDevices lists registered devices for current user.

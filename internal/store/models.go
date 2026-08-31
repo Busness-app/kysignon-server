@@ -56,16 +56,17 @@ type AccountSyncEvent struct {
 }
 
 type NativeDevice struct {
-	ID               string     `json:"id"`
-	UserID           string     `json:"userId"`
-	DeviceName       string     `json:"deviceName"`
-	DeviceIdentifier string     `json:"deviceIdentifier"`
-	Platform         string     `json:"platform"`
-	PublicKey        string     `json:"publicKey,omitempty"`
-	PushToken        string     `json:"pushToken,omitempty"`
-	IsMFAApprover    bool       `json:"isMfaApprover"`
-	LastSeenAt       *time.Time `json:"lastSeenAt,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
+	ID                   string     `json:"id"`
+	UserID               string     `json:"userId"`
+	DeviceName           string     `json:"deviceName"`
+	DeviceIdentifier     string     `json:"deviceIdentifier"`
+	Platform             string     `json:"platform"`
+	PublicKey            string     `json:"publicKey,omitempty"`
+	PushToken            string     `json:"pushToken,omitempty"`
+	PushTokenUpdatedAtMS int64      `json:"-"`
+	IsMFAApprover        bool       `json:"isMfaApprover"`
+	LastSeenAt           *time.Time `json:"lastSeenAt,omitempty"`
+	CreatedAt            time.Time  `json:"createdAt"`
 }
 
 type DevicePairingToken struct {

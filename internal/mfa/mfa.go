@@ -422,6 +422,18 @@ func PushResponseMessage(challengeID string, approve bool, selectedDigits string
 	return []byte(strings.Join([]string{"kysignon-push-v1", challengeID, verb, selectedDigits}, "|"))
 }
 
+// PushTokenRefreshMessage is the exact domain-separated payload an enrolled device signs
+// when FCM rotates its delivery address. The token digest keeps the canonical message small.
+func PushTokenRefreshMessage(issuerOrigin, deviceID, pushToken string, issuedAtMS int64) []byte {
+	return []byte(strings.Join([]string{
+		"kysignon-push-token-v1",
+		issuerOrigin,
+		deviceID,
+		strconv.FormatInt(issuedAtMS, 10),
+		crypto.HashSHA256(pushToken),
+	}, "|"))
+}
+
 // verifyDeviceSignature finds the paired approver device whose key signed this response.
 // A response that no enrolled device signed is not a response.
 func (e *Engine) verifyDeviceSignature(userID string, message []byte, signature string) (*store.NativeDevice, error) {

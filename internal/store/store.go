@@ -118,6 +118,7 @@ func (s *Store) migrate() error {
 		platform TEXT NOT NULL DEFAULT 'android' CHECK (platform IN ('android', 'ios', 'macos')),
 		public_key TEXT,
 		push_token TEXT,
+		push_token_updated_at_ms INTEGER NOT NULL DEFAULT 0,
 		is_mfa_approver BOOLEAN NOT NULL DEFAULT 0,
 		last_seen_at DATETIME,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -279,6 +280,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateNativeDevicePlatform(); err != nil {
 		return err
 	}
+	if err := s.migrateNativeDevicePushTokenReplayState(); err != nil {
+		return err
+	}
 	if err := s.migratePairedSystemsMetadata(); err != nil {
 		return err
 	}
@@ -376,6 +380,35 @@ func (s *Store) migrateNativeDevicePlatform() error {
 		return err
 	}
 	_, err = s.db.Exec(`ALTER TABLE native_devices ADD COLUMN platform TEXT NOT NULL DEFAULT 'android' CHECK (platform IN ('android', 'ios', 'macos'))`)
+	return err
+}
+
+// migrateNativeDevicePushTokenReplayState adds the monotonic timestamp used to reject
+// replayed device-signed push-token refreshes on databases created before that protocol.
+func (s *Store) migrateNativeDevicePushTokenReplayState() error {
+	rows, err := s.db.Query(`PRAGMA table_info(native_devices)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "push_token_updated_at_ms" {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE native_devices ADD COLUMN push_token_updated_at_ms INTEGER NOT NULL DEFAULT 0`)
 	return err
 }
 
@@ -1156,6 +1189,61 @@ func (s *Store) ListUserNativeDevices(userID string) ([]NativeDevice, error) {
 		devices = append(devices, dev)
 	}
 	return devices, nil
+}
+
+// GetNativeDevice returns the exact enrolled device named by a device-authenticated request.
+func (s *Store) GetNativeDevice(deviceID string) (*NativeDevice, error) {
+	var dev NativeDevice
+	var pubKey, pushTok sql.NullString
+	err := s.db.QueryRow(`
+		SELECT id, user_id, device_name, device_identifier, platform, public_key, push_token,
+		       push_token_updated_at_ms, is_mfa_approver, last_seen_at, created_at
+		FROM native_devices WHERE id = ?`, deviceID).Scan(
+		&dev.ID, &dev.UserID, &dev.DeviceName, &dev.DeviceIdentifier, &dev.Platform,
+		&pubKey, &pushTok, &dev.PushTokenUpdatedAtMS, &dev.IsMFAApprover, &dev.LastSeenAt, &dev.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if pubKey.Valid {
+		dev.PublicKey = pubKey.String
+	}
+	if pushTok.Valid {
+		dev.PushToken = pushTok.String
+	}
+	return &dev, nil
+}
+
+// UpdateNativeDevicePushToken atomically rejects duplicate or older signed refreshes and
+// commits the security mutation with its audit record.
+func (s *Store) UpdateNativeDevicePushToken(deviceID, pushToken string, issuedAtMS int64, seenAt time.Time, audit *AuditEvent) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`
+		UPDATE native_devices
+		SET push_token = ?, push_token_updated_at_ms = ?, last_seen_at = ?
+		WHERE id = ? AND push_token_updated_at_ms < ?`,
+		pushToken, issuedAtMS, seenAt, deviceID, issuedAtMS)
+	if err != nil {
+		return false, err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if changed != 1 {
+		return false, nil
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 func (s *Store) SetNativeDeviceMFAApprover(deviceID, userID string, isApprover bool) error {

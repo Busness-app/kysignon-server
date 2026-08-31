@@ -322,6 +322,7 @@ func (m *MiddlewareManager) CSRFValidate(next http.Handler) http.Handler {
 		path := r.URL.Path
 		if path == "/api/systems/register" ||
 			path == "/api/notifications/native/register" ||
+			(strings.HasPrefix(path, "/api/notifications/native/devices/") && strings.HasSuffix(path, "/push-token")) ||
 			path == "/api/mfa/push/respond" ||
 			path == "/oauth/token" ||
 			path == "/oauth/revoke" {

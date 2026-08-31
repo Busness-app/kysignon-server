@@ -61,6 +61,25 @@ func TestUserUpdateRollsBackWhenItsAuditRowCannotBeWritten(t *testing.T) {
 	}
 }
 
+func TestPushTokenRefreshRollsBackWhenItsAuditRowCannotBeWritten(t *testing.T) {
+	s, u := newStoreWithUser(t, "user")
+	dev := &NativeDevice{ID: "phone", UserID: u.ID, DeviceName: "phone", DeviceIdentifier: "phone", PushToken: "old"}
+	if err := s.UpsertNativeDevice(dev); err != nil {
+		t.Fatal(err)
+	}
+	audit := poisonedAudit(t, s, "device.push_token_refreshed", dev.ID)
+	if _, err := s.UpdateNativeDevicePushToken(dev.ID, "new", 1, time.Now().UTC(), audit); err == nil {
+		t.Fatal("an unauditable push-token refresh reported success")
+	}
+	stored, err := s.GetNativeDevice(dev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.PushToken != "old" || stored.PushTokenUpdatedAtMS != 0 {
+		t.Fatalf("refresh survived audit rollback: %+v", stored)
+	}
+}
+
 func TestUserCreateRollsBackWhenItsAuditRowCannotBeWritten(t *testing.T) {
 	s, _ := newStoreWithUser(t, "user")
 	audit := poisonedAudit(t, s, "admin.user_created", "u2")

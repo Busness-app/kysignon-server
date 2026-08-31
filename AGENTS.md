@@ -19,6 +19,7 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 - Legacy device-pairing tables containing plaintext PINs are rebuilt on startup; their 90-second tokens are intentionally invalidated.
 - MFA reset invalidates pending native-device pairing tokens; native registration consumes a live token in the same transaction that creates the approver and push method.
 - Native push relay URLs must be HTTPS; relay API keys are runtime secrets loaded from env or generated under the data directory, never committed.
+- FCM token refreshes are authenticated by the enrolled device P-256 key, bound to the configured issuer and a fresh monotonic timestamp, and atomically persisted with their audit event; push tokens are never credentials.
 - Sessions have both a configurable absolute lifetime (24h default) and inactivity lifetime (30m default); both are enforced in the store lookup.
 
 # Ponytail, lazy senior dev mode
@@ -55,4 +56,3 @@ Non-trivial logic must include one runnable check (unit test or minimal self-che
 ## Child DOX Index
 
 - [internal/backup/AGENTS.md](file:///home/yoshi/busness.app/kysignon-server/internal/backup/AGENTS.md): Feature 0 disaster recovery, container encapsulation (.kycap), Shamir Secret Sharing, automated restore drills, and KyRecovery integration.
-

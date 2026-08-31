@@ -158,6 +158,39 @@ func TestLegacyDevicePairingTokensAreRebuiltWithoutPlaintextPINs(t *testing.T) {
 	}
 }
 
+func TestNativeDevicePushTokenReplayStateMigrates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-native-device.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`CREATE TABLE native_devices (
+		id TEXT PRIMARY KEY, user_id TEXT NOT NULL, device_name TEXT NOT NULL,
+		device_identifier TEXT NOT NULL, platform TEXT NOT NULL DEFAULT 'android',
+		public_key TEXT, push_token TEXT, is_mfa_approver BOOLEAN NOT NULL DEFAULT 0,
+		last_seen_at DATETIME, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(user_id, device_identifier));`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('native_devices') WHERE name = 'push_token_updated_at_ms'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("push-token replay state column was not migrated")
+	}
+}
+
 func TestListAuditEventsPagination(t *testing.T) {
 	s, err := New(filepath.Join(t.TempDir(), "audit_test.db"))
 	if err != nil {

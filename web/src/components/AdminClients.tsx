@@ -286,7 +286,7 @@ export const AdminClients: React.FC = () => {
                 ['Access token URL', `${issuer}/oauth/token`],
                 ['Resource URL', `${issuer}/oauth/userinfo`],
                 ['Logout URL', 'Leave blank (browser logout is not supported)'],
-                ['User identifier', 'sub'],
+                ['User identifier', 'username'],
                 ['Scope', detailsClient.allowedScopes.join(' ')],
                 ['Auth Style', 'In Params'],
               ].map(([label, value]) => (

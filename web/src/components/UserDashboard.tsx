@@ -3,21 +3,39 @@ import { User, Application } from '../types';
 import { apiJson, apiRequest, errorMessage } from '../api';
 import { parseApplications } from '../parsers';
 import { faviconUrl } from '../favicon';
-import { Globe, Mail, Lock, Bookmark, FileText, ExternalLink, ShieldCheck, Smartphone, ArrowUpRight, Plus } from 'lucide-react';
+import { Globe, Mail, Lock, Bookmark, FileText, ExternalLink, ShieldCheck, Smartphone, ArrowUpRight, Plus, Pencil } from 'lucide-react';
 
 interface UserDashboardProps {
   user: User;
   onNavigateToDevices: () => void;
 }
 
+/** The card being edited, or a blank one when adding. */
+interface CardDraft {
+  id: string;
+  source?: Application['source'];
+  name: string;
+  url: string;
+  description: string;
+  iconName: string;
+}
+
+const blankDraft: CardDraft = { id: '', name: '', url: '', description: '', iconName: 'favicon' };
+
+/** Mirrors the server's launcherIcons allowlist; anything else is rejected at the API. */
+const ICON_OPTIONS: Array<[string, string]> = [
+  ['favicon', 'Site favicon (automatic)'],
+  ['globe', 'Globe'],
+  ['mail', 'Mail'],
+  ['lock', 'Lock'],
+  ['bookmark', 'Bookmark'],
+  ['file-text', 'Document'],
+];
+
 export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateToDevices }) => {
   const [apps, setApps] = useState<Application[]>([]);
   const [failedFavicons, setFailedFavicons] = useState<string[]>([]);
-  const [showAddApp, setShowAddApp] = useState(false);
-  const [appName, setAppName] = useState('');
-  const [appUrl, setAppUrl] = useState('');
-  const [appDescription, setAppDescription] = useState('');
-  const [appIcon, setAppIcon] = useState('favicon');
+  const [draft, setDraft] = useState<CardDraft | null>(null);
 
   const fetchApps = () =>
     apiJson('/api/user/applications', parseApplications)
@@ -28,40 +46,46 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
     fetchApps();
   }, []);
 
-  const addApplication = async (event: React.FormEvent) => {
+  const editCard = (app: Application) =>
+    setDraft({
+      id: app.id,
+      source: app.source,
+      name: app.name,
+      url: app.url,
+      description: app.description ?? '',
+      iconName: app.iconName || 'favicon',
+    });
+
+  // A client-derived card is presentation over a registered OAuth client, so only its blurb
+  // and icon are editable here; its name and URL belong to the client registration.
+  const isClientCard = draft?.source === 'client';
+
+  const saveCard = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!draft) return;
     try {
-      await apiRequest('/api/admin/applications', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: appName.trim(),
-          url: appUrl.trim(),
-          description: appDescription.trim(),
-          iconName: appIcon,
-        }),
-      });
-      setShowAddApp(false);
-      setAppName('');
-      setAppUrl('');
-      setAppDescription('');
-      setAppIcon('favicon');
+      if (isClientCard) {
+        await apiRequest(`/api/admin/clients/${encodeURIComponent(draft.id)}/launcher`, {
+          method: 'PUT',
+          body: JSON.stringify({ description: draft.description.trim(), iconName: draft.iconName }),
+        });
+      } else {
+        const body = JSON.stringify({
+          name: draft.name.trim(),
+          url: draft.url.trim(),
+          description: draft.description.trim(),
+          iconName: draft.iconName,
+        });
+        await (draft.id
+          ? apiRequest(`/api/admin/applications/${encodeURIComponent(draft.id)}`, { method: 'PUT', body })
+          : apiRequest('/api/admin/applications', { method: 'POST', body }));
+      }
+      setDraft(null);
+      setFailedFavicons([]);
       fetchApps();
     } catch (err) {
-      alert(errorMessage(err, 'Failed to add application'));
+      alert(errorMessage(err, 'Failed to save application'));
     }
-  };
-
-  const getDomainUrl = (subdomain: string, localPort: number, fallback: string) => {
-    const host = window.location.hostname;
-    const protocol = window.location.protocol;
-    if (host === 'localhost' || host === '127.0.0.1') {
-      return `http://localhost:${localPort}`;
-    }
-    if (host.startsWith('auth.')) {
-      const base = host.replace(/^auth\./, '');
-      return `${protocol}//${subdomain}.${base}`;
-    }
-    return fallback;
   };
 
   const iconMap: Record<string, React.FC<{ size?: number; style?: React.CSSProperties; className?: string }>> = {
@@ -72,51 +96,6 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
     'file-text': FileText,
   };
 
-  const defaultKyApps: Application[] = [
-    {
-      id: 'kydns',
-      name: 'KyDNS',
-      description: 'Homelab DNS server with subnet views & blackhole filtering',
-      iconName: 'globe',
-      url: getDomainUrl('dns', 8053, 'https://dns.example.com'),
-      enabled: true,
-    },
-    {
-      id: 'kypost',
-      name: 'KyPost',
-      description: 'Encrypted IMAP webmail & identity communication',
-      iconName: 'mail',
-      url: getDomainUrl('mail', 5866, 'https://mail.example.com'),
-      enabled: true,
-    },
-    {
-      id: 'kypasswords',
-      name: 'KyPasswords',
-      description: 'Zero-knowledge encrypted password vault',
-      iconName: 'lock',
-      url: getDomainUrl('passwords', 5877, 'https://passwords.example.com'),
-      enabled: true,
-    },
-    {
-      id: 'kybookmarks',
-      name: 'KyBookmarks',
-      description: 'Privacy-focused secure bookmark organizer',
-      iconName: 'bookmark',
-      url: getDomainUrl('bookmarks', 5869, 'https://bookmarks.example.com'),
-      enabled: true,
-    },
-    {
-      id: 'kynotes',
-      name: 'KyNotes',
-      description: 'End-to-end encrypted notes & documentation',
-      iconName: 'file-text',
-      url: getDomainUrl('notes', 5870, 'https://notes.example.com'),
-      enabled: true,
-    },
-  ];
-
-  const displayApps = apps.length > 0 ? apps : defaultKyApps;
-
   return (
     <div className="dashboard-container">
       <div className="dashboard-header">
@@ -125,7 +104,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
           <p className="page-subtitle">Access your single sign-on enabled KySecurity Suite and 3rd-party products</p>
         </div>
         {user.role === 'admin' && (
-          <button className="primary-btn sm" onClick={() => setShowAddApp(true)}>
+          <button className="primary-btn sm" onClick={() => setDraft({ ...blankDraft })}>
             <Plus size={14} /> Add Application
           </button>
         )}
@@ -141,82 +120,127 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
         </div>
       </div>
 
+      {apps.length === 0 && (
+        <p className="app-empty">
+          No applications yet.
+          {user.role === 'admin' ? ' Register an OAuth client or add an external link to fill this page.' : ' An administrator has not published any.'}
+        </p>
+      )}
+
       <div className="app-grid">
-        {displayApps.map((app) => {
+        {apps.map((app) => {
           const IconComp = iconMap[app.iconName || ''] || ExternalLink;
           const favicon = app.iconName === 'favicon' ? faviconUrl(app.url) : undefined;
           return (
-            <a
-              key={app.id}
-              href={app.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="app-card"
-            >
-              <div className="app-card-top">
-                <div className="app-icon-wrapper">
-                  {favicon && !failedFavicons.includes(app.id) ? (
-                    <img
-                      className="app-favicon"
-                      src={favicon}
-                      alt=""
-                      referrerPolicy="no-referrer"
-                      onError={() => setFailedFavicons((ids) => [...ids, app.id])}
-                    />
-                  ) : (
-                    <IconComp size={24} className="icon-cyan" />
-                  )}
+            <div className="app-card-wrap" key={app.id}>
+              <a href={app.url} target="_blank" rel="noopener noreferrer" className="app-card">
+                <div className="app-card-top">
+                  <div className="app-icon-wrapper">
+                    {favicon && !failedFavicons.includes(app.id) ? (
+                      <img
+                        className="app-favicon"
+                        src={favicon}
+                        alt=""
+                        referrerPolicy="no-referrer"
+                        onError={() => setFailedFavicons((ids) => [...ids, app.id])}
+                      />
+                    ) : (
+                      <IconComp size={24} className="icon-cyan" />
+                    )}
+                  </div>
+                  <ArrowUpRight size={18} className="app-launch-arrow" />
                 </div>
-                <ArrowUpRight size={18} className="app-launch-arrow" />
-              </div>
-              <div className="app-card-body">
-                <h3 className="app-name">{app.name}</h3>
-                <p className="app-desc">{app.description || 'Single Sign-On Application'}</p>
-              </div>
-              <div className="app-card-footer">
-                <span className="sso-badge">OIDC SSO Ready</span>
-              </div>
-            </a>
+                <div className="app-card-body">
+                  <h3 className="app-name">{app.name}</h3>
+                  {app.description && <p className="app-desc">{app.description}</p>}
+                </div>
+              </a>
+              {user.role === 'admin' && (
+                <button
+                  className="app-edit-btn"
+                  onClick={() => editCard(app)}
+                  aria-label={`Edit ${app.name}`}
+                  title="Edit this card"
+                >
+                  <Pencil size={14} />
+                </button>
+              )}
+            </div>
           );
         })}
       </div>
 
-      {showAddApp && (
-        <div className="modal-backdrop" onMouseDown={() => setShowAddApp(false)}>
+      {draft && (
+        <div className="modal-backdrop" onMouseDown={() => setDraft(null)}>
           <div className="modal-card" onMouseDown={(event) => event.stopPropagation()}>
             <div className="modal-header">
-              <h3>Add external application</h3>
-              <button className="close-btn" onClick={() => setShowAddApp(false)} aria-label="Close">
+              <h3>{draft.id ? `Edit ${draft.name}` : 'Add external application'}</h3>
+              <button className="close-btn" onClick={() => setDraft(null)} aria-label="Close">
                 ×
               </button>
             </div>
-            <form className="modal-body" onSubmit={addApplication}>
+            <form className="modal-body" onSubmit={saveCard}>
+              {!isClientCard && (
+                <>
+                  <div className="form-group">
+                    <label className="form-label" htmlFor="app-name">Application name</label>
+                    <input
+                      id="app-name"
+                      className="form-input"
+                      value={draft.name}
+                      onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+                      required
+                      autoFocus
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label" htmlFor="app-url">Application URL</label>
+                    <input
+                      id="app-url"
+                      className="form-input font-mono"
+                      type="url"
+                      value={draft.url}
+                      onChange={(event) => setDraft({ ...draft, url: event.target.value })}
+                      placeholder="https://portainer.example.com"
+                      required
+                    />
+                  </div>
+                </>
+              )}
+              {isClientCard && (
+                <p className="form-hint">
+                  Name and sign-in URL come from this app&apos;s OAuth client registration. Change them
+                  under Admin → OAuth Clients.
+                </p>
+              )}
               <div className="form-group">
-                <label className="form-label">Application name</label>
-                <input className="form-input" value={appName} onChange={(event) => setAppName(event.target.value)} required autoFocus />
+                <label className="form-label" htmlFor="app-description">Description (optional)</label>
+                <input
+                  id="app-description"
+                  className="form-input"
+                  value={draft.description}
+                  onChange={(event) => setDraft({ ...draft, description: event.target.value })}
+                  maxLength={200}
+                  placeholder="What this app is for"
+                  autoFocus={isClientCard}
+                />
               </div>
               <div className="form-group">
-                <label className="form-label">Application URL</label>
-                <input className="form-input font-mono" type="url" value={appUrl} onChange={(event) => setAppUrl(event.target.value)} placeholder="https://portainer.example.com" required />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Description (optional)</label>
-                <input className="form-input" value={appDescription} onChange={(event) => setAppDescription(event.target.value)} />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Icon</label>
-                <select className="form-select" value={appIcon} onChange={(event) => setAppIcon(event.target.value)}>
-                  <option value="favicon">Site favicon (automatic)</option>
-                  <option value="globe">Globe</option>
-                  <option value="mail">Mail</option>
-                  <option value="lock">Lock</option>
-                  <option value="bookmark">Bookmark</option>
-                  <option value="file-text">Document</option>
+                <label className="form-label" htmlFor="app-icon">Icon</label>
+                <select
+                  id="app-icon"
+                  className="form-select"
+                  value={draft.iconName}
+                  onChange={(event) => setDraft({ ...draft, iconName: event.target.value })}
+                >
+                  {ICON_OPTIONS.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
                 </select>
               </div>
               <div className="modal-footer">
-                <button type="button" className="secondary-btn" onClick={() => setShowAddApp(false)}>Cancel</button>
-                <button type="submit" className="primary-btn">Add Application</button>
+                <button type="button" className="secondary-btn" onClick={() => setDraft(null)}>Cancel</button>
+                <button type="submit" className="primary-btn">{draft.id ? 'Save Changes' : 'Add Application'}</button>
               </div>
             </form>
           </div>

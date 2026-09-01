@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  parseApplications,
   parseAuditPage,
   parseAuthStep,
   parseMe,
@@ -177,5 +178,33 @@ describe('parseAuthStep', () => {
     expect(() => parseAuthStep({ success: true, user: { ...user, role: 'wizard' } })).toThrow(
       /role/,
     );
+  });
+});
+
+describe('parseApplications', () => {
+  it('keeps the card source the launcher needs to pick an edit endpoint', () => {
+    const [client, custom] = parseApplications({
+      applications: [
+        { id: 'kydns', name: 'KyDNS', url: 'https://dns.x.test', iconName: 'globe', source: 'client' },
+        { id: 'a1', name: 'Portainer', url: 'https://p.x.test', iconName: 'favicon', source: 'custom' },
+      ],
+    });
+    expect(client.source).toBe('client');
+    expect(custom.source).toBe('custom');
+  });
+
+  it('leaves an undescribed card without a description rather than inventing one', () => {
+    const [app] = parseApplications({
+      applications: [{ id: 'kydns', name: 'KyDNS', url: 'https://dns.x.test', iconName: 'favicon' }],
+    });
+    expect(app.description).toBeUndefined();
+    expect(app.source).toBeUndefined();
+  });
+
+  it('drops a source it does not recognise instead of trusting it', () => {
+    const [app] = parseApplications({
+      applications: [{ id: 'x', name: 'X', url: 'https://x.test', iconName: 'globe', source: 'admin' }],
+    });
+    expect(app.source).toBeUndefined();
   });
 });

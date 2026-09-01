@@ -188,9 +188,12 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/admin/clients", adminStepUpM(http.HandlerFunc(adminH.CreateOAuthClient)))
 	mux.Handle("PUT /api/admin/clients/{id}", adminStepUpM(http.HandlerFunc(adminH.UpdateOAuthClient)))
 	mux.Handle("DELETE /api/admin/clients/{id}", adminStepUpM(http.HandlerFunc(adminH.DeleteOAuthClient)))
+	// Launcher presentation only. Deliberately outside the step-up gate; see UpdateClientLauncher.
+	mux.Handle("PUT /api/admin/clients/{id}/launcher", adminM(http.HandlerFunc(adminH.UpdateClientLauncher)))
 
 	mux.Handle("GET /api/admin/applications", adminM(http.HandlerFunc(adminH.ListApplications)))
 	mux.Handle("POST /api/admin/applications", adminM(http.HandlerFunc(adminH.CreateApplication)))
+	mux.Handle("PUT /api/admin/applications/{id}", adminM(http.HandlerFunc(adminH.UpdateApplication)))
 	mux.Handle("DELETE /api/admin/applications/{id}", adminM(http.HandlerFunc(adminH.DeleteApplication)))
 
 	mux.Handle("GET /api/admin/audit-events", adminM(http.HandlerFunc(adminH.ListAuditEvents)))

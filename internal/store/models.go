@@ -128,6 +128,8 @@ type OAuthClient struct {
 	RedirectURIsJSON  string    `json:"redirectUrisJson"`
 	AllowedScopesJSON string    `json:"allowedScopesJson"`
 	LaunchURL         string    `json:"launchUrl,omitempty"`
+	Description       string    `json:"description,omitempty"`
+	IconName          string    `json:"iconName,omitempty"`
 	Enabled           bool      `json:"enabled"`
 	CreatedAt         time.Time `json:"createdAt"`
 }
@@ -158,6 +160,10 @@ type IssuedToken struct {
 }
 
 type Application struct {
+	// Source is derived when the launcher is assembled, not stored: "custom" for a row in
+	// this table, "client" for a card synthesised from a registered OAuth client. The
+	// dashboard needs it to know which endpoint edits the card.
+	Source      string    `json:"source,omitempty"`
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
 	URL         string    `json:"url"`

@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { User, Application } from '../types';
-import { apiJson } from '../api';
+import { apiJson, apiRequest, errorMessage } from '../api';
 import { parseApplications } from '../parsers';
-import { Globe, Mail, Lock, Bookmark, FileText, ExternalLink, ShieldCheck, Smartphone, ArrowUpRight } from 'lucide-react';
+import { faviconUrl } from '../favicon';
+import { Globe, Mail, Lock, Bookmark, FileText, ExternalLink, ShieldCheck, Smartphone, ArrowUpRight, Plus } from 'lucide-react';
 
 interface UserDashboardProps {
   user: User;
@@ -11,12 +12,44 @@ interface UserDashboardProps {
 
 export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateToDevices }) => {
   const [apps, setApps] = useState<Application[]>([]);
+  const [failedFavicons, setFailedFavicons] = useState<string[]>([]);
+  const [showAddApp, setShowAddApp] = useState(false);
+  const [appName, setAppName] = useState('');
+  const [appUrl, setAppUrl] = useState('');
+  const [appDescription, setAppDescription] = useState('');
+  const [appIcon, setAppIcon] = useState('favicon');
 
-  useEffect(() => {
+  const fetchApps = () =>
     apiJson('/api/user/applications', parseApplications)
       .then(setApps)
       .catch(() => setApps([]));
+
+  useEffect(() => {
+    fetchApps();
   }, []);
+
+  const addApplication = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      await apiRequest('/api/admin/applications', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: appName.trim(),
+          url: appUrl.trim(),
+          description: appDescription.trim(),
+          iconName: appIcon,
+        }),
+      });
+      setShowAddApp(false);
+      setAppName('');
+      setAppUrl('');
+      setAppDescription('');
+      setAppIcon('favicon');
+      fetchApps();
+    } catch (err) {
+      alert(errorMessage(err, 'Failed to add application'));
+    }
+  };
 
   const getDomainUrl = (subdomain: string, localPort: number, fallback: string) => {
     const host = window.location.hostname;
@@ -91,6 +124,11 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
           <h1 className="page-title">Application Launcher</h1>
           <p className="page-subtitle">Access your single sign-on enabled KySecurity Suite and 3rd-party products</p>
         </div>
+        {user.role === 'admin' && (
+          <button className="primary-btn sm" onClick={() => setShowAddApp(true)}>
+            <Plus size={14} /> Add Application
+          </button>
+        )}
         <div className="security-status-card" onClick={onNavigateToDevices}>
           <div className="status-indicator-dot" />
           <div className="status-info">
@@ -106,6 +144,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
       <div className="app-grid">
         {displayApps.map((app) => {
           const IconComp = iconMap[app.iconName || ''] || ExternalLink;
+          const favicon = app.iconName === 'favicon' ? faviconUrl(app.url) : undefined;
           return (
             <a
               key={app.id}
@@ -116,7 +155,17 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
             >
               <div className="app-card-top">
                 <div className="app-icon-wrapper">
-                  <IconComp size={24} className="icon-cyan" />
+                  {favicon && !failedFavicons.includes(app.id) ? (
+                    <img
+                      className="app-favicon"
+                      src={favicon}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      onError={() => setFailedFavicons((ids) => [...ids, app.id])}
+                    />
+                  ) : (
+                    <IconComp size={24} className="icon-cyan" />
+                  )}
                 </div>
                 <ArrowUpRight size={18} className="app-launch-arrow" />
               </div>
@@ -131,6 +180,48 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
           );
         })}
       </div>
+
+      {showAddApp && (
+        <div className="modal-backdrop" onMouseDown={() => setShowAddApp(false)}>
+          <div className="modal-card" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Add external application</h3>
+              <button className="close-btn" onClick={() => setShowAddApp(false)} aria-label="Close">
+                ×
+              </button>
+            </div>
+            <form className="modal-body" onSubmit={addApplication}>
+              <div className="form-group">
+                <label className="form-label">Application name</label>
+                <input className="form-input" value={appName} onChange={(event) => setAppName(event.target.value)} required autoFocus />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Application URL</label>
+                <input className="form-input font-mono" type="url" value={appUrl} onChange={(event) => setAppUrl(event.target.value)} placeholder="https://portainer.example.com" required />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Description (optional)</label>
+                <input className="form-input" value={appDescription} onChange={(event) => setAppDescription(event.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Icon</label>
+                <select className="form-select" value={appIcon} onChange={(event) => setAppIcon(event.target.value)}>
+                  <option value="favicon">Site favicon (automatic)</option>
+                  <option value="globe">Globe</option>
+                  <option value="mail">Mail</option>
+                  <option value="lock">Lock</option>
+                  <option value="bookmark">Bookmark</option>
+                  <option value="file-text">Document</option>
+                </select>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="secondary-btn" onClick={() => setShowAddApp(false)}>Cancel</button>
+                <button type="submit" className="primary-btn">Add Application</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       <div className="profile-overview-box">
         <div className="box-header">

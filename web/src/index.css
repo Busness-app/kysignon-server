@@ -331,6 +331,13 @@ body {
   border: 1px solid var(--line);
 }
 
+.app-favicon {
+  display: block;
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
 .app-launch-arrow {
   color: var(--ink-muted);
   transition: transform 0.15s ease, color 0.15s ease;

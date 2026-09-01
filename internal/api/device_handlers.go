@@ -357,6 +357,17 @@ func (h *DeviceHandler) GenerateRecoveryCodes(w http.ResponseWriter, r *http.Req
 	})
 }
 
+// ssoLoginPaths maps a suite client to the endpoint that starts its SSO handshake, so the
+// launcher lands the user signed in rather than on a login form. Anything not listed opens
+// at its origin.
+var ssoLoginPaths = map[string]string{
+	"kydns":       "/auth/sso/login",
+	"kypost":      "/api/auth/oidc/login",
+	"kypasswords": "/api/auth/oidc/login",
+	"kybookmarks": "/api/auth/oidc/login",
+	"kynotes":     "/api/auth/oidc/login",
+}
+
 // ListApplications returns dashboard application links, aggregating custom applications and registered OAuth clients.
 func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request) {
 	customApps, err := h.store.ListApplications()
@@ -373,11 +384,15 @@ func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request)
 	appMap := make(map[string]store.Application)
 	for _, app := range customApps {
 		if app.Enabled {
+			app.Source = "custom"
 			appMap[app.ID] = app
 		}
 	}
 
-	// Add OAuth clients as launchable applications
+	// Registered OAuth clients are launchable too. What they look like on the launcher is
+	// whatever an admin set on the client; an undescribed card carries no description rather
+	// than a generated one, because "OAuth 2.0 / OIDC SSO App (confidential)" restates the
+	// page title and tells the user nothing about the app.
 	for _, client := range oauthClients {
 		if !client.Enabled {
 			continue
@@ -399,49 +414,31 @@ func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request)
 				}
 			}
 
-			if origin != "" {
-				switch strings.ToLower(client.ID) {
-				case "kydns":
-					launchURL = origin + "/auth/sso/login"
-				case "kypost":
-					launchURL = origin + "/api/auth/oidc/login"
-				case "kypasswords":
-					launchURL = origin + "/api/auth/oidc/login"
-				case "kybookmarks":
-					launchURL = origin + "/api/auth/oidc/login"
-				case "kynotes":
-					launchURL = origin + "/api/auth/oidc/login"
-				default:
-					launchURL = origin
-				}
-			} else if len(uris) > 0 {
+			switch {
+			case origin != "":
+				launchURL = origin + ssoLoginPaths[strings.ToLower(client.ID)]
+			case len(uris) > 0:
 				launchURL = uris[0]
 			}
 		}
 
-		if launchURL != "" {
-			iconName := "globe"
-			switch strings.ToLower(client.ID) {
-			case "kydns":
-				iconName = "globe"
-			case "kypost":
-				iconName = "mail"
-			case "kypasswords":
-				iconName = "lock"
-			case "kybookmarks":
-				iconName = "bookmark"
-			case "kynotes":
-				iconName = "file-text"
-			}
+		if launchURL == "" {
+			continue
+		}
 
-			appMap[client.ID] = store.Application{
-				ID:          client.ID,
-				Name:        client.ClientName,
-				URL:         launchURL,
-				IconName:    iconName,
-				Description: fmt.Sprintf("OAuth 2.0 / OIDC SSO App (%s)", client.ClientType),
-				Enabled:     true,
-			}
+		iconName := client.IconName
+		if iconName == "" {
+			iconName = "favicon"
+		}
+
+		appMap[client.ID] = store.Application{
+			Source:      "client",
+			ID:          client.ID,
+			Name:        client.ClientName,
+			URL:         launchURL,
+			IconName:    iconName,
+			Description: client.Description,
+			Enabled:     true,
 		}
 	}
 

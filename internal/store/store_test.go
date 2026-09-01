@@ -247,3 +247,65 @@ func TestListAuditEventsPagination(t *testing.T) {
 		t.Fatalf("expected 0 events on page 4, got %d", len(events4))
 	}
 }
+
+func TestOAuthClientLauncherMetadataMigrates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-oauth-client.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`CREATE TABLE oauth_clients (
+		id TEXT PRIMARY KEY, client_name TEXT NOT NULL,
+		client_type TEXT NOT NULL CHECK (client_type IN ('public', 'confidential')),
+		client_secret_hash TEXT, redirect_uris_json TEXT NOT NULL,
+		allowed_scopes_json TEXT NOT NULL, launch_url TEXT,
+		enabled BOOLEAN NOT NULL DEFAULT 1,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+		INSERT INTO oauth_clients (id, client_name, client_type, redirect_uris_json, allowed_scopes_json)
+			VALUES ('kydns', 'KyDNS Server', 'confidential', '["https://dns.example.test/cb"]', '["openid"]');`)
+	if err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	client, err := s.GetOAuthClientByID("kydns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client == nil {
+		t.Fatal("pre-existing client disappeared across the migration")
+	}
+	if client.Description != "" || client.IconName != "" {
+		t.Fatalf("migrated client should carry empty launcher metadata, got %q/%q", client.Description, client.IconName)
+	}
+
+	client.Description = "Homelab DNS with subnet views"
+	client.IconName = "globe"
+	if err := s.UpdateOAuthClient(client); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := s.GetOAuthClientByID("kydns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Description != "Homelab DNS with subnet views" || reloaded.IconName != "globe" {
+		t.Fatalf("launcher metadata did not persist: %q/%q", reloaded.Description, reloaded.IconName)
+	}
+
+	listed, err := s.ListOAuthClients()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].Description != "Homelab DNS with subnet views" || listed[0].IconName != "globe" {
+		t.Fatalf("list did not return launcher metadata: %+v", listed)
+	}
+}

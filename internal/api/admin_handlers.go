@@ -688,6 +688,18 @@ func (h *AdminHandler) DeleteOAuthClient(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
+// launcherIcons is the closed set of icons a launcher card may use. The launcher renders
+// whatever it is given, so an open field here is a rendering primitive an admin session can
+// aim at every user's dashboard.
+var launcherIcons = map[string]bool{
+	"favicon": true, "globe": true, "mail": true, "lock": true,
+	"bookmark": true, "file-text": true,
+}
+
+// maxLauncherDescription bounds the blurb under a card. Long enough for a sentence, short
+// enough that no card can push the rest of the launcher off the page.
+const maxLauncherDescription = 200
+
 // Applications Management
 func (h *AdminHandler) ListApplications(w http.ResponseWriter, r *http.Request) {
 	apps, err := h.store.ListApplications()
@@ -720,14 +732,10 @@ func (h *AdminHandler) CreateApplication(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"invalid_request","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
-	allowedIcons := map[string]bool{
-		"favicon": true, "globe": true, "mail": true, "lock": true,
-		"bookmark": true, "file-text": true,
-	}
 	if req.IconName == "" {
 		req.IconName = "favicon"
 	}
-	if !allowedIcons[req.IconName] {
+	if !launcherIcons[req.IconName] {
 		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
 		return
 	}
@@ -785,6 +793,129 @@ func validateExternalURL(raw string) error {
 		}
 	}
 	return errors.New("URL must use https (http is allowed only on loopback)")
+}
+
+// UpdateApplication edits a launcher card that lives in the applications table. Without it
+// a mistyped name or a stale URL can only be fixed by deleting the card and adding it back.
+func (h *AdminHandler) UpdateApplication(w http.ResponseWriter, r *http.Request) {
+	admin := GetUserFromContext(r.Context())
+	appID := r.PathValue("id")
+
+	var req struct {
+		Name        string `json:"name"`
+		URL         string `json:"url"`
+		IconName    string `json:"iconName"`
+		Description string `json:"description"`
+		SortOrder   int    `json:"sortOrder"`
+		Enabled     *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" || req.URL == "" {
+		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+		return
+	}
+	if err := validateExternalURL(req.URL); err != nil {
+		http.Error(w, `{"error":"invalid_request","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
+	if req.IconName == "" {
+		req.IconName = "favicon"
+	}
+	if !launcherIcons[req.IconName] {
+		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
+		return
+	}
+	description := strings.TrimSpace(req.Description)
+	if len(description) > maxLauncherDescription {
+		http.Error(w, `{"error":"invalid_request","error_description":"Description is too long"}`, http.StatusBadRequest)
+		return
+	}
+
+	app, err := h.store.GetApplicationByID(appID)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if app == nil {
+		http.Error(w, `{"error":"application_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	app.Name = strings.TrimSpace(req.Name)
+	app.URL = strings.TrimSpace(req.URL)
+	app.IconName = req.IconName
+	app.Description = description
+	app.SortOrder = req.SortOrder
+	if req.Enabled != nil {
+		app.Enabled = *req.Enabled
+	}
+
+	if err := h.store.UpdateApplication(app); err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	h.audit.Record("admin.application_updated", admin.ID, admin.Username, app.ID, "application", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "application": app})
+}
+
+// UpdateClientLauncher edits only how a registered client is presented on the launcher: its
+// blurb and its icon.
+//
+// It is deliberately a separate route from UpdateOAuthClient, which is step-up gated. Step-up
+// grants are single-use, so describing seven cards through that handler costs seven MFA
+// prompts, and an admin who is prompted seven times to fix cosmetic text learns to leave the
+// text wrong. This handler cannot reach redirect URIs, scopes, the secret, the client type,
+// or enablement, so nothing it can write is worth a grant.
+func (h *AdminHandler) UpdateClientLauncher(w http.ResponseWriter, r *http.Request) {
+	admin := GetUserFromContext(r.Context())
+	clientID := r.PathValue("id")
+
+	var req struct {
+		Description string `json:"description"`
+		IconName    string `json:"iconName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+		return
+	}
+	description := strings.TrimSpace(req.Description)
+	if len(description) > maxLauncherDescription {
+		http.Error(w, `{"error":"invalid_request","error_description":"Description is too long"}`, http.StatusBadRequest)
+		return
+	}
+	iconName := strings.TrimSpace(req.IconName)
+	if iconName == "" {
+		iconName = "favicon"
+	}
+	if !launcherIcons[iconName] {
+		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
+		return
+	}
+
+	client, err := h.store.GetOAuthClientByID(clientID)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if client == nil {
+		http.Error(w, `{"error":"client_not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	client.Description = description
+	client.IconName = iconName
+
+	updated := h.audit.Prepare("admin.client_launcher_updated", admin.ID, admin.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	if err := h.store.UpdateOAuthClientWithAudit(client, false, updated.Row); err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	updated.Committed()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "client": client})
 }
 
 func (h *AdminHandler) DeleteApplication(w http.ResponseWriter, r *http.Request) {

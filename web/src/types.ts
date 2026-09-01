@@ -35,6 +35,8 @@ export interface NativeDevice {
 
 export interface Application {
   id: string;
+  /** Where the card came from, which decides the endpoint that edits it. */
+  source?: 'client' | 'custom';
   name: string;
   url: string;
   iconName: string;

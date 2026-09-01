@@ -191,6 +191,8 @@ func (s *Store) migrate() error {
 		redirect_uris_json TEXT NOT NULL,
 		allowed_scopes_json TEXT NOT NULL,
 		launch_url TEXT,
+		description TEXT NOT NULL DEFAULT '',
+		icon_name TEXT NOT NULL DEFAULT '',
 		enabled BOOLEAN NOT NULL DEFAULT 1,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
@@ -286,6 +288,10 @@ func (s *Store) migrate() error {
 	if err := s.migratePairedSystemsMetadata(); err != nil {
 		return err
 	}
+	if err := s.migrateOAuthClientLauncherMetadata(); err != nil {
+		return err
+	}
+
 	if err := s.migrateSyncEventLease(); err != nil {
 		return err
 	}
@@ -316,6 +322,27 @@ func (s *Store) migrateSyncEventLease() error {
 	}
 	_, err = s.db.Exec(`ALTER TABLE account_sync_events ADD COLUMN lease_until DATETIME`)
 	return err
+}
+
+// migrateOAuthClientLauncherMetadata adds the admin-editable launcher description and icon
+// to pre-existing databases. Both default to empty: a card an admin has never described
+// shows no description rather than an invented one.
+func (s *Store) migrateOAuthClientLauncherMetadata() error {
+	for column, ddl := range map[string]string{
+		"description": `ALTER TABLE oauth_clients ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
+		"icon_name":   `ALTER TABLE oauth_clients ADD COLUMN icon_name TEXT NOT NULL DEFAULT ''`,
+	} {
+		var count int
+		if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('oauth_clients') WHERE name = ?`, column).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			if _, err := s.db.Exec(ddl); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) migratePairedSystemsMetadata() error {
@@ -1530,18 +1557,18 @@ func (s *Store) ConsumeRecoveryCode(userID, codeHash string) (bool, error) {
 
 // OAuth Clients
 func (s *Store) CreateOAuthClient(c *OAuthClient) error {
-	query := `INSERT INTO oauth_clients (id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, launch_url, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO oauth_clients (id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, launch_url, description, icon_name, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	c.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, c.ID, c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.LaunchURL, c.Enabled, c.CreatedAt)
+	_, err := s.db.Exec(query, c.ID, c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.LaunchURL, c.Description, c.IconName, c.Enabled, c.CreatedAt)
 	return err
 }
 
 func (s *Store) GetOAuthClientByID(id string) (*OAuthClient, error) {
-	query := `SELECT id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, launch_url, enabled, created_at FROM oauth_clients WHERE id = ?`
+	query := `SELECT id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, launch_url, description, icon_name, enabled, created_at FROM oauth_clients WHERE id = ?`
 	c := &OAuthClient{}
 	var secretHash sql.NullString
 	var launchURL sql.NullString
-	err := s.db.QueryRow(query, id).Scan(&c.ID, &c.ClientName, &c.ClientType, &secretHash, &c.RedirectURIsJSON, &c.AllowedScopesJSON, &launchURL, &c.Enabled, &c.CreatedAt)
+	err := s.db.QueryRow(query, id).Scan(&c.ID, &c.ClientName, &c.ClientType, &secretHash, &c.RedirectURIsJSON, &c.AllowedScopesJSON, &launchURL, &c.Description, &c.IconName, &c.Enabled, &c.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1555,7 +1582,7 @@ func (s *Store) GetOAuthClientByID(id string) (*OAuthClient, error) {
 }
 
 func (s *Store) ListOAuthClients() ([]OAuthClient, error) {
-	query := `SELECT id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, launch_url, enabled, created_at FROM oauth_clients ORDER BY client_name ASC`
+	query := `SELECT id, client_name, client_type, client_secret_hash, redirect_uris_json, allowed_scopes_json, launch_url, description, icon_name, enabled, created_at FROM oauth_clients ORDER BY client_name ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -1567,7 +1594,7 @@ func (s *Store) ListOAuthClients() ([]OAuthClient, error) {
 		var c OAuthClient
 		var secretHash sql.NullString
 		var launchURL sql.NullString
-		if err := rows.Scan(&c.ID, &c.ClientName, &c.ClientType, &secretHash, &c.RedirectURIsJSON, &c.AllowedScopesJSON, &launchURL, &c.Enabled, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ClientName, &c.ClientType, &secretHash, &c.RedirectURIsJSON, &c.AllowedScopesJSON, &launchURL, &c.Description, &c.IconName, &c.Enabled, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		if secretHash.Valid {
@@ -1602,8 +1629,8 @@ func (s *Store) UpdateOAuthClientWithAudit(c *OAuthClient, revokeTokens bool, au
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE oauth_clients SET client_name = ?, client_type = ?, client_secret_hash = ?, redirect_uris_json = ?, allowed_scopes_json = ?, launch_url = ?, enabled = ? WHERE id = ?`,
-		c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.LaunchURL, c.Enabled, c.ID); err != nil {
+	if _, err := tx.Exec(`UPDATE oauth_clients SET client_name = ?, client_type = ?, client_secret_hash = ?, redirect_uris_json = ?, allowed_scopes_json = ?, launch_url = ?, description = ?, icon_name = ?, enabled = ? WHERE id = ?`,
+		c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.LaunchURL, c.Description, c.IconName, c.Enabled, c.ID); err != nil {
 		return err
 	}
 	if revokeTokens {

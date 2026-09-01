@@ -298,7 +298,15 @@ body {
   margin-bottom: 2.5rem;
 }
 
+/* The wrapper exists so the edit control can sit on the card without nesting a button
+   inside the anchor that launches the app. */
+.app-card-wrap {
+  position: relative;
+  display: flex;
+}
+
 .app-card {
+  flex: 1;
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 10px;
@@ -306,7 +314,6 @@ body {
   text-decoration: none;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
   transition: all 0.2s ease;
 }
 
@@ -359,22 +366,35 @@ body {
   font-size: 0.85rem;
   color: var(--ink);
   line-height: 1.4;
-  margin: 0 0 1.25rem 0;
+  margin: 0;
 }
 
-.app-card-footer {
-  display: flex;
-  align-items: center;
+.app-empty {
+  color: var(--ink-muted);
+  margin: 0 0 2rem 0;
 }
 
-.sso-badge {
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  background: var(--accent-soft);
-  color: var(--accent);
-  padding: 0.2rem 0.5rem;
-  border-radius: 4px;
-  letter-spacing: 0.03em;
+.app-edit-btn {
+  position: absolute;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-muted);
+  border-radius: 6px;
+  padding: 0.3rem;
+  cursor: pointer;
+  opacity: 0;
+  display: inline-flex;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+/* Always reachable by keyboard: an admin who never touches the mouse still gets the control. */
+.app-card-wrap:hover .app-edit-btn,
+.app-edit-btn:focus-visible {
+  opacity: 1;
+  color: var(--ink-strong);
+  border-color: var(--ink);
 }
 
 /* Identity Overview Box */
@@ -609,6 +629,13 @@ body {
 /* Forms */
 .form-group {
   margin-bottom: 1.15rem;
+}
+
+.form-hint {
+  font-size: 0.8rem;
+  color: var(--ink-muted);
+  line-height: 1.4;
+  margin: 0 0 1rem 0;
 }
 
 .form-label {

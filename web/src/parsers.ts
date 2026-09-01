@@ -183,8 +183,10 @@ export function parseApplications(value: unknown): Application[] {
   const o = obj(value, 'an applications response');
   return list(o.applications, (item) => {
     const a = obj(item, 'an application object');
+    const source = optStr(a, 'source');
     return {
       id: str(a, 'id'),
+      source: source === 'client' || source === 'custom' ? source : undefined,
       name: str(a, 'name'),
       url: optStr(a, 'url') ?? '',
       iconName: optStr(a, 'iconName') ?? '',

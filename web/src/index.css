@@ -652,6 +652,13 @@ body {
   z-index: 1000;
 }
 
+/* The step-up prompt is requested from inside a feature modal (Register Client asks for a
+   grant with its own modal still open). At an equal z-index DOM order decides, and every
+   admin page renders the prompt before its own modals, so it has to outrank them. */
+.step-up-backdrop {
+  z-index: 1100;
+}
+
 .modal-card {
   background: var(--panel);
   border: 1px solid var(--panel-border);

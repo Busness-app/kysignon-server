@@ -24,6 +24,7 @@ jobs:
           test -z "$unformatted"
       - run: go build ./...
       - run: go vet ./...
+      - uses: golang/govulncheck-action@v1
       - run: go test -race -count=1 ./...
 
   web:
@@ -39,5 +40,56 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      - run: npm audit --omit=dev --audit-level=low
       - run: npm run build
+      - run: git diff --exit-code -- dist
       - run: npm test
+
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            workers/apns/package-lock.json
+            workers/fcn/package-lock.json
+      - run: npm ci
+        working-directory: workers/apns
+      - run: npm audit --omit=dev --audit-level=low
+        working-directory: workers/apns
+      - run: npm run typecheck
+        working-directory: workers/apns
+      - run: npm ci
+        working-directory: workers/fcn
+      - run: npm audit --omit=dev --audit-level=low
+        working-directory: workers/fcn
+      - run: npm run typecheck
+        working-directory: workers/fcn
+      - run: node --test push-relay-shared/*.test.mts workers/apns/src/*.test.mts workers/fcn/src/*.test.mts
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t kysignon-ci .
+      - name: Smoke test production image
+        run: |
+          container_id=$(docker run -d kysignon-ci)
+          trap 'docker rm -f "$container_id"' EXIT
+          for _ in $(seq 1 30); do
+            if docker exec "$container_id" wget -q --spider http://localhost:5867/readyz; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$container_id"
+          exit 1
+      - name: Reject public HTTP issuer
+        run: |
+          if docker run --rm -e KYSIGNON_ISSUER_URL=http://auth.example.test kysignon-ci; then
+            echo "server accepted a non-loopback HTTP issuer"
+            exit 1
+          fi

@@ -1,8 +1,9 @@
-# Contributing to KyPassword
+# Contributing to KySignOn
 
-Thanks for wanting to work on this. KyPassword is a self-hosted password manager, which
-means every contribution lands on a machine holding somebody's passwords. This document describes what a
-contribution has to clear before it merges, and why each gate exists.
+Thanks for wanting to work on this. KySignOn is the identity authority for the
+KySecurity suite, so every contribution can affect authentication across several products.
+This document describes what a contribution has to clear before it merges, and why each
+gate exists.
 
 Read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) first. It is short, and it governs
 every space here.
@@ -51,25 +52,21 @@ re-litigation in a PR:
 
 ## Getting Set Up
 
-Docker is the only requirement to *run* KyPost:
+Docker is the only requirement to *run* KySignOn:
 
 ```bash
-cp .env.example .env      # set KYPOST_BIND — it has no default, on purpose
+cp .env.example .env
 docker compose up --build -d
 ```
 
-To work on the code outside the container you need Go 1.26.5+, Node 26.5.0 (see
-`frontend/.nvmrc`), and npm 12.0.1. Use those versions rather than whatever your
-distro ships — CI pins to them because a Node major difference has already
-produced a suite that passed on every developer machine and failed all 14 cases
-in CI.
+To work on the code outside the container you need Go 1.26.5+ and Node 22.
 
 ```bash
 # backend
-cd backend && go test ./...
+go test ./...
 
 # frontend
-cd frontend && npm ci && npm test -- --run
+cd web && npm ci && npm test
 ```
 
 `README.md` covers configuration and runtime layout. `SECURITY.md` covers trust
@@ -159,28 +156,26 @@ if a job is genuinely flaky, that is a bug to fix in the job.
 
 | Job | What it runs |
 |---|---|
-| `ci-backend-api` | `gofmt -l`, `go vet`, `golangci-lint`, `govulncheck`, `go test -race ./internal/api/...` |
-| `ci-backend-other` | Same lint gates, `go test -race` on every other backend package |
-| `ci-frontend` | `npm audit --omit=dev --audit-level=low` (blocking), `tsc --noEmit`, `vitest`, `vite build` |
-| `ci-relay` | Typecheck both relay Workers, `node --test` on the relay behaviour suites |
-| `ci-docker` | `docker build`, container reaches `healthy`, and the entrypoint still refuses a non-loopback cleartext bind |
+| `go` | `gofmt -l`, `go build`, `go vet`, `govulncheck`, `go test -race ./...` |
+| `web` | Runtime dependency audit, TypeScript/Vite build, committed asset check, and Vitest |
+| `relay` | Runtime dependency audits, both Worker typechecks, and all relay behavior tests |
+| `docker` | Production image build, `/readyz` smoke test, and rejection of a public HTTP issuer |
 
 Notes that trip people up:
 
 - **Run the gates locally before pushing.** All of them work on a normal
-  machine, including the whole frontend suite. "It only fails in CI" is almost
-  always a version difference — check `.nvmrc` and `go.mod`.
-- **The frontend audit gate is `--audit-level=low` on runtime dependencies.**
-  That is deliberate: a "low" XSS advisory in the editor that renders quoted
-  hostile email is not low here. Do not raise the threshold to get green.
-- **`ci-docker` has two halves and both are gates.** One proves the container
-  starts; the other proves the bind guard still refuses `0.0.0.0` without TLS.
+  machine, including the whole frontend suite. "It only fails in CI" is often
+  a version difference — check `go.mod` and the Node version in the workflow.
+- **The web audit gate is `--audit-level=low` on runtime dependencies.**
+  Identity interfaces render security-sensitive account and audit data, so do not raise
+  the threshold merely to get green.
+- **The `docker` job has two halves and both are gates.** One proves the container
+  starts; the other proves a public HTTP issuer is refused.
   A red build is never fixed by loosening the entrypoint.
 - **New logic ships with tests.** Unit plus integration for new behaviour, a
   regression test for anything high-impact. Security-sensitive changes need
   attack-path coverage, not just the happy path — see
-  [SECURITY.md](SECURITY.md#testing) and the
-  `backend/internal/api/*_security_fixes_test.go` files for the pattern.
+  [SECURITY.md](SECURITY.md#testing) and the `internal/api/*_test.go` files for the pattern.
 
 ## Every PR Must Pass Hostile AI Code Review
 

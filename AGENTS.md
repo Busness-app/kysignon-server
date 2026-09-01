@@ -9,7 +9,7 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 3. **OpenID Connect & OAuth 2.0**: Standard authorization-code flow with PKCE, RS256 ID tokens, and JWKS discovery.
 4. **Native Device Pairing & Push MFA**: Natively hosts device pairing (`/api/notifications/native/register`) using 90s PIN/QR codes, push challenge dispatch through FCM/APNs relay Workers with 2-digit number matching, and TOTP/recovery code support.
 5. **Dashboard & Application Launcher**: KySecurity Patina themed interface (dark `#0d0f14`, cyan `#4deeea`, Space Grotesk, IBM Plex Mono) using `css/styles.css` and local fonts.
-   The client table exposes each app's copyable OIDC connection details from the configured issuer; it never displays stored secret hashes.
+   The client table exposes each app's copyable OIDC connection details from the configured issuer, including its client ID and compatible credential style; it never displays stored secret hashes or claims a browser-compatible logout endpoint exists.
 6. **Disaster Recovery & KyBackup (Feature 0)**: Encrypted capsule container creation (`.kycap`), Shamir Secret Sharing $(k=2, n=3)$ custodian key distribution, automated sandboxed live restore drills, offline HTML emergency recovery kit generation, and remote KyRecovery pairing.
 
 ## Security Invariants

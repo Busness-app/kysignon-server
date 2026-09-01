@@ -281,12 +281,14 @@ export const AdminClients: React.FC = () => {
             </div>
             <div className="modal-body connection-details">
               {[
+                ['Client ID', detailsClient.id],
                 ['Authorization URL', `${issuer}/oauth/authorize`],
                 ['Access token URL', `${issuer}/oauth/token`],
                 ['Resource URL', `${issuer}/oauth/userinfo`],
-                ['Logout URL', `${issuer}/api/auth/logout`],
+                ['Logout URL', 'Leave blank (browser logout is not supported)'],
                 ['User identifier', 'sub'],
                 ['Scope', detailsClient.allowedScopes.join(' ')],
+                ['Auth Style', 'In Params'],
               ].map(([label, value]) => (
                 <div className="form-group" key={label}>
                   <label className="form-label">{label}</label>

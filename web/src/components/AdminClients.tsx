@@ -8,11 +8,13 @@ const isSuiteClient = (id: string) => SUITE_CLIENT_IDS.includes(id.trim().toLowe
 import { OAuthClient } from '../types';
 import { apiJson, apiRequest, errorMessage, isRecord } from '../api';
 import { isCancelled, useStepUp } from './StepUpPrompt';
-import { parseCreatedClientSecret, parseOAuthClients } from '../parsers';
-import { Plus, Trash2, CheckCircle, AlertTriangle, KeyRound } from 'lucide-react';
+import { parseCreatedClientSecret, parseOAuthClients, parseOIDCIssuer } from '../parsers';
+import { Plus, Trash2, CheckCircle, AlertTriangle, Info, KeyRound } from 'lucide-react';
 
 export const AdminClients: React.FC = () => {
   const [clients, setClients] = useState<OAuthClient[]>([]);
+  const [issuer, setIssuer] = useState('');
+  const [detailsClient, setDetailsClient] = useState<OAuthClient | null>(null);
   const [showModal, setShowModal] = useState(false);
 
   const [clientId, setClientId] = useState('');
@@ -26,7 +28,12 @@ export const AdminClients: React.FC = () => {
 
   const fetchClients = async () => {
     try {
-      setClients(await apiJson('/api/admin/clients', parseOAuthClients));
+      const [nextClients, nextIssuer] = await Promise.all([
+        apiJson('/api/admin/clients', parseOAuthClients),
+        apiJson('/.well-known/openid-configuration', parseOIDCIssuer),
+      ]);
+      setClients(nextClients);
+      setIssuer(nextIssuer);
     } catch {
       // A failed refresh leaves the previous list on screen.
     }
@@ -206,10 +213,6 @@ export const AdminClients: React.FC = () => {
               </tr>
             ) : (
               clients.map((c) => {
-                let uris: string[] = [];
-                try {
-                  uris = JSON.parse(c.redirectUrisJson);
-                } catch {}
                 return (
                   <tr key={c.id}>
                     <td className="font-bold text-white">{c.clientName}</td>
@@ -218,8 +221,8 @@ export const AdminClients: React.FC = () => {
                       <span className="font-mono badge-type">{c.clientType.toUpperCase()}</span>
                     </td>
                     <td className="font-mono text-sm text-muted">
-                      {uris.map((u, i) => (
-                        <div key={i}>{u}</div>
+                      {c.redirectUris.map((uri) => (
+                        <div key={uri}>{uri}</div>
                       ))}
                     </td>
                     <td>
@@ -229,6 +232,14 @@ export const AdminClients: React.FC = () => {
                     </td>
                     <td className="text-right">
                       <div className="action-buttons-wrap">
+                        <button
+                          className="icon-btn"
+                          onClick={() => setDetailsClient(c)}
+                          title="Show connection details"
+                          aria-label={`Show connection details for ${c.clientName}`}
+                        >
+                          <Info size={15} />
+                        </button>
                         {c.clientType === 'confidential' && (
                           <button
                             className="icon-btn"
@@ -254,6 +265,44 @@ export const AdminClients: React.FC = () => {
           </tbody>
         </table>
       </div>
+
+      {detailsClient && (
+        <div className="modal-backdrop" onMouseDown={() => setDetailsClient(null)}>
+          <div className="modal-card client-details-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{detailsClient.clientName} connection details</h3>
+              <button
+                className="close-btn"
+                onClick={() => setDetailsClient(null)}
+                aria-label="Close connection details"
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal-body connection-details">
+              {[
+                ['Authorization URL', `${issuer}/oauth/authorize`],
+                ['Access token URL', `${issuer}/oauth/token`],
+                ['Resource URL', `${issuer}/oauth/userinfo`],
+                ['Logout URL', `${issuer}/api/auth/logout`],
+                ['User identifier', 'sub'],
+                ['Scope', detailsClient.allowedScopes.join(' ')],
+              ].map(([label, value]) => (
+                <div className="form-group" key={label}>
+                  <label className="form-label">{label}</label>
+                  <input className="form-input font-mono" value={value} readOnly />
+                </div>
+              ))}
+              <div className="form-group">
+                <label className="form-label">Redirect URL</label>
+                {detailsClient.redirectUris.map((uri) => (
+                  <input className="form-input font-mono" value={uri} readOnly key={uri} />
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showModal && (
         <div className="modal-backdrop">

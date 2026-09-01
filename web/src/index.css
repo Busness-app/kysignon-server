@@ -669,6 +669,19 @@ body {
   overflow: hidden;
 }
 
+.client-details-modal {
+  max-width: 720px;
+}
+
+.connection-details {
+  max-height: min(70vh, 680px);
+  overflow-y: auto;
+}
+
+.connection-details .form-input + .form-input {
+  margin-top: 0.5rem;
+}
+
 .modal-header {
   padding: 1.25rem 1.5rem;
   border-bottom: 1px solid var(--line);
@@ -1326,4 +1339,3 @@ body {
   outline: none;
   border-color: var(--accent);
 }
-

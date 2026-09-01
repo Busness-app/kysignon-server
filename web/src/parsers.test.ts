@@ -4,6 +4,7 @@ import {
   parseAuthStep,
   parseMe,
   parseOAuthClients,
+  parseOIDCIssuer,
   parsePairedSystems,
   parseUsers,
 } from './parsers';
@@ -72,11 +73,33 @@ describe('parseOAuthClients', () => {
     expect(parseOAuthClients({ clients: [client] })[0].clientType).toBe('confidential');
   });
 
+  it('decodes registered URLs and scopes at the API boundary', () => {
+    const parsed = parseOAuthClients({
+      clients: [{ ...client, redirectUrisJson: '["https://app.test/callback"]', allowedScopesJson: '["openid","email"]' }],
+    })[0];
+    expect(parsed.redirectUris).toEqual(['https://app.test/callback']);
+    expect(parsed.allowedScopes).toEqual(['openid', 'email']);
+  });
+
+  it('refuses malformed registered URL metadata', () => {
+    expect(() => parseOAuthClients({ clients: [{ ...client, redirectUrisJson: '[1]' }] })).toThrow(
+      /redirectUrisJson/,
+    );
+  });
+
   // Defaulting an unknown type to `public` silently downgrades how the UI describes the
   // client's authentication.
   it.each(['native', '', undefined])('refuses the unknown client type %p', (clientType) => {
     expect(() => parseOAuthClients({ clients: [{ ...client, clientType }] })).toThrow(
       /clientType/,
+    );
+  });
+});
+
+describe('parseOIDCIssuer', () => {
+  it('reads the configured issuer and removes its trailing slash', () => {
+    expect(parseOIDCIssuer({ issuer: 'https://auth.example.test/' })).toBe(
+      'https://auth.example.test',
     );
   });
 });

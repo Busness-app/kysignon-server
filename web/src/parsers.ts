@@ -72,6 +72,19 @@ function strArray(value: unknown): string[] {
   return value.filter((v): v is string => typeof v === 'string');
 }
 
+function jsonStringArray(source: Record<string, unknown>, key: string): string[] {
+  const encoded = str(source, key);
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(encoded);
+  } catch {
+    return fail(`field "${key}" to contain a JSON string array`);
+  }
+  return arr(decoded, `field "${key}" to contain a JSON array`).map((item) =>
+    typeof item === 'string' ? item : fail(`field "${key}" to contain only strings`),
+  );
+}
+
 /** Reads an array that the server may omit entirely when empty. */
 function list<T>(value: unknown, parse: (item: unknown) => T): T[] {
   if (value === null || value === undefined) return [];
@@ -221,13 +234,17 @@ export function parseOAuthClients(value: unknown): OAuthClient[] {
       id: str(c, 'id'),
       clientName: optStr(c, 'clientName') ?? str(c, 'id'),
       clientType: oneOf(c, 'clientType', ['confidential', 'public'] as const),
-      redirectUrisJson: optStr(c, 'redirectUrisJson') ?? '[]',
-      allowedScopesJson: optStr(c, 'allowedScopesJson') ?? '[]',
+      redirectUris: jsonStringArray(c, 'redirectUrisJson'),
+      allowedScopes: jsonStringArray(c, 'allowedScopesJson'),
       launchUrl: optStr(c, 'launchUrl'),
       enabled: c.enabled !== false,
       createdAt: optStr(c, 'createdAt') ?? '',
     };
   });
+}
+
+export function parseOIDCIssuer(value: unknown): string {
+  return str(obj(value, 'OIDC discovery metadata'), 'issuer').replace(/\/$/, '');
 }
 
 export function parseCreatedClientSecret(value: unknown): string | undefined {

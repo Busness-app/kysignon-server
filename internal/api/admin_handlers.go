@@ -720,6 +720,17 @@ func (h *AdminHandler) CreateApplication(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"invalid_request","error_description":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
+	allowedIcons := map[string]bool{
+		"favicon": true, "globe": true, "mail": true, "lock": true,
+		"bookmark": true, "file-text": true,
+	}
+	if req.IconName == "" {
+		req.IconName = "favicon"
+	}
+	if !allowedIcons[req.IconName] {
+		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
+		return
+	}
 
 	app := &store.Application{
 		ID:          uuid.New().String(),

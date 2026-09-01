@@ -400,6 +400,29 @@ func TestAdminApplicationsGetIsARead(t *testing.T) {
 	}
 }
 
+func TestApplicationIconSelectionIsBounded(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+
+	bad := adminRequest(t, srv, "POST", "/api/admin/applications", cookie,
+		`{"name":"External","url":"https://app.example.test","iconName":"javascript"}`)
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("unknown icon returned %d, want 400", bad.Code)
+	}
+
+	good := adminRequest(t, srv, "POST", "/api/admin/applications", cookie,
+		`{"name":"External","url":"https://app.example.test"}`)
+	if good.Code != http.StatusOK {
+		t.Fatalf("default favicon returned %d: %s", good.Code, good.Body.String())
+	}
+	apps, err := db.ListApplications()
+	if err != nil || len(apps) != 1 || apps[0].IconName != "favicon" {
+		t.Fatalf("default icon was not favicon: %+v, %v", apps, err)
+	}
+}
+
 // postLogin issues a login request that actually reaches the credential check: the CSRF
 // middleware rejects a bare POST long before any password is verified.
 func postLogin(t *testing.T, srv *Server, username, password, ip string) (int, time.Duration) {

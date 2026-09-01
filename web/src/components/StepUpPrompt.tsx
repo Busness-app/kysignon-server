@@ -65,7 +65,7 @@ export function useStepUp() {
   };
 
   const element = prompt ? (
-    <div className="modal-backdrop">
+    <div className="modal-backdrop step-up-backdrop">
       <div className="modal-card">
         <div className="modal-header">
           <h3>Confirm It's You</h3>
@@ -77,35 +77,43 @@ export function useStepUp() {
           <div className="modal-body">
             <p className="modal-desc">{prompt}</p>
 
-            <label className="field-label" htmlFor="admin-stepup-password">
-              Password
-            </label>
-            <input
-              id="admin-stepup-password"
-              type="password"
-              className="text-input"
-              autoComplete="current-password"
-              autoFocus
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
+            <div className="form-group">
+              <label className="form-label" htmlFor="admin-stepup-password">
+                Password
+              </label>
+              <input
+                id="admin-stepup-password"
+                type="password"
+                className="form-input"
+                autoComplete="current-password"
+                autoFocus
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+            </div>
 
-            <label className="field-label" htmlFor="admin-stepup-code" style={{ marginTop: '0.75rem' }}>
-              Authenticator code (or a recovery code), if you have one enrolled
-            </label>
-            <input
-              id="admin-stepup-code"
-              type="text"
-              className="text-input"
-              inputMode="text"
-              autoComplete="one-time-code"
-              placeholder="123456"
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-            />
+            <div className="form-group">
+              <label className="form-label" htmlFor="admin-stepup-code">
+                Authenticator code (or a recovery code), if you have one enrolled
+              </label>
+              <input
+                id="admin-stepup-code"
+                type="text"
+                className="form-input"
+                inputMode="text"
+                autoComplete="one-time-code"
+                placeholder="123456"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+              />
+            </div>
 
-            {error && <div className="form-error">{error}</div>}
+            {error && (
+              <div className="alert-box error" role="alert">
+                {error}
+              </div>
+            )}
           </div>
           <div className="modal-footer">
             <button type="button" className="secondary-btn" onClick={cancel}>

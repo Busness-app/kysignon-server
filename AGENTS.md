@@ -20,6 +20,8 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 - MFA reset invalidates pending native-device pairing tokens; native registration consumes a live token in the same transaction that creates the approver and push method.
 - Native push relay URLs must be HTTPS; relay API keys are runtime secrets loaded from env or generated under the data directory, never committed.
 - FCM token refreshes are authenticated by the enrolled device P-256 key, bound to the configured issuer and a fresh monotonic timestamp, and atomically persisted with their audit event; push tokens are never credentials.
+- The step-up prompt outranks the modals it is opened from (`.step-up-backdrop`); a grant request painted under its caller silently cancels the action it was meant to protect.
+- A client secret is shown once and rotated in place from the clients table; rotation revokes that client's outstanding tokens, so delete-and-recreate is never the recovery path for a lost secret.
 - Sessions have both a configurable absolute lifetime (24h default) and inactivity lifetime (30m default); both are enforced in the store lookup.
 
 # Ponytail, lazy senior dev mode
@@ -33,6 +35,13 @@ Use the smallest correct change.
 5. If a shortcut has a limit, mark it with `ponytail:` and name the upgrade path.
 
 Non-trivial logic must include one runnable check (unit test or minimal self-check).
+
+## Verification
+
+- CI runs Go formatting, build, vet, vulnerability scanning, and race-enabled tests.
+- CI builds, audits, and tests the web app, and rejects stale committed `web/dist` assets.
+- CI audits and typechecks both push Workers and runs their shared and provider behavior tests.
+- CI builds the production image, probes `/readyz`, and verifies public HTTP issuers fail closed.
 
 # DOX framework
 

@@ -8,8 +8,8 @@ const isSuiteClient = (id: string) => SUITE_CLIENT_IDS.includes(id.trim().toLowe
 import { OAuthClient } from '../types';
 import { apiJson, apiRequest, errorMessage, isRecord } from '../api';
 import { isCancelled, useStepUp } from './StepUpPrompt';
-import { parseOAuthClients } from '../parsers';
-import { Plus, Trash2, CheckCircle, AlertTriangle } from 'lucide-react';
+import { parseCreatedClientSecret, parseOAuthClients } from '../parsers';
+import { Plus, Trash2, CheckCircle, AlertTriangle, KeyRound } from 'lucide-react';
 
 export const AdminClients: React.FC = () => {
   const [clients, setClients] = useState<OAuthClient[]>([]);
@@ -22,6 +22,7 @@ export const AdminClients: React.FC = () => {
   const [launchUrl, setLaunchUrl] = useState('');
   const [createdSecret, setCreatedSecret] = useState<string | null>(null);
   const [createdClientId, setCreatedClientId] = useState<string | null>(null);
+  const [secretWasRotated, setSecretWasRotated] = useState(false);
 
   const fetchClients = async () => {
     try {
@@ -106,6 +107,42 @@ export const AdminClients: React.FC = () => {
     }
   };
 
+  /**
+   * Issues a replacement secret for a client whose current one is lost or exposed.
+   *
+   * A secret is shown once, so without this the only recovery is delete-and-recreate, which
+   * drops the registration every downstream service is configured against. Rotating revokes
+   * the client's outstanding tokens server-side, so sign-in through it stays broken until
+   * the new secret is in place.
+   */
+  const handleRotateSecret = async (client: OAuthClient) => {
+    if (
+      !confirm(
+        `Issue a new secret for '${client.clientName}'?\n\nThe current secret stops working immediately and every token this client has issued is revoked. Sign-in through it stays broken until the new secret is configured there.`
+      )
+    )
+      return;
+    try {
+      const grant = await requestGrant(
+        `Rotating '${client.id}' revokes its current secret and every token issued under it.`
+      );
+      const secret = await apiJson(`/api/admin/clients/${client.id}`, parseCreatedClientSecret, {
+        method: 'PUT',
+        stepUpToken: grant,
+        body: JSON.stringify({ rotateSecret: true }),
+      });
+      if (!secret) throw new Error('The server rotated nothing; the old secret is still in force');
+      setCreatedClientId(client.id);
+      setCreatedSecret(secret);
+      setSecretWasRotated(true);
+      setShowModal(true);
+      fetchClients();
+    } catch (err) {
+      if (isCancelled(err)) return;
+      alert(errorMessage(err, 'Failed to rotate client secret'));
+    }
+  };
+
   const handleDeleteClient = async (id: string) => {
     if (!confirm('Are you sure you want to delete this OAuth/OIDC client?')) return;
     try {
@@ -128,6 +165,7 @@ export const AdminClients: React.FC = () => {
     setLaunchUrl('');
     setCreatedSecret(null);
     setCreatedClientId(null);
+    setSecretWasRotated(false);
     setShowModal(false);
   };
 
@@ -190,13 +228,24 @@ export const AdminClients: React.FC = () => {
                       </span>
                     </td>
                     <td className="text-right">
-                      <button
-                        className="icon-btn danger"
-                        onClick={() => handleDeleteClient(c.id)}
-                        title="Delete Client"
-                      >
-                        <Trash2 size={15} />
-                      </button>
+                      <div className="action-buttons-wrap">
+                        {c.clientType === 'confidential' && (
+                          <button
+                            className="icon-btn"
+                            onClick={() => handleRotateSecret(c)}
+                            title="Issue a new client secret"
+                          >
+                            <KeyRound size={15} />
+                          </button>
+                        )}
+                        <button
+                          className="icon-btn danger"
+                          onClick={() => handleDeleteClient(c.id)}
+                          title="Delete Client"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -210,7 +259,7 @@ export const AdminClients: React.FC = () => {
         <div className="modal-backdrop">
           <div className="modal-card">
             <div className="modal-header">
-              <h3>Register OAuth / OIDC Client</h3>
+              <h3>{secretWasRotated ? 'New Client Secret' : 'Register OAuth / OIDC Client'}</h3>
               <button className="close-btn" onClick={resetForm}>
                 ×
               </button>
@@ -356,7 +405,11 @@ export const AdminClients: React.FC = () => {
               <div className="modal-body text-center">
                 <div className="alert-box success">
                   <CheckCircle size={16} />
-                  <span>Client registered successfully!</span>
+                  <span>
+                    {secretWasRotated
+                      ? 'Secret rotated. The previous secret and every token issued under it are now revoked.'
+                      : 'Client registered successfully!'}
+                  </span>
                 </div>
 
                 <div className="form-group mt-3 text-left">

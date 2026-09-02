@@ -14,6 +14,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Yoshiofthewire/kysignon-server/internal/auth"
+	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
 
@@ -188,5 +190,190 @@ func TestPasskeyRegistrationRejectsForeignOrigin(t *testing.T) {
 
 	if rec.Code == http.StatusOK {
 		t.Fatal("a ceremony completed at another origin must not enrol a credential")
+	}
+}
+
+// enrolPasskey registers a credential directly in the store, so login tests do not depend
+// on the enrolment endpoints.
+func enrolPasskey(t *testing.T, dbStore *store.Store, userID string, a *testAuthenticator) {
+	t.Helper()
+	if err := dbStore.CreateWebAuthnCredential(&store.WebAuthnCredential{
+		ID:            uuid.New().String(),
+		UserID:        userID,
+		CredentialID:  a.credID,
+		PublicKeySPKI: a.spkiB64(t),
+		Name:          "test key",
+	}, nil); err != nil {
+		t.Fatalf("CreateWebAuthnCredential: %v", err)
+	}
+}
+
+// passwordLogin performs the first leg and returns the second-factor token.
+func passwordLogin(t *testing.T, srv *Server, username, password string) string {
+	t.Helper()
+	rec := anonPost(t, srv, "/api/auth/login", map[string]string{"username": username, "password": password})
+	var resp struct {
+		MFAToken string `json:"mfaToken"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.MFAToken == "" {
+		t.Fatalf("login did not return an mfa token (%d): %s", rec.Code, rec.Body.String())
+	}
+	return resp.MFAToken
+}
+
+func TestLoginAdvertisesPasskeyMethod(t *testing.T) {
+	f, cleanup := newStepUpFixture(t)
+	defer cleanup()
+
+	enrolPasskey(t, f.store, f.user.ID, newTestAuthenticator(t, "Y3JlZC1sb2dpbg"))
+
+	rec := anonPost(t, f.srv, "/api/auth/login", map[string]string{"username": f.user.Username, "password": f.pass})
+	var resp struct {
+		MFARequired bool     `json:"mfaRequired"`
+		MFAMethods  []string `json:"mfaMethods"`
+		MFAToken    string   `json:"mfaToken"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if !resp.MFARequired || resp.MFAToken == "" {
+		t.Fatalf("a user with only a passkey must be challenged: %+v", resp)
+	}
+	found := false
+	for _, m := range resp.MFAMethods {
+		if m == "webauthn" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("mfaMethods = %v, want it to contain webauthn", resp.MFAMethods)
+	}
+}
+
+// assertionFields drives the begin leg and returns a ready-to-post verify body signed by a.
+// checkAllow is skipped for the cross-account test, whose whole point is presenting a
+// credential the allow-list does not contain.
+func assertionFields(t *testing.T, srv *Server, mfaToken string, a *testAuthenticator, checkAllow bool) map[string]string {
+	t.Helper()
+
+	rec := anonPost(t, srv, "/api/auth/mfa/webauthn/begin", map[string]string{"mfaToken": mfaToken})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("begin returned %d: %s", rec.Code, rec.Body.String())
+	}
+	var begun struct {
+		Challenge        string   `json:"challenge"`
+		RPID             string   `json:"rpId"`
+		AllowCredentials []string `json:"allowCredentials"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &begun); err != nil {
+		t.Fatalf("decode begin response: %v", err)
+	}
+	if checkAllow && (len(begun.AllowCredentials) != 1 || begun.AllowCredentials[0] != a.credID) {
+		t.Fatalf("allowCredentials = %v", begun.AllowCredentials)
+	}
+
+	a.signCount++
+	ad := a.authData(begun.RPID, 0x01|0x04)
+	cdj := a.clientData(t, "webauthn.get", begun.Challenge, "http://localhost:5867")
+	return map[string]string{
+		"mfaToken":          mfaToken,
+		"credentialId":      a.credID,
+		"authenticatorData": b64(ad),
+		"clientDataJSON":    b64(cdj),
+		"signature":         a.sign(t, ad, cdj),
+	}
+}
+
+func TestPasskeyLoginIssuesSession(t *testing.T) {
+	f, cleanup := newStepUpFixture(t)
+	defer cleanup()
+
+	a := newTestAuthenticator(t, "Y3JlZC1sb2dpbg")
+	enrolPasskey(t, f.store, f.user.ID, a)
+
+	mfaToken := passwordLogin(t, f.srv, f.user.Username, f.pass)
+	rec := anonPost(t, f.srv, "/api/auth/mfa/webauthn/verify", assertionFields(t, f.srv, mfaToken, a, true))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verify returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	sessionIssued := false
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "kysignon_session" && c.Value != "" {
+			sessionIssued = true
+		}
+	}
+	if !sessionIssued {
+		t.Fatal("a verified passkey assertion must issue a session cookie")
+	}
+
+	creds, _ := f.store.ListUserWebAuthnCredentials(f.user.ID)
+	if creds[0].SignCount != 1 || creds[0].LastUsedAt == nil {
+		t.Fatalf("use was not recorded on the credential: %+v", creds[0])
+	}
+}
+
+func TestPasskeyLoginRejectsForgedSignature(t *testing.T) {
+	f, cleanup := newStepUpFixture(t)
+	defer cleanup()
+
+	a := newTestAuthenticator(t, "Y3JlZC1sb2dpbg")
+	enrolPasskey(t, f.store, f.user.ID, a)
+
+	mfaToken := passwordLogin(t, f.srv, f.user.Username, f.pass)
+	fields := assertionFields(t, f.srv, mfaToken, a, true)
+	fields["signature"] = b64([]byte("not a signature"))
+
+	if rec := anonPost(t, f.srv, "/api/auth/mfa/webauthn/verify", fields); rec.Code == http.StatusOK {
+		t.Fatal("a forged signature must not issue a session")
+	}
+}
+
+func TestPasskeyAssertionIsSingleUse(t *testing.T) {
+	f, cleanup := newStepUpFixture(t)
+	defer cleanup()
+
+	a := newTestAuthenticator(t, "Y3JlZC1sb2dpbg")
+	enrolPasskey(t, f.store, f.user.ID, a)
+
+	mfaToken := passwordLogin(t, f.srv, f.user.Username, f.pass)
+	fields := assertionFields(t, f.srv, mfaToken, a, true)
+
+	if rec := anonPost(t, f.srv, "/api/auth/mfa/webauthn/verify", fields); rec.Code != http.StatusOK {
+		t.Fatalf("first verify returned %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := anonPost(t, f.srv, "/api/auth/mfa/webauthn/verify", fields); rec.Code == http.StatusOK {
+		t.Fatal("a replayed assertion must not issue a second session")
+	}
+}
+
+func TestPasskeyLoginRejectsAnotherUsersCredential(t *testing.T) {
+	f, cleanup := newStepUpFixture(t)
+	defer cleanup()
+
+	// The victim holds their own passkey; the attacker holds one enrolled to a different
+	// account and presents it against the victim's second-factor token.
+	enrolPasskey(t, f.store, f.user.ID, newTestAuthenticator(t, "Y3JlZC12aWN0aW0"))
+
+	hash, err := auth.HashPassword("AttackerPassword1!")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	attacker := &store.User{
+		ID: uuid.New().String(), Username: "attacker-" + uuid.New().String()[:8],
+		DisplayName: "Attacker", Email: uuid.New().String()[:8] + "@attacker.test",
+		PasswordHash: hash, Role: "user", Status: "active",
+	}
+	if err := f.store.CreateUser(attacker); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	attackerAuth := newTestAuthenticator(t, "Y3JlZC1hdHRhY2tlcg")
+	enrolPasskey(t, f.store, attacker.ID, attackerAuth)
+
+	mfaToken := passwordLogin(t, f.srv, f.user.Username, f.pass)
+	fields := assertionFields(t, f.srv, mfaToken, attackerAuth, false)
+
+	if rec := anonPost(t, f.srv, "/api/auth/mfa/webauthn/verify", fields); rec.Code == http.StatusOK {
+		t.Fatal("a credential belonging to another account must not satisfy this user's challenge")
 	}
 }

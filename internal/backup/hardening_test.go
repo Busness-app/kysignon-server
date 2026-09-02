@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/crypto"
 )
 
 // sealTar wraps a hand-built tar stream as a capsule, so extraction can be tested against

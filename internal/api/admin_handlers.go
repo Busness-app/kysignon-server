@@ -11,11 +11,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
-	"github.com/Yoshiofthewire/kysignon-server/internal/auth"
-	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
-	"github.com/Yoshiofthewire/kysignon-server/internal/store"
-	"github.com/Yoshiofthewire/kysignon-server/internal/sync"
+	"github.com/Busness-app/kysignon-server/internal/audit"
+	"github.com/Busness-app/kysignon-server/internal/auth"
+	"github.com/Busness-app/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/store"
+	"github.com/Busness-app/kysignon-server/internal/sync"
 	"github.com/google/uuid"
 )
 

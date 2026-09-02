@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/backup"
-	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/backup"
+	"github.com/Busness-app/kysignon-server/internal/crypto"
 	_ "modernc.org/sqlite"
 )
 

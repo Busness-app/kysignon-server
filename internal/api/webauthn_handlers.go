@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
-	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
-	"github.com/Yoshiofthewire/kysignon-server/internal/mfa"
-	"github.com/Yoshiofthewire/kysignon-server/internal/store"
-	"github.com/Yoshiofthewire/kysignon-server/internal/webauthn"
+	"github.com/Busness-app/kysignon-server/internal/audit"
+	"github.com/Busness-app/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/mfa"
+	"github.com/Busness-app/kysignon-server/internal/store"
+	"github.com/Busness-app/kysignon-server/internal/webauthn"
 	"github.com/google/uuid"
 )
 

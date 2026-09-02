@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/store"
+	"github.com/Busness-app/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
 

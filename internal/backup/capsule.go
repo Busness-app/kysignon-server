@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/crypto"
 )
 
 var (

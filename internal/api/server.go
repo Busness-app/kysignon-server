@@ -103,6 +103,7 @@ func (s *Server) routes() *http.ServeMux {
 	adminH := NewAdminHandler(s.store, s.syncEngine, s.audit, s.middleware, s.cfg.IssuerURL)
 	oauthH := NewOAuthHandler(s.store, s.oauthEngine, s.audit, s.middleware)
 	backupH := NewBackupHandler(s.cfg, s.store, s.audit, s.middleware)
+	webauthnH := NewWebAuthnHandler(s.store, s.audit, s.mfaEngine, s.middleware, s.cfg.RPID, s.cfg.Origin)
 
 	// Liveness: this process is running and can serve a request. Nothing more is claimed,
 	// which is the only honest thing a liveness probe can say.
@@ -148,6 +149,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/user/mfa/totp/enable", authM(http.HandlerFunc(devH.EnableTOTP)))
 	mux.Handle("POST /api/user/recovery-codes", authM(http.HandlerFunc(devH.GenerateRecoveryCodes)))
 	mux.Handle("GET /api/user/applications", authM(http.HandlerFunc(devH.ListApplications)))
+
+	mux.Handle("POST /api/user/passkeys/register/begin", authM(s.middleware.RateLimit("passkey_enrol", 10, 0.2)(http.HandlerFunc(webauthnH.BeginRegistration))))
+	mux.Handle("POST /api/user/passkeys/register/finish", authM(s.middleware.RateLimit("passkey_enrol", 10, 0.2)(http.HandlerFunc(webauthnH.FinishRegistration))))
 
 	// OAuth & OIDC. OptionalAuth is the same session check RequireAuth uses, so an
 	// expired session cannot authorise an SSO redirect.

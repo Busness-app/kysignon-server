@@ -195,6 +195,19 @@ func TestSessionTimeoutConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadDerivesWebAuthnRelyingParty(t *testing.T) {
+	t.Setenv("KYSIGNON_ISSUER_URL", "https://auth.example.com/")
+	t.Setenv("KYSIGNON_DATA_DIR", t.TempDir())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RPID != "auth.example.com" || cfg.Origin != "https://auth.example.com" {
+		t.Fatalf("RPID=%q Origin=%q", cfg.RPID, cfg.Origin)
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

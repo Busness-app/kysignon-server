@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -250,11 +249,8 @@ func TestVerifyClientDataRejectsBase64Variants(t *testing.T) {
 	// The challenge is compared as the exact base64url string the browser echoes. A
 	// padded or standard-alphabet variant of the same bytes is a different string and
 	// must not be accepted, or a lookup keyed on the challenge could miss.
-	cdj := clientDataJSON(t, "webauthn.get", "Q0hBTExFTkdF", testOrigin)
-	padded := base64.StdEncoding.EncodeToString([]byte("CHALLENGE"))
-	if !strings.HasSuffix(padded, "=") {
-		t.Skip("test vector no longer produces padding")
-	}
+	cdj := clientDataJSON(t, "webauthn.get", "Q0hBTExFTkdFUw", testOrigin)
+	padded := base64.StdEncoding.EncodeToString([]byte("CHALLENGES"))
 	if err := VerifyClientData(cdj, "webauthn.get", padded, testOrigin); err == nil {
 		t.Fatal("expected a padded challenge encoding to be rejected")
 	}

@@ -19,6 +19,7 @@ The first release prioritizes secure authentication, automated suite-wide accoun
 - **OAuth 2.0 & OpenID Connect**: Authorization-code flow with PKCE, RS256 ID-token signing, JWKS discovery, and userinfo endpoints.
 - **Native Device Pairing & Push MFA**: Direct implementation in KySignOn of device registration (`/api/notifications/native/register`) using 90-second ephemeral PIN/QR codes, push challenge dispatch with 2-digit number matching and decoys, and device pull-mode queue.
 - **TOTP MFA & Recovery Codes**: Encrypted TOTP secret storage, time-step verification, and single-use hashed recovery backup codes.
+- **Passkeys (WebAuthn Level 2)**: ES256 credentials as a second factor, with single-use server-issued challenges, signature-counter clone detection, and backup-eligibility recorded per credential. Attestation is not verified; passwordless sign-in is deferred.
 - **Dedicated Authenticator Separation**: Support for KySecurity Authenticator mobile app as the long-term MFA client, maintaining strict separation from the password vault.
 - **Web UI & Application Launcher**: KySecurity Patina themed web interface (React, TypeScript, Vite static bundle served by Go) with application cards, account settings, and device management.
 - **Admin Dashboard**: Comprehensive management of users, paired KySecurity systems, manual directory resyncs, OAuth/OIDC clients, application links, MFA resets, session revocation, and audit logs.
@@ -370,6 +371,7 @@ CREATE TABLE audit_events (
 | View Application Launcher | Yes | Yes |
 | Manage personal MFA & pair mobile devices | Yes | Yes |
 | View / generate personal recovery codes | Yes | Yes |
+| Enrol and remove personal passkeys | Yes | Yes |
 | Create, disable, update, delete users | No | Yes |
 | Pair downstream KySecurity products (generate pairing key) | No | Yes |
 | Trigger manual account directory resyncs | No | Yes |
@@ -384,6 +386,7 @@ CREATE TABLE audit_events (
 - **MFA Secrets Encryption**: TOTP secrets are encrypted at rest using AES-GCM (256-bit). The master encryption key is loaded via environment variable or Docker secret, never stored in SQLite.
 - **OIDC Token Signing**: ID tokens are signed with RS256. The private RSA key is stored in the Docker protected volume/secret, and the public key is exposed at `/.well-known/jwks.json`.
 - **System Sync Authentication**: Webhook replication payloads are signed with HMAC-SHA256 using the mutual secret established during UI pairing.
+- **Passkey Verification**: WebAuthn assertions are ES256 only, verified with `crypto/ecdsa` against an SPKI public key recorded at enrolment. Challenges are 256-bit, single-use, bound to one user and one ceremony purpose, and expire in three minutes. A signature counter that fails to advance rejects the assertion unless the authenticator reports zero throughout.
 - **Rate Limiting**: IP-level and account-level rate limits are applied to `/oauth/authorize`, `/oauth/token`, `/api/notifications/native/register`, and MFA challenge endpoints.
 - **Session Security**: Browser cookies are flagged `HttpOnly`, `Secure` (over TLS), and `SameSite=Lax` (or `Strict` for dashboard actions). CSRF tokens are enforced on all state-modifying requests.
 - **Auditing & Logging**: Structured logs emitted to stdout/stderr. No passwords, tokens, client secrets, recovery codes, or TOTP secrets are ever logged.

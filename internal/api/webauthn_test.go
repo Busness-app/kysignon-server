@@ -416,3 +416,46 @@ func TestPasskeyMalformedCeremonyCountsAsFailure(t *testing.T) {
 		t.Fatalf("verify after exhausting the attempt budget returned %d, want 401 (token invalid): %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestListAndDeletePasskeys(t *testing.T) {
+	f, cleanup := newStepUpFixture(t)
+	defer cleanup()
+
+	enrolPasskey(t, f.store, f.user.ID, newTestAuthenticator(t, "Y3JlZC1saXN0"))
+
+	rec := f.do(t, http.MethodGet, "/api/user/passkeys", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var listed []struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		PublicKeySPKI string `json:"publicKeySpki"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Name != "test key" {
+		t.Fatalf("unexpected list: %+v", listed)
+	}
+	if listed[0].PublicKeySPKI != "" {
+		t.Fatal("the credential public key must not be serialised to clients")
+	}
+
+	// Removing a factor is destructive, so it costs a step-up grant.
+	rec = f.do(t, http.MethodDelete, "/api/user/passkeys/"+listed[0].ID, "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("delete without step-up returned %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = f.do(t, http.MethodDelete, "/api/user/passkeys/"+listed[0].ID, f.grant(t))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	remaining, _ := f.store.ListUserWebAuthnCredentials(f.user.ID)
+	if len(remaining) != 0 {
+		t.Fatalf("%d passkeys survived deletion", len(remaining))
+	}
+}

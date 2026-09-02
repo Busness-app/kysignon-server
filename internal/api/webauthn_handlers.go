@@ -373,3 +373,58 @@ func (h *WebAuthnHandler) FinishLogin(w http.ResponseWriter, r *http.Request, au
 	_ = h.store.ClearFailedLogins(user.ID)
 	auth.createSessionAndRespond(w, r, user)
 }
+
+// ListPasskeys returns the caller's enrolled passkeys. The public key and signature
+// counter are omitted by the struct tags on store.WebAuthnCredential; nothing here needs
+// to reach a browser.
+func (h *WebAuthnHandler) ListPasskeys(w http.ResponseWriter, r *http.Request) {
+	user := GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	creds, err := h.store.ListUserWebAuthnCredentials(user.ID)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if creds == nil {
+		creds = []store.WebAuthnCredential{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(creds)
+}
+
+// DeletePasskey removes one of the caller's passkeys. Removing a factor is destructive, so
+// it costs a step-up grant: a borrowed session must not be able to strip the account back
+// down to a single factor.
+func (h *WebAuthnHandler) DeletePasskey(w http.ResponseWriter, r *http.Request) {
+	user := GetUserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	if err := consumeStepUp(h.store, r); err != nil {
+		writeStepUpError(w, err)
+		return
+	}
+
+	id := r.PathValue("id")
+	removed := h.audit.Prepare("mfa.passkey_removed", user.ID, user.Username, user.ID, "user",
+		h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"credentialRecordId": id})
+	deleted, err := h.store.DeleteWebAuthnCredential(id, user.ID, removed.Row)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if !deleted {
+		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		return
+	}
+	removed.Committed()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+}

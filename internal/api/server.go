@@ -156,6 +156,8 @@ func (s *Server) routes() *http.ServeMux {
 
 	mux.Handle("POST /api/user/passkeys/register/begin", authM(s.middleware.RateLimit("passkey_enrol", 10, 0.2)(http.HandlerFunc(webauthnH.BeginRegistration))))
 	mux.Handle("POST /api/user/passkeys/register/finish", authM(s.middleware.RateLimit("passkey_enrol", 10, 0.2)(http.HandlerFunc(webauthnH.FinishRegistration))))
+	mux.Handle("GET /api/user/passkeys", authM(http.HandlerFunc(webauthnH.ListPasskeys)))
+	mux.Handle("DELETE /api/user/passkeys/{id}", authM(http.HandlerFunc(webauthnH.DeletePasskey)))
 
 	// OAuth & OIDC. OptionalAuth is the same session check RequireAuth uses, so an
 	// expired session cannot authorise an SSO redirect.

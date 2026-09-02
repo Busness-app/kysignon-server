@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/Yoshiofthewire/kysignon-server/internal/auth"
+	"github.com/Yoshiofthewire/kysignon-server/internal/mfa"
 	"github.com/Yoshiofthewire/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
@@ -375,5 +376,43 @@ func TestPasskeyLoginRejectsAnotherUsersCredential(t *testing.T) {
 
 	if rec := anonPost(t, f.srv, "/api/auth/mfa/webauthn/verify", fields); rec.Code == http.StatusOK {
 		t.Fatal("a credential belonging to another account must not satisfy this user's challenge")
+	}
+}
+
+// TestPasskeyMalformedCeremonyCountsAsFailure proves a client holding a valid mfaToken
+// cannot submit unparseable ceremony fields for free. If malformed input stopped counting
+// against the token's attempt budget, this loop would keep returning 400 forever; instead
+// the token itself becomes invalid once the budget is exhausted, and every subsequent
+// request — malformed or not — fails token resolution first.
+func TestPasskeyMalformedCeremonyCountsAsFailure(t *testing.T) {
+	f, cleanup := newStepUpFixture(t)
+	defer cleanup()
+
+	a := newTestAuthenticator(t, "Y3JlZC1sb2dpbg")
+	enrolPasskey(t, f.store, f.user.ID, a)
+
+	mfaToken := passwordLogin(t, f.srv, f.user.Username, f.pass)
+
+	malformed := map[string]string{
+		"mfaToken":          mfaToken,
+		"credentialId":      a.credID,
+		"authenticatorData": "not valid base64url!!",
+		"clientDataJSON":    b64([]byte(`{"type":"webauthn.get","challenge":"x"}`)),
+		"signature":         b64([]byte("sig")),
+	}
+
+	for i := 0; i < mfa.MaxMFAAttempts; i++ {
+		rec := anonPost(t, f.srv, "/api/auth/mfa/webauthn/verify", malformed)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("malformed attempt %d returned %d, want 400: %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+
+	// The budget is now exhausted. A further request against the same token must fail at
+	// token resolution (401), not at field parsing (400) — proof the malformed attempts
+	// above were each counted via RegisterMFAFailure.
+	rec := anonPost(t, f.srv, "/api/auth/mfa/webauthn/verify", malformed)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("verify after exhausting the attempt budget returned %d, want 401 (token invalid): %s", rec.Code, rec.Body.String())
 	}
 }

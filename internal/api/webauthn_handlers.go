@@ -289,11 +289,22 @@ func (h *WebAuthnHandler) FinishLogin(w http.ResponseWriter, r *http.Request, au
 		return
 	}
 
+	// From here on, every rejection counts against token.ID: this is the one handler that
+	// mints a session, so nothing past a resolved token gets free attempts. Status code and
+	// body are chosen per call site; the counting and audit write always happen.
+	failed := func(status int, body, reason string) {
+		attempts, _ := h.mfaEngine.RegisterMFAFailure(token.ID)
+		h.audit.Record("auth.mfa_passkey", user.ID, user.Username, user.ID, "user",
+			h.middleware.ClientIP(r), r.UserAgent(), "failure",
+			map[string]any{"reason": reason, "attempts": attempts})
+		http.Error(w, body, status)
+	}
+
 	authData, err1 := base64.RawURLEncoding.DecodeString(req.AuthenticatorData)
 	clientData, err2 := base64.RawURLEncoding.DecodeString(req.ClientDataJSON)
 	signature, err3 := base64.RawURLEncoding.DecodeString(req.Signature)
 	if err1 != nil || err2 != nil || err3 != nil {
-		http.Error(w, `{"error":"invalid_request","error_description":"Ceremony fields must be base64url"}`, http.StatusBadRequest)
+		failed(http.StatusBadRequest, `{"error":"invalid_request","error_description":"Ceremony fields must be base64url"}`, "malformed_ceremony")
 		return
 	}
 
@@ -301,16 +312,8 @@ func (h *WebAuthnHandler) FinishLogin(w http.ResponseWriter, r *http.Request, au
 		Challenge string `json:"challenge"`
 	}
 	if err := json.Unmarshal(clientData, &cd); err != nil || cd.Challenge == "" {
-		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+		failed(http.StatusBadRequest, `{"error":"invalid_request"}`, "malformed_ceremony")
 		return
-	}
-
-	failed := func(reason string) {
-		attempts, _ := h.mfaEngine.RegisterMFAFailure(token.ID)
-		h.audit.Record("auth.mfa_passkey", user.ID, user.Username, user.ID, "user",
-			h.middleware.ClientIP(r), r.UserAgent(), "failure",
-			map[string]any{"reason": reason, "attempts": attempts})
-		http.Error(w, `{"error":"invalid_assertion","error_description":"Passkey verification failed"}`, http.StatusUnauthorized)
 	}
 
 	spent, err := h.store.ConsumeWebAuthnChallenge(cd.Challenge, "authenticate", user.ID)
@@ -319,7 +322,7 @@ func (h *WebAuthnHandler) FinishLogin(w http.ResponseWriter, r *http.Request, au
 		return
 	}
 	if !spent {
-		failed("challenge_unusable")
+		failed(http.StatusUnauthorized, `{"error":"invalid_assertion","error_description":"Passkey verification failed"}`, "challenge_unusable")
 		return
 	}
 
@@ -331,7 +334,7 @@ func (h *WebAuthnHandler) FinishLogin(w http.ResponseWriter, r *http.Request, au
 		return
 	}
 	if cred == nil {
-		failed("unknown_credential")
+		failed(http.StatusUnauthorized, `{"error":"invalid_assertion","error_description":"Passkey verification failed"}`, "unknown_credential")
 		return
 	}
 
@@ -352,7 +355,7 @@ func (h *WebAuthnHandler) FinishLogin(w http.ResponseWriter, r *http.Request, au
 		StoredSignCount:   cred.SignCount,
 	})
 	if err != nil {
-		failed("assertion_invalid")
+		failed(http.StatusUnauthorized, `{"error":"invalid_assertion","error_description":"Passkey verification failed"}`, "assertion_invalid")
 		return
 	}
 

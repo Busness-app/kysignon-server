@@ -7,13 +7,21 @@ describe('base64url codecs', () => {
     expect(Array.from(fromBase64Url(toBase64Url(bytes.buffer)))).toEqual(Array.from(bytes));
   });
 
-  it('emits no padding and no standard-alphabet characters', () => {
-    // The server compares the challenge as an exact string. Padding or +/ would not match.
+  it('encodes to the exact base64url form (no padding, URL-safe alphabet)', () => {
+    // Concrete output: [251, 255, 190, 254] → '-_--_g'
+    // Standard base64 would be '+/++/g=='; base64url unpadded is '-_--_g'
     const bytes = new Uint8Array([251, 255, 190, 254]);
     const encoded = toBase64Url(bytes.buffer);
+    expect(encoded).toBe('-_--_g');
     expect(encoded).not.toContain('=');
     expect(encoded).not.toContain('+');
     expect(encoded).not.toContain('/');
+  });
+
+  it('decodes base64url strings with URL-safe alphabet back to bytes', () => {
+    // Exercise the alphabet-restore branch: '-_--_g' → [251, 255, 190, 254]
+    const decoded = fromBase64Url('-_--_g');
+    expect(Array.from(decoded)).toEqual([251, 255, 190, 254]);
   });
 
   it('decodes a string the server would have produced', () => {

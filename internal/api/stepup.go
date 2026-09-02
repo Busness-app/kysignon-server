@@ -69,8 +69,11 @@ func (h *AuthHandler) RequestStepUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// An enrolled factor must also be presented. Password alone would let a session thief
-	// who also phished the password replace the factor they cannot pass.
+	// A TOTP code is demanded in addition to the password so a session thief who also
+	// phished the password still cannot replace the factor they cannot pass. This only
+	// covers accounts with TOTP enrolled: passkeys are not in mfa_methods, so an account
+	// whose sole second factor is a passkey (or a push device) currently gets a step-up
+	// grant from the password alone. Tracked as a follow-up, not fixed here.
 	methods, err := h.store.ListUserMFAMethods(user.ID)
 	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)

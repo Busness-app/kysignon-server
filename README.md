@@ -219,7 +219,10 @@ on `localhost`, so a deployment reached by IP or by a name without TLS cannot en
 
 **Enrolling or removing a passkey spends a step-up grant**, like every other change to an
 account's factors. Resetting a user's MFA deletes their passkeys along with their TOTP
-secret and recovery codes.
+secret and recovery codes. Step-up itself only demands a second factor when TOTP is
+enrolled, so for an account whose only second factor is a passkey, a step-up grant
+currently costs the password alone — enrol a passkey alongside TOTP or a push device
+rather than as an account's sole factor.
 
 **Destructive admin operations require step-up re-authentication.** Creating or editing an
 account, resetting someone's MFA, deleting a user, registering or deleting an OAuth client,

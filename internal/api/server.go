@@ -129,7 +129,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/auth/mfa/push/poll", s.middleware.RateLimit("push_poll", 120, 2.0)(http.HandlerFunc(authH.PollPushChallenge)))
 	mux.Handle("POST /api/auth/mfa/push/finish", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(authH.FinishPushLogin)))
 	mux.Handle("POST /api/mfa/push/respond", s.middleware.RateLimit("push_respond", 15, 0.5)(http.HandlerFunc(authH.RespondPush)))
-	mux.Handle("POST /api/auth/mfa/webauthn/begin", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(webauthnH.BeginLogin)))
+	mux.Handle("POST /api/auth/mfa/webauthn/begin", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webauthnH.BeginLogin(w, r, authH)
+	})))
 	mux.Handle("POST /api/auth/mfa/webauthn/verify", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		webauthnH.FinishLogin(w, r, authH)
 	})))

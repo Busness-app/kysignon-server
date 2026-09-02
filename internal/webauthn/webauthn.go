@@ -135,6 +135,7 @@ type AssertionInput struct {
 	Origin            string
 	RPID              string
 	StoredSignCount   uint32
+	BackupEligible    bool
 }
 
 // VerifyAssertion checks a credential assertion end to end and returns the authenticator
@@ -164,8 +165,11 @@ func VerifyAssertion(in AssertionInput) (AuthenticatorData, error) {
 
 	// A counter that fails to advance means the authenticator was cloned, or the response
 	// was replayed. Authenticators that never count report zero forever; only those are
-	// exempt (WebAuthn Level 2, section 6.1.1).
-	if !(ad.SignCount == 0 && in.StoredSignCount == 0) && ad.SignCount <= in.StoredSignCount {
+	// exempt (WebAuthn Level 2, section 6.1.1). A backup-eligible credential lives on
+	// several devices that each keep their own counter, so a sibling reporting a lower
+	// value than the one on record is normal, not evidence of cloning — WebAuthn Level 3
+	// recommends not enforcing the counter for those credentials at all.
+	if !in.BackupEligible && !(ad.SignCount == 0 && in.StoredSignCount == 0) && ad.SignCount <= in.StoredSignCount {
 		return AuthenticatorData{}, fmt.Errorf("signature counter did not advance: got %d, stored %d", ad.SignCount, in.StoredSignCount)
 	}
 

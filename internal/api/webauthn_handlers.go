@@ -144,8 +144,16 @@ func (h *WebAuthnHandler) FinishRegistration(w http.ResponseWriter, r *http.Requ
 	authData, err1 := base64.RawURLEncoding.DecodeString(req.AuthenticatorData)
 	clientData, err2 := base64.RawURLEncoding.DecodeString(req.ClientDataJSON)
 	publicKey, err3 := base64.RawURLEncoding.DecodeString(req.PublicKey)
-	if err1 != nil || err2 != nil || err3 != nil {
+	credentialID, err4 := base64.RawURLEncoding.DecodeString(req.CredentialID)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
 		http.Error(w, `{"error":"invalid_request","error_description":"Ceremony fields must be base64url"}`, http.StatusBadRequest)
+		return
+	}
+	// The WebAuthn spec caps credential IDs at 1023 bytes. The column is globally unique,
+	// so an oversized or arbitrary value could break the caller's own login and squat a
+	// string against every other account.
+	if len(credentialID) > 1023 {
+		http.Error(w, `{"error":"invalid_request","error_description":"Credential ID exceeds the maximum length"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -227,16 +235,18 @@ type beginLoginResponse struct {
 // BeginLogin returns the parameters for navigator.credentials.get. The user comes from the
 // stored second-factor token, never from client input, so the allow-list cannot be steered
 // onto another account's credentials.
-func (h *WebAuthnHandler) BeginLogin(w http.ResponseWriter, r *http.Request) {
+//
+// ponytail: passwordless passkey login needs discoverable credentials and a userHandle
+// lookup — see companion plan 1b.
+func (h *WebAuthnHandler) BeginLogin(w http.ResponseWriter, r *http.Request, auth *AuthHandler) {
 	var req beginLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.MFAToken == "" {
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
 
-	token, err := h.mfaEngine.ValidateMFAToken(req.MFAToken)
-	if err != nil {
-		http.Error(w, `{"error":"invalid_mfa_token","error_description":"Second-factor token is invalid or expired"}`, http.StatusUnauthorized)
+	token, _, ok := auth.resolveMFAToken(w, req.MFAToken)
+	if !ok {
 		return
 	}
 
@@ -353,6 +363,7 @@ func (h *WebAuthnHandler) FinishLogin(w http.ResponseWriter, r *http.Request, au
 		Origin:            h.origin,
 		RPID:              h.rpID,
 		StoredSignCount:   cred.SignCount,
+		BackupEligible:    cred.BackupEligible,
 	})
 	if err != nil {
 		failed(http.StatusUnauthorized, `{"error":"invalid_assertion","error_description":"Passkey verification failed"}`, "assertion_invalid")

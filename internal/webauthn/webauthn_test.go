@@ -186,6 +186,41 @@ func TestVerifyAssertionAcceptsBothCountersZero(t *testing.T) {
 	}
 }
 
+// TestVerifyAssertionBackupEligibleCounterExemption proves both halves of the fix: a
+// backup-eligible (cloud-synced) credential must authenticate even when a sibling device's
+// counter fails to advance past the stored value, while a device-bound credential must
+// still be rejected in that same situation — that is where clone detection means something.
+func TestVerifyAssertionBackupEligibleCounterExemption(t *testing.T) {
+	key, spki := testKey(t)
+	cdj := clientDataJSON(t, "webauthn.get", "Q0hBTExFTkdF", testOrigin)
+	// A sibling device reports a lower counter than the one on record — the normal case
+	// for a passkey synced across several devices that each keep their own counter.
+	ad := authData(testRPID, FlagUserPresent, 2)
+
+	base := AssertionInput{
+		AuthenticatorData: ad,
+		ClientDataJSON:    cdj,
+		Signature:         signAssertion(t, key, ad, cdj),
+		PublicKeySPKI:     spki,
+		Challenge:         "Q0hBTExFTkdF",
+		Origin:            testOrigin,
+		RPID:              testRPID,
+		StoredSignCount:   9,
+	}
+
+	backupEligible := base
+	backupEligible.BackupEligible = true
+	if _, err := VerifyAssertion(backupEligible); err != nil {
+		t.Fatalf("a backup-eligible credential must authenticate despite a non-advancing counter: %v", err)
+	}
+
+	deviceBound := base
+	deviceBound.BackupEligible = false
+	if _, err := VerifyAssertion(deviceBound); err == nil {
+		t.Fatal("a device-bound credential must still be rejected when its counter fails to advance")
+	}
+}
+
 func TestVerifyRegistrationRequiresUserPresence(t *testing.T) {
 	_, spki := testKey(t)
 	cdj := clientDataJSON(t, "webauthn.create", "Q0hBTExFTkdF", testOrigin)

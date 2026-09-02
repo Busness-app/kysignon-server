@@ -431,7 +431,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
         </div>
 
         <p className="section-desc">
-          A passkey lets you sign in using this device's built-in authenticator (fingerprint, face, or security key) instead of a password and a separate code.
+          A passkey lets you sign in using this device's built-in authenticator (fingerprint, face, or security key) as your second factor, after your password.
         </p>
 
         {isPasskeySupported() && (
@@ -478,7 +478,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
                   </span>
                 </div>
                 <div className="device-status">
-                  {pk.backupEligible ? (
+                  {pk.backupState ? (
                     <span
                       className="badge-approver"
                       title="This passkey is stored in your account provider's cloud (e.g. iCloud Keychain, Google Password Manager) and may be available on your other devices."

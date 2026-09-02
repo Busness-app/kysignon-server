@@ -3,10 +3,14 @@ import {
   parseApplications,
   parseAuditPage,
   parseAuthStep,
+  parseBeginLogin,
+  parseBeginRegistration,
   parseMe,
   parseOAuthClients,
   parseOIDCIssuer,
   parsePairedSystems,
+  parsePasskeys,
+  parseSuccess,
   parseUsers,
 } from './parsers';
 
@@ -206,5 +210,89 @@ describe('parseApplications', () => {
       applications: [{ id: 'x', name: 'X', url: 'https://x.test', iconName: 'globe', source: 'admin' }],
     });
     expect(app.source).toBeUndefined();
+  });
+});
+
+describe('parsePasskeys', () => {
+  const passkey = {
+    id: 'p1',
+    name: 'YubiKey',
+    backupEligible: true,
+    backupState: true,
+    createdAt: '2026-01-01T00:00:00Z',
+  };
+
+  // The server answers with a bare array, not one wrapped in an object.
+  it('reads the bare array the server sends', () => {
+    expect(parsePasskeys([passkey])[0].name).toBe('YubiKey');
+  });
+
+  it('treats a missing lastUsedAt as never-used rather than inventing a date', () => {
+    expect(parsePasskeys([passkey])[0].lastUsedAt).toBeUndefined();
+  });
+
+  // backupEligible is the whole reason the UI can tell a synced passkey from a
+  // device-bound one; losing it would silently erase that distinction.
+  it('preserves backupEligible false as a device-bound passkey', () => {
+    expect(parsePasskeys([{ ...passkey, backupEligible: false }])[0].backupEligible).toBe(false);
+  });
+
+  it('rejects a passkey list containing one malformed entry', () => {
+    expect(() => parsePasskeys([passkey, { ...passkey, id: undefined }])).toThrow(/id/);
+  });
+
+  it('treats a null response as empty rather than failing', () => {
+    expect(parsePasskeys(null)).toEqual([]);
+  });
+});
+
+describe('parseBeginRegistration', () => {
+  const begin = {
+    challenge: 'c',
+    rpId: 'kysignon.test',
+    rpName: 'KySignOn',
+    userHandle: 'uh',
+    username: 'ada',
+    excludeCredentials: ['e1', 'e2'],
+  };
+
+  it('reads a well-formed registration ceremony', () => {
+    expect(parseBeginRegistration(begin)).toEqual(begin);
+  });
+
+  it('treats a missing excludeCredentials as an empty list', () => {
+    const { excludeCredentials, ...rest } = begin;
+    void excludeCredentials;
+    expect(parseBeginRegistration(rest).excludeCredentials).toEqual([]);
+  });
+
+  it('refuses a response missing the challenge', () => {
+    const { challenge, ...rest } = begin;
+    void challenge;
+    expect(() => parseBeginRegistration(rest)).toThrow(/challenge/);
+  });
+});
+
+describe('parseBeginLogin', () => {
+  it('reads a well-formed login ceremony', () => {
+    const begin = { challenge: 'c', rpId: 'kysignon.test', allowCredentials: ['a1'] };
+    expect(parseBeginLogin(begin)).toEqual(begin);
+  });
+
+  it('refuses a response missing the rpId', () => {
+    expect(() => parseBeginLogin({ challenge: 'c', allowCredentials: [] })).toThrow(/rpId/);
+  });
+});
+
+describe('parseSuccess', () => {
+  it('accepts an explicit success', () => {
+    expect(parseSuccess({ success: true })).toBe(true);
+  });
+
+  // A response that merely omits `success: false` must not be read as a completed
+  // operation — that is exactly the shape an error body with a different key would take.
+  it('refuses a response where success is not true', () => {
+    expect(() => parseSuccess({ success: false })).toThrow(/success/);
+    expect(() => parseSuccess({ error: 'step_up_required' })).toThrow(/success/);
   });
 });

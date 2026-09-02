@@ -15,9 +15,11 @@ import type {
   NativeDevice,
   OAuthClient,
   PairedSystem,
+  Passkey,
   RecoveryKit,
   User,
 } from './types';
+import type { BeginLogin, BeginRegistration } from './webauthn';
 
 function fail(what: string): never {
   throw new Error(`expected ${what}`);
@@ -167,6 +169,50 @@ export function parseRecoveryCodes(value: unknown): string[] {
   const o = obj(value, 'a recovery codes response');
   const codes = strArray(o.recoveryCodes);
   return codes.length > 0 ? codes : fail('a non-empty recoveryCodes array');
+}
+
+export function parsePasskey(value: unknown): Passkey {
+  const o = obj(value, 'a passkey object');
+  return {
+    id: str(o, 'id'),
+    name: str(o, 'name'),
+    backupEligible: bool(o, 'backupEligible'),
+    backupState: bool(o, 'backupState'),
+    lastUsedAt: optStr(o, 'lastUsedAt'),
+    createdAt: optStr(o, 'createdAt') ?? '',
+  };
+}
+
+/** /api/user/passkeys answers with a bare array, not an object wrapping one. */
+export function parsePasskeys(value: unknown): Passkey[] {
+  return list(value, parsePasskey);
+}
+
+export function parseBeginRegistration(value: unknown): BeginRegistration {
+  const o = obj(value, 'a passkey registration begin response');
+  return {
+    challenge: str(o, 'challenge'),
+    rpId: str(o, 'rpId'),
+    rpName: str(o, 'rpName'),
+    userHandle: str(o, 'userHandle'),
+    username: str(o, 'username'),
+    excludeCredentials: strArray(o.excludeCredentials),
+  };
+}
+
+export function parseBeginLogin(value: unknown): BeginLogin {
+  const o = obj(value, 'a passkey login begin response');
+  return {
+    challenge: str(o, 'challenge'),
+    rpId: str(o, 'rpId'),
+    allowCredentials: strArray(o.allowCredentials),
+  };
+}
+
+/** True only when the server confirms success; anything else must not be read as one. */
+export function parseSuccess(value: unknown): true {
+  const o = obj(value, 'a success response');
+  return bool(o, 'success') ? true : fail('field "success" to be true');
 }
 
 export interface StepUpGrant {

@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { ApiError, apiJson, errorMessage } from '../api';
-import { parseAuthStep, parsePushStatus } from '../parsers';
+import { parseAuthStep, parseBeginLogin, parsePushStatus } from '../parsers';
 import { sameOriginPath } from '../returnTo';
+import { getPasskeyAssertion, isPasskeySupported } from '../webauthn';
 import type { User } from '../types';
-import { Shield, Smartphone, KeyRound, ArrowRight, RefreshCw, AlertCircle } from 'lucide-react';
+import { Shield, Smartphone, KeyRound, ScanFace, ArrowRight, RefreshCw, AlertCircle } from 'lucide-react';
 
 interface LoginViewProps {
   onLoginSuccess: (user: User) => void;
@@ -18,7 +19,8 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
   // MFA State
   const [mfaRequired, setMfaRequired] = useState(false);
   const [mfaToken, setMfaToken] = useState('');
-  const [mfaMode, setMfaMode] = useState<'push' | 'totp' | 'recovery'>('push');
+  const [mfaMode, setMfaMode] = useState<'push' | 'totp' | 'recovery' | 'webauthn'>('push');
+  const [mfaMethods, setMfaMethods] = useState<string[]>([]);
   const [totpCode, setTotpCode] = useState('');
   const [recoveryCode, setRecoveryCode] = useState('');
   const [challengeId, setChallengeId] = useState('');
@@ -45,9 +47,14 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
       if (resp.mfaRequired) {
         setMfaRequired(true);
         setMfaToken(resp.mfaToken ?? '');
+        setMfaMethods(resp.mfaMethods);
         if (resp.challengeId && resp.matchDigits) {
           setChallengeId(resp.challengeId);
           setMatchDigits(resp.matchDigits);
+        }
+        if (resp.mfaMethods.includes('webauthn') && isPasskeySupported()) {
+          setMfaMode('webauthn');
+        } else if (resp.challengeId && resp.matchDigits) {
           setMfaMode('push');
         } else {
           setMfaMode('totp');
@@ -153,6 +160,30 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
     }
   };
 
+  const submitPasskey = async () => {
+    setError(null);
+    setLoading(true);
+
+    try {
+      const begun = await apiJson('/api/auth/mfa/webauthn/begin', parseBeginLogin, {
+        method: 'POST',
+        body: JSON.stringify({ mfaToken }),
+      });
+      const assertion = await getPasskeyAssertion(begun);
+      const resp = await apiJson('/api/auth/mfa/webauthn/verify', parseAuthStep, {
+        method: 'POST',
+        body: JSON.stringify({ mfaToken, ...assertion }),
+      });
+      if (resp.success) {
+        finishLogin(resp.user);
+      }
+    } catch (err) {
+      setError(errorMessage(err, 'Passkey sign-in failed'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleRecoverySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!recoveryCode) return;
@@ -174,6 +205,8 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
       setLoading(false);
     }
   };
+
+  const canUseWebauthn = mfaMethods.includes('webauthn') && isPasskeySupported();
 
   return (
     <div className="login-page">
@@ -233,6 +266,39 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
           </form>
         ) : (
           <div className="mfa-challenge-container">
+            {mfaMode === 'webauthn' && (
+              <div className="mfa-push-box">
+                <div className="push-icon-circle">
+                  <ScanFace size={28} className="icon-cyan" />
+                </div>
+                <h3>Sign In With a Passkey</h3>
+                <p className="mfa-desc">
+                  Use your device's built-in authenticator (fingerprint, face, or security key) to continue.
+                </p>
+                <button
+                  type="button"
+                  className="primary-btn full-width"
+                  onClick={submitPasskey}
+                  disabled={loading}
+                >
+                  {loading ? <RefreshCw className="spin" size={16} /> : <span>Continue With Passkey</span>}
+                </button>
+                <div className="mfa-alt-links">
+                  {matchDigits && (
+                    <button type="button" className="text-btn" onClick={() => setMfaMode('push')}>
+                      Use Push notification instead
+                    </button>
+                  )}
+                  <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>
+                    Use 6-digit TOTP code instead
+                  </button>
+                  <button type="button" className="text-btn" onClick={() => setMfaMode('recovery')}>
+                    Use emergency recovery code
+                  </button>
+                </div>
+              </div>
+            )}
+
             {mfaMode === 'push' && (
               <div className="mfa-push-box">
                 <div className="push-icon-circle">
@@ -250,6 +316,11 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                   <span>Waiting for mobile approval...</span>
                 </div>
                 <div className="mfa-alt-links">
+                  {canUseWebauthn && (
+                    <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>
+                      Use a passkey instead
+                    </button>
+                  )}
                   <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>
                     Use 6-digit TOTP code instead
                   </button>
@@ -284,6 +355,11 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                 </button>
 
                 <div className="mfa-alt-links">
+                  {canUseWebauthn && (
+                    <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>
+                      Use a passkey instead
+                    </button>
+                  )}
                   {matchDigits && (
                     <button type="button" className="text-btn" onClick={() => setMfaMode('push')}>
                       Switch back to Push notification
@@ -318,6 +394,11 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                 </button>
 
                 <div className="mfa-alt-links">
+                  {canUseWebauthn && (
+                    <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>
+                      Use a passkey instead
+                    </button>
+                  )}
                   <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>
                     Back to TOTP code
                   </button>

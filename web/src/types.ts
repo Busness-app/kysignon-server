@@ -33,6 +33,15 @@ export interface NativeDevice {
   createdAt: string;
 }
 
+export interface Passkey {
+  id: string;
+  name: string;
+  backupEligible: boolean;
+  backupState: boolean;
+  lastUsedAt?: string;
+  createdAt: string;
+}
+
 export interface Application {
   id: string;
   /** Where the card came from, which decides the endpoint that edits it. */

@@ -1,17 +1,22 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { NativeDevice, User } from '../types';
+import { NativeDevice, Passkey, User } from '../types';
 import { apiJson, apiRequest, errorMessage, isStepUpRequired } from '../api';
 import {
+  parseBeginRegistration,
   parseDevices,
   parsePairingToken,
+  parsePasskeys,
   parseRecoveryCodes,
   parseStepUpGrant,
+  parseSuccess,
   parseTOTPSetup,
 } from '../parsers';
+import { createPasskey, isPasskeySupported } from '../webauthn';
 import QRCode from 'qrcode';
 import {
   Smartphone,
   KeyRound,
+  ScanFace,
   ShieldAlert,
   Trash2,
   CheckCircle,
@@ -23,7 +28,7 @@ import {
 } from 'lucide-react';
 
 /** Which account-security change the step-up prompt is currently gating. */
-type PendingAction = 'totp' | 'recovery-codes';
+type PendingAction = 'totp' | 'recovery-codes' | 'passkey-enroll' | 'passkey-delete';
 
 interface DeviceSettingsProps {
   user: User;
@@ -33,6 +38,13 @@ interface DeviceSettingsProps {
 export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpdate }) => {
   const [devices, setDevices] = useState<NativeDevice[]>([]);
   const [pairDeviceIdsBefore, setPairDeviceIdsBefore] = useState<Set<string>>(new Set());
+
+  // Passkey State
+  const [passkeys, setPasskeys] = useState<Passkey[]>([]);
+  const [passkeyName, setPasskeyName] = useState('');
+  const [passkeyError, setPasskeyError] = useState<string | null>(null);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [pendingPasskeyId, setPendingPasskeyId] = useState<string | null>(null);
 
   // Device Pairing State
   const [showPairModal, setShowPairModal] = useState(false);
@@ -78,8 +90,17 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
     fetchDevices();
   };
 
+  const loadPasskeys = async () => {
+    try {
+      setPasskeys(await apiJson('/api/user/passkeys', parsePasskeys));
+    } catch {
+      // A failed refresh leaves the previous list on screen; nothing is lost.
+    }
+  };
+
   useEffect(() => {
     fetchDevices();
+    loadPasskeys();
   }, []);
 
   // 90s Countdown Timer for Device Pairing
@@ -169,13 +190,19 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
         body: JSON.stringify({ password: stepUpPassword, code: stepUpCode }),
       });
       const action = pendingAction;
+      const passkeyId = pendingPasskeyId;
       setPendingAction(null);
+      setPendingPasskeyId(null);
       setStepUpPassword('');
       setStepUpCode('');
       if (action === 'totp') {
         await startTOTPSetup(grant.stepUpToken);
-      } else {
+      } else if (action === 'recovery-codes') {
         await generateRecoveryCodes(grant.stepUpToken);
+      } else if (action === 'passkey-enroll') {
+        await enrollPasskey(grant.stepUpToken);
+      } else if (action === 'passkey-delete' && passkeyId) {
+        await deletePasskey(grant.stepUpToken, passkeyId);
       }
     } catch (err) {
       setStepUpError(errorMessage(err, 'Re-authentication failed'));
@@ -251,6 +278,60 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
       }
       alert(errorMessage(err, 'Failed to generate recovery codes'));
     }
+  };
+
+  const enrollPasskey = async (grant: string) => {
+    setPasskeyError(null);
+    setPasskeyBusy(true);
+    try {
+      const begun = await apiJson('/api/user/passkeys/register/begin', parseBeginRegistration, {
+        method: 'POST',
+        body: JSON.stringify({ name: passkeyName || 'Passkey' }),
+        stepUpToken: grant,
+      });
+      const finished = await createPasskey(begun);
+      await apiJson('/api/user/passkeys/register/finish', parseSuccess, {
+        method: 'POST',
+        body: JSON.stringify({ ...finished, name: passkeyName || 'Passkey' }),
+        stepUpToken: grant,
+      });
+      setPasskeyName('');
+      await loadPasskeys();
+      onUserUpdate();
+    } catch (err) {
+      if (isStepUpRequired(err)) {
+        requestStepUp('passkey-enroll');
+        return;
+      }
+      setPasskeyError(errorMessage(err, 'Could not enrol that passkey'));
+    } finally {
+      setPasskeyBusy(false);
+    }
+  };
+
+  const handleAddPasskey = () => {
+    requestStepUp('passkey-enroll');
+  };
+
+  const deletePasskey = async (grant: string, id: string) => {
+    try {
+      await apiRequest(`/api/user/passkeys/${id}`, { method: 'DELETE', stepUpToken: grant });
+      await loadPasskeys();
+      onUserUpdate();
+    } catch (err) {
+      if (isStepUpRequired(err)) {
+        setPendingPasskeyId(id);
+        requestStepUp('passkey-delete');
+        return;
+      }
+      setPasskeyError(errorMessage(err, 'Failed to remove passkey'));
+    }
+  };
+
+  const handleRemovePasskey = (id: string) => {
+    if (!confirm('Remove this passkey? You will no longer be able to sign in with it.')) return;
+    setPendingPasskeyId(id);
+    requestStepUp('passkey-delete');
   };
 
   const handleDeleteDevice = async (deviceId: string) => {
@@ -336,6 +417,100 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
       <div className="settings-section">
         <div className="section-header">
           <div className="section-title-wrap">
+            <ScanFace className="icon-cyan" size={20} />
+            <h2>Passkeys</h2>
+          </div>
+          {isPasskeySupported() ? (
+            <button className="primary-btn sm" onClick={handleAddPasskey} disabled={passkeyBusy}>
+              <Plus size={14} />
+              <span>Add Passkey</span>
+            </button>
+          ) : (
+            <span className="text-muted text-sm">Not supported by this browser</span>
+          )}
+        </div>
+
+        <p className="section-desc">
+          A passkey lets you sign in using this device's built-in authenticator (fingerprint, face, or security key) instead of a password and a separate code.
+        </p>
+
+        {isPasskeySupported() && (
+          <div className="form-group">
+            <label className="form-label" htmlFor="passkey-name">
+              Name (optional)
+            </label>
+            <input
+              id="passkey-name"
+              type="text"
+              className="form-input"
+              placeholder="e.g. YubiKey, MacBook Touch ID"
+              value={passkeyName}
+              onChange={(e) => setPasskeyName(e.target.value)}
+              maxLength={64}
+            />
+          </div>
+        )}
+
+        {passkeyError && (
+          <div className="alert-box error sm" role="alert">
+            {passkeyError}
+          </div>
+        )}
+
+        <div className="device-list">
+          {passkeys.length === 0 ? (
+            <div className="empty-box">
+              <ScanFace size={32} className="empty-icon" />
+              <p>No passkeys enrolled yet.</p>
+            </div>
+          ) : (
+            passkeys.map((pk) => (
+              <div key={pk.id} className="device-card">
+                <div className="device-icon-box">
+                  <ScanFace size={20} className="icon-cyan" />
+                </div>
+                <div className="device-info">
+                  <span className="device-name">{pk.name}</span>
+                  <span className="device-id-mono">
+                    Added {new Date(pk.createdAt).toLocaleString()}
+                    {' · '}
+                    {pk.lastUsedAt ? `Last used ${new Date(pk.lastUsedAt).toLocaleString()}` : 'Never used'}
+                  </span>
+                </div>
+                <div className="device-status">
+                  {pk.backupEligible ? (
+                    <span
+                      className="badge-approver"
+                      title="This passkey is stored in your account provider's cloud (e.g. iCloud Keychain, Google Password Manager) and may be available on your other devices."
+                    >
+                      <CheckCircle size={12} /> Synced
+                    </span>
+                  ) : (
+                    <span
+                      className="badge-type"
+                      title="This passkey is bound to this device only and will not appear on your other devices."
+                    >
+                      Device-bound
+                    </span>
+                  )}
+                </div>
+                <button
+                  className="icon-danger-btn"
+                  onClick={() => handleRemovePasskey(pk.id)}
+                  title="Remove Passkey"
+                  aria-label={`Remove passkey ${pk.name}`}
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="section-header">
+          <div className="section-title-wrap">
             <KeyRound className="icon-cyan" size={20} />
             <h2>Time-Based One-Time Password (TOTP)</h2>
           </div>
@@ -378,9 +553,14 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
             <form onSubmit={submitStepUp}>
               <div className="modal-body">
                 <p className="modal-desc">
-                  {pendingAction === 'totp'
-                    ? 'Replacing your authenticator changes how this account is protected, so re-enter your credentials first.'
-                    : 'New recovery codes invalidate the ones you already stored, so re-enter your credentials first.'}
+                  {pendingAction === 'totp' &&
+                    'Replacing your authenticator changes how this account is protected, so re-enter your credentials first.'}
+                  {pendingAction === 'recovery-codes' &&
+                    'New recovery codes invalidate the ones you already stored, so re-enter your credentials first.'}
+                  {pendingAction === 'passkey-enroll' &&
+                    'Adding a passkey creates a new sign-in credential for this account, so re-enter your credentials first.'}
+                  {pendingAction === 'passkey-delete' &&
+                    'Removing a passkey revokes that credential immediately, so re-enter your credentials first.'}
                 </p>
 
                 <label className="field-label" htmlFor="stepup-password">Password</label>

@@ -103,6 +103,7 @@ func (s *Server) routes() *http.ServeMux {
 	adminH := NewAdminHandler(s.store, s.syncEngine, s.audit, s.middleware, s.cfg.IssuerURL)
 	oauthH := NewOAuthHandler(s.store, s.oauthEngine, s.audit, s.middleware)
 	backupH := NewBackupHandler(s.cfg, s.store, s.audit, s.middleware)
+	webauthnH := NewWebAuthnHandler(s.store, s.audit, s.mfaEngine, s.middleware, s.cfg.RPID, s.cfg.Origin)
 
 	// Liveness: this process is running and can serve a request. Nothing more is claimed,
 	// which is the only honest thing a liveness probe can say.
@@ -128,6 +129,12 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/auth/mfa/push/poll", s.middleware.RateLimit("push_poll", 120, 2.0)(http.HandlerFunc(authH.PollPushChallenge)))
 	mux.Handle("POST /api/auth/mfa/push/finish", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(authH.FinishPushLogin)))
 	mux.Handle("POST /api/mfa/push/respond", s.middleware.RateLimit("push_respond", 15, 0.5)(http.HandlerFunc(authH.RespondPush)))
+	mux.Handle("POST /api/auth/mfa/webauthn/begin", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webauthnH.BeginLogin(w, r, authH)
+	})))
+	mux.Handle("POST /api/auth/mfa/webauthn/verify", s.middleware.RateLimit("mfa", 10, 0.2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webauthnH.FinishLogin(w, r, authH)
+	})))
 
 	// Native device routes authenticate with a short-lived pairing token or enrolled device key.
 	mux.Handle("POST /api/notifications/native/register", s.middleware.RateLimit("device_reg", 10, 0.2)(http.HandlerFunc(devH.RegisterNativeDevice)))
@@ -148,6 +155,11 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/user/mfa/totp/enable", authM(http.HandlerFunc(devH.EnableTOTP)))
 	mux.Handle("POST /api/user/recovery-codes", authM(http.HandlerFunc(devH.GenerateRecoveryCodes)))
 	mux.Handle("GET /api/user/applications", authM(http.HandlerFunc(devH.ListApplications)))
+
+	mux.Handle("POST /api/user/passkeys/register/begin", authM(s.middleware.RateLimit("passkey_enrol", 10, 0.2)(http.HandlerFunc(webauthnH.BeginRegistration))))
+	mux.Handle("POST /api/user/passkeys/register/finish", authM(s.middleware.RateLimit("passkey_enrol", 10, 0.2)(http.HandlerFunc(webauthnH.FinishRegistration))))
+	mux.Handle("GET /api/user/passkeys", authM(http.HandlerFunc(webauthnH.ListPasskeys)))
+	mux.Handle("DELETE /api/user/passkeys/{id}", authM(http.HandlerFunc(webauthnH.DeletePasskey)))
 
 	// OAuth & OIDC. OptionalAuth is the same session check RequireAuth uses, so an
 	// expired session cannot authorise an SSO redirect.

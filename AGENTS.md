@@ -26,6 +26,17 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 - A client secret is shown once and rotated in place from the clients table; rotation revokes that client's outstanding tokens, so delete-and-recreate is never the recovery path for a lost secret.
 - Sessions have both a configurable absolute lifetime (24h default) and inactivity lifetime (30m default); both are enforced in the store lookup.
 
+## WebAuthn
+
+`internal/webauthn` is pure verification: no database, no HTTP, no CBOR. It reads the SPKI
+public key and raw authenticator data the browser exports, because attestation is not
+verified and re-deriving those from the attestation object would buy nothing.
+
+KySignOn records whether a passkey is backup-eligible but never rejects one for it. The rule
+that a KySignOn login credential must live in KyAuth's device-local `totp_vault.kdbx` rather
+than the KyPasswords-synced `passwords_vault.kdbx` is enforced in KyAuth, where the vault is
+chosen.
+
 # Ponytail, lazy senior dev mode
 
 Use the smallest correct change.

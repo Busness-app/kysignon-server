@@ -199,3 +199,32 @@ type StepUpToken struct {
 	UsedAt    *time.Time `json:"usedAt,omitempty"`
 	CreatedAt time.Time  `json:"createdAt"`
 }
+
+// WebAuthnCredential is one enrolled passkey. The public key is stored SPKI DER,
+// base64url-encoded; there is no secret here, so it is not encrypted at rest.
+type WebAuthnCredential struct {
+	ID            string `json:"id"`
+	UserID        string `json:"userId"`
+	CredentialID  string `json:"credentialId"`
+	PublicKeySPKI string `json:"-"`
+	SignCount     uint32 `json:"-"`
+	Name          string `json:"name"`
+	// BackupEligible reports whether the authenticator may sync this credential to a
+	// provider cloud; BackupState whether it currently is. Recorded and surfaced, never
+	// enforced here — see the design decisions in the plan.
+	BackupEligible bool       `json:"backupEligible"`
+	BackupState    bool       `json:"backupState"`
+	LastUsedAt     *time.Time `json:"lastUsedAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+}
+
+// WebAuthnChallenge is a single-use nonce bound to one user and one ceremony.
+type WebAuthnChallenge struct {
+	ID        string     `json:"id"`
+	UserID    string     `json:"userId"`
+	Challenge string     `json:"-"`
+	Purpose   string     `json:"purpose"` // "register", "authenticate"
+	ExpiresAt time.Time  `json:"expiresAt"`
+	UsedAt    *time.Time `json:"usedAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+}

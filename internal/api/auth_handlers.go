@@ -151,6 +151,17 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Passkeys live in their own table because a user may hold several, so they are not
+	// in mfa_methods and have to be counted separately.
+	passkeys, err := h.store.ListUserWebAuthnCredentials(user.ID)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
+	if len(passkeys) > 0 {
+		methodTypes = append(methodTypes, "webauthn")
+	}
+
 	if len(methodTypes) > 0 {
 		resp := LoginResponse{
 			Success:     false,

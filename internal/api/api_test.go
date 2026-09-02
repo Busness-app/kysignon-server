@@ -47,6 +47,8 @@ func setupTestServer(t *testing.T) (*Server, *store.Store, *sync.Engine, *mfa.En
 	cfg := &config.Config{
 		Port:          "5867",
 		IssuerURL:     "http://localhost:5867",
+		RPID:          "localhost",
+		Origin:        "http://localhost:5867",
 		DBPath:        dbPath,
 		DataDir:       tmpDir,
 		RSAKeyPath:    keyPath,
@@ -441,6 +443,8 @@ func setupTestServerWith(t *testing.T, opts ...func(*config.Config)) (*Server, *
 	cfg := &config.Config{
 		Port:          "5867",
 		IssuerURL:     "http://localhost:5867",
+		RPID:          "localhost",
+		Origin:        "http://localhost:5867",
 		DBPath:        dbPath,
 		DataDir:       tmpDir,
 		RSAKeyPath:    keyPath,

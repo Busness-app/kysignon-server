@@ -13,6 +13,7 @@ Built in Go with a focus on simplicity, minimal external dependencies, and nativ
 3. **Multi-Factor Authentication (MFA)**:
    - **TOTP Authenticator Apps**: Standard RFC 6238 time-based one-time passwords with encrypted secrets at rest (AES-256-GCM).
    - **Push Authentication with Number Matching**: 2-digit verification challenges with decoy numbers for mobile pairing.
+   - **Passkeys (WebAuthn)**: ES256 platform and roaming authenticators as a second factor, verified with the standard library alone. Works with KyAuth's Android credential provider, and with iCloud Keychain, Windows Hello and hardware keys.
    - **Emergency Recovery Codes**: Cryptographically hashed single-use recovery codes.
 4. **90-Second Ephemeral Pairing**: Frictionless UI-based pairing with QR codes and short PINs for native mobile devices and downstream server applications.
 5. **KySecurity Suite Application Launcher**: Single-pane dashboard themed in KySecurity Patina (dark `#0d0f14`, cyan `#4deeea`, Space Grotesk, IBM Plex Mono) embedding the full React frontend into the standalone binary.
@@ -209,6 +210,19 @@ collect their own. A server with only one administrator may collect all of them 
 it could never produce a kit at all — and every such collection is recorded as
 `admin.backup_single_custodian_quorum`. Add a second administrator to get real custody
 separation.
+
+**Passkeys are bound to the issuer's origin.** The relying party ID is the hostname of
+`KYSIGNON_ISSUER_URL` and the accepted origin is its scheme, host and port. Changing the
+issuer URL invalidates every enrolled passkey, because the browser will not offer a
+credential registered under a different RP ID. Browsers permit WebAuthn over plain HTTP only
+on `localhost`, so a deployment reached by IP or by a name without TLS cannot enrol one.
+
+**Enrolling or removing a passkey spends a step-up grant**, like every other change to an
+account's factors. Resetting a user's MFA deletes their passkeys along with their TOTP
+secret and recovery codes. Step-up itself only demands a second factor when TOTP is
+enrolled, so for an account whose only second factor is a passkey, a step-up grant
+currently costs the password alone — enrol a passkey alongside TOTP or a push device
+rather than as an account's sole factor.
 
 **Destructive admin operations require step-up re-authentication.** Creating or editing an
 account, resetting someone's MFA, deleting a user, registering or deleting an OAuth client,

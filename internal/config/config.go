@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Yoshiofthewire/kysignon-server/internal/webauthn"
 )
 
 // KeyLength is the required size, in bytes, of the secret and encryption keys.
@@ -18,8 +20,12 @@ const KeyLength = 32
 
 // Config represents runtime application configuration.
 type Config struct {
-	Port              string
-	IssuerURL         string
+	Port      string
+	IssuerURL string
+	// RPID and Origin are the WebAuthn relying party identity, derived from IssuerURL at
+	// load so a malformed issuer fails startup rather than the first passkey ceremony.
+	RPID              string
+	Origin            string
 	DBPath            string
 	DataDir           string
 	SecretKey         []byte
@@ -67,6 +73,10 @@ func Load() (*Config, error) {
 	if err != nil || issuer.Hostname() == "" || (issuer.Scheme != "https" && !issuerIsLocal(issuer)) {
 		return nil, fmt.Errorf("KYSIGNON_ISSUER_URL must be an https URL (http is allowed only on loopback)")
 	}
+	rpID, rpOrigin, err := webauthn.RPIDFromIssuer(issuerURL)
+	if err != nil {
+		return nil, fmt.Errorf("KYSIGNON_ISSUER_URL cannot be used as a WebAuthn relying party: %w", err)
+	}
 
 	secretKey, err := loadKey("KYSIGNON_SECRET_KEY", filepath.Join(dataDir, "secret.key"))
 	if err != nil {
@@ -109,6 +119,8 @@ func Load() (*Config, error) {
 	return &Config{
 		Port:                  port,
 		IssuerURL:             issuerURL,
+		RPID:                  rpID,
+		Origin:                rpOrigin,
 		DBPath:                dbPath,
 		DataDir:               dataDir,
 		SecretKey:             secretKey,

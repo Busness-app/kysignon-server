@@ -272,6 +272,33 @@ func (s *Store) migrate() error {
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_step_up_tokens_hash ON step_up_tokens(token_hash);
+
+	CREATE TABLE IF NOT EXISTS webauthn_credentials (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		credential_id TEXT NOT NULL UNIQUE,
+		public_key_spki TEXT NOT NULL,
+		sign_count INTEGER NOT NULL DEFAULT 0,
+		name TEXT NOT NULL,
+		backup_eligible INTEGER NOT NULL DEFAULT 0,
+		backup_state INTEGER NOT NULL DEFAULT 0,
+		last_used_at TIMESTAMP,
+		created_at TIMESTAMP NOT NULL,
+		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id);
+
+	CREATE TABLE IF NOT EXISTS webauthn_challenges (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		challenge TEXT NOT NULL UNIQUE,
+		purpose TEXT NOT NULL,
+		expires_at TIMESTAMP NOT NULL,
+		used_at TIMESTAMP,
+		created_at TIMESTAMP NOT NULL,
+		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_value ON webauthn_challenges(challenge);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -1379,6 +1406,9 @@ func (s *Store) DeleteUserMFAMethods(userID string) error {
 	if _, err := tx.Exec(`DELETE FROM recovery_codes WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM webauthn_credentials WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE native_devices SET is_mfa_approver = 0 WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
@@ -1489,6 +1519,144 @@ func (s *Store) ConsumeMFAToken(tokenID string) (bool, error) {
 func (s *Store) DeleteExpiredMFATokens() error {
 	_, err := s.db.Exec(`DELETE FROM mfa_tokens WHERE expires_at < ?`, time.Now().UTC())
 	return err
+}
+
+// WebAuthn passkeys
+
+func (s *Store) CreateWebAuthnChallenge(ch *WebAuthnChallenge) error {
+	ch.CreatedAt = time.Now().UTC()
+	_, err := s.db.Exec(
+		`INSERT INTO webauthn_challenges (id, user_id, challenge, purpose, expires_at, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		ch.ID, ch.UserID, ch.Challenge, ch.Purpose, ch.ExpiresAt, ch.CreatedAt)
+	return err
+}
+
+// ConsumeWebAuthnChallenge redeems a challenge for exactly one ceremony. The purpose and
+// the user are part of the predicate, so a challenge minted for enrolment cannot complete
+// a login, and one user's challenge cannot complete another's.
+func (s *Store) ConsumeWebAuthnChallenge(challenge, purpose, userID string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE webauthn_challenges SET used_at = ?
+		 WHERE challenge = ? AND purpose = ? AND user_id = ? AND used_at IS NULL AND expires_at > ?`,
+		time.Now().UTC(), challenge, purpose, userID, time.Now().UTC())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+func (s *Store) DeleteExpiredWebAuthnChallenges() error {
+	_, err := s.db.Exec(`DELETE FROM webauthn_challenges WHERE expires_at < ? OR used_at IS NOT NULL`, time.Now().UTC())
+	return err
+}
+
+// CreateWebAuthnCredential enrols a passkey and its audit record in one transaction, so an
+// account never gains a factor without a durable trail of where it came from.
+func (s *Store) CreateWebAuthnCredential(c *WebAuthnCredential, audit *AuditEvent) error {
+	c.CreatedAt = time.Now().UTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT INTO webauthn_credentials
+		 (id, user_id, credential_id, public_key_spki, sign_count, name, backup_eligible, backup_state, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.UserID, c.CredentialID, c.PublicKeySPKI, c.SignCount, c.Name,
+		c.BackupEligible, c.BackupState, c.CreatedAt); err != nil {
+		return err
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func scanWebAuthnCredential(scan func(dest ...any) error) (*WebAuthnCredential, error) {
+	c := &WebAuthnCredential{}
+	var lastUsed sql.NullTime
+	if err := scan(&c.ID, &c.UserID, &c.CredentialID, &c.PublicKeySPKI, &c.SignCount,
+		&c.Name, &c.BackupEligible, &c.BackupState, &lastUsed, &c.CreatedAt); err != nil {
+		return nil, err
+	}
+	if lastUsed.Valid {
+		t := lastUsed.Time
+		c.LastUsedAt = &t
+	}
+	return c, nil
+}
+
+const webAuthnCredentialColumns = `id, user_id, credential_id, public_key_spki, sign_count, name, backup_eligible, backup_state, last_used_at, created_at`
+
+func (s *Store) ListUserWebAuthnCredentials(userID string) ([]WebAuthnCredential, error) {
+	rows, err := s.db.Query(
+		`SELECT `+webAuthnCredentialColumns+` FROM webauthn_credentials WHERE user_id = ? ORDER BY created_at`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var creds []WebAuthnCredential
+	for rows.Next() {
+		c, err := scanWebAuthnCredential(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		creds = append(creds, *c)
+	}
+	return creds, rows.Err()
+}
+
+// GetWebAuthnCredential looks a credential up within one user. The user ID is part of the
+// predicate so a credential ID harvested elsewhere cannot select another account's key.
+func (s *Store) GetWebAuthnCredential(userID, credentialID string) (*WebAuthnCredential, error) {
+	row := s.db.QueryRow(
+		`SELECT `+webAuthnCredentialColumns+` FROM webauthn_credentials WHERE user_id = ? AND credential_id = ?`,
+		userID, credentialID)
+	c, err := scanWebAuthnCredential(row.Scan)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return c, err
+}
+
+func (s *Store) RecordWebAuthnUse(id string, signCount uint32, backupState bool, usedAt time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE webauthn_credentials SET sign_count = ?, backup_state = ?, last_used_at = ? WHERE id = ?`,
+		signCount, backupState, usedAt, id)
+	return err
+}
+
+// DeleteWebAuthnCredential removes one passkey. Ownership is in the predicate, so the
+// handler cannot be tricked into deleting a credential the caller does not hold.
+func (s *Store) DeleteWebAuthnCredential(id, userID string, audit *AuditEvent) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(`DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?`, id, userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // Recovery Codes
@@ -1982,6 +2150,9 @@ func (s *Store) ResetUserMFA(userID string, events []AccountSyncEvent, audit *Au
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM recovery_codes WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM webauthn_credentials WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE native_devices SET is_mfa_approver = 0 WHERE user_id = ?`, userID); err != nil {

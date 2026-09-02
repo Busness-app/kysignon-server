@@ -14,9 +14,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/auth"
-	"github.com/Yoshiofthewire/kysignon-server/internal/mfa"
-	"github.com/Yoshiofthewire/kysignon-server/internal/store"
+	"github.com/Busness-app/kysignon-server/internal/auth"
+	"github.com/Busness-app/kysignon-server/internal/mfa"
+	"github.com/Busness-app/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
 

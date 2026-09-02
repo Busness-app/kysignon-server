@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/webauthn"
+	"github.com/Busness-app/kysignon-server/internal/webauthn"
 )
 
 // KeyLength is the required size, in bytes, of the secret and encryption keys.

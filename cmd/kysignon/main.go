@@ -154,6 +154,7 @@ func main() {
 			_ = dbStore.DeleteExpiredIssuedTokens()
 			_ = dbStore.DeleteExpiredDevicePairingTokens()
 			_ = dbStore.DeleteExpiredMFAChallenges()
+			_ = dbStore.DeleteExpiredWebAuthnChallenges()
 			_ = dbStore.DeleteDeliveredSyncEvents(time.Now().UTC().Add(-7 * 24 * time.Hour))
 			_ = dbStore.DeleteAuditEventsOlderThan(time.Now().UTC().Add(-auditRetention))
 			if err := clearFirstRunPasswordFile(dbStore, cfg.DataDir); err != nil {

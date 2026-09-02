@@ -7,7 +7,36 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
+
+func setupTestStore(t *testing.T) (*Store, func()) {
+	t.Helper()
+	s, err := New(filepath.Join(t.TempDir(), "webauthn.db"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	return s, func() { _ = s.Close() }
+}
+
+func createTestUser(t *testing.T, s *Store) *User {
+	t.Helper()
+	return createTestUserNamed(t, s, "user-"+uuid.New().String()[:8])
+}
+
+func createTestUserNamed(t *testing.T, s *Store, username string) *User {
+	t.Helper()
+	u := &User{
+		ID: uuid.New().String(), Username: username,
+		DisplayName: username, Email: username + "@test.invalid",
+		PasswordHash: "x", Role: "user", Status: "active",
+	}
+	if err := s.CreateUser(u); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	return u
+}
 
 func TestDeleteUserWithSyncEventsMigratesLegacyForeignKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
@@ -307,5 +336,157 @@ func TestOAuthClientLauncherMetadataMigrates(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].Description != "Homelab DNS with subnet views" || listed[0].IconName != "globe" {
 		t.Fatalf("list did not return launcher metadata: %+v", listed)
+	}
+}
+
+func TestWebAuthnChallengeIsSingleUse(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	user := createTestUser(t, s)
+	ch := &WebAuthnChallenge{
+		ID:        uuid.New().String(),
+		UserID:    user.ID,
+		Challenge: "Q0hBTExFTkdF",
+		Purpose:   "authenticate",
+		ExpiresAt: time.Now().UTC().Add(2 * time.Minute),
+	}
+	if err := s.CreateWebAuthnChallenge(ch); err != nil {
+		t.Fatalf("CreateWebAuthnChallenge: %v", err)
+	}
+
+	ok, err := s.ConsumeWebAuthnChallenge(ch.Challenge, "authenticate", user.ID)
+	if err != nil || !ok {
+		t.Fatalf("first consume: ok=%v err=%v", ok, err)
+	}
+	ok, err = s.ConsumeWebAuthnChallenge(ch.Challenge, "authenticate", user.ID)
+	if err != nil {
+		t.Fatalf("second consume errored: %v", err)
+	}
+	if ok {
+		t.Fatal("a challenge must not be redeemable twice")
+	}
+}
+
+func TestWebAuthnChallengeRejectsWrongPurposeUserAndExpiry(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	user := createTestUser(t, s)
+	other := createTestUserNamed(t, s, "other-user")
+
+	live := &WebAuthnChallenge{
+		ID: uuid.New().String(), UserID: user.ID, Challenge: "TElWRQ",
+		Purpose: "authenticate", ExpiresAt: time.Now().UTC().Add(2 * time.Minute),
+	}
+	expired := &WebAuthnChallenge{
+		ID: uuid.New().String(), UserID: user.ID, Challenge: "T0xE",
+		Purpose: "authenticate", ExpiresAt: time.Now().UTC().Add(-time.Second),
+	}
+	for _, ch := range []*WebAuthnChallenge{live, expired} {
+		if err := s.CreateWebAuthnChallenge(ch); err != nil {
+			t.Fatalf("CreateWebAuthnChallenge: %v", err)
+		}
+	}
+
+	if ok, _ := s.ConsumeWebAuthnChallenge(live.Challenge, "register", user.ID); ok {
+		t.Fatal("a challenge issued for authentication must not satisfy registration")
+	}
+	if ok, _ := s.ConsumeWebAuthnChallenge(live.Challenge, "authenticate", other.ID); ok {
+		t.Fatal("a challenge must not be redeemable by another user")
+	}
+	if ok, _ := s.ConsumeWebAuthnChallenge(expired.Challenge, "authenticate", user.ID); ok {
+		t.Fatal("an expired challenge must not be redeemable")
+	}
+}
+
+func TestWebAuthnCredentialLifecycle(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	user := createTestUser(t, s)
+	cred := &WebAuthnCredential{
+		ID:             uuid.New().String(),
+		UserID:         user.ID,
+		CredentialID:   "Y3JlZC1vbmU",
+		PublicKeySPKI:  "c3BraQ",
+		Name:           "KyAuth on Pixel",
+		SignCount:      3,
+		BackupEligible: false,
+	}
+	if err := s.CreateWebAuthnCredential(cred, nil); err != nil {
+		t.Fatalf("CreateWebAuthnCredential: %v", err)
+	}
+
+	got, err := s.GetWebAuthnCredential(user.ID, cred.CredentialID)
+	if err != nil || got == nil {
+		t.Fatalf("GetWebAuthnCredential: %v %v", got, err)
+	}
+	if got.SignCount != 3 || got.Name != "KyAuth on Pixel" {
+		t.Fatalf("round trip lost data: %+v", got)
+	}
+
+	if err := s.RecordWebAuthnUse(cred.ID, 4, true, time.Now().UTC()); err != nil {
+		t.Fatalf("RecordWebAuthnUse: %v", err)
+	}
+	got, _ = s.GetWebAuthnCredential(user.ID, cred.CredentialID)
+	if got.SignCount != 4 || !got.BackupState || got.LastUsedAt == nil {
+		t.Fatalf("use was not recorded: %+v", got)
+	}
+
+	list, err := s.ListUserWebAuthnCredentials(user.ID)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListUserWebAuthnCredentials = %d creds, %v", len(list), err)
+	}
+
+	deleted, err := s.DeleteWebAuthnCredential(cred.ID, "some-other-user", nil)
+	if err != nil {
+		t.Fatalf("DeleteWebAuthnCredential: %v", err)
+	}
+	if deleted {
+		t.Fatal("a credential must not be deletable by a user who does not own it")
+	}
+
+	deleted, err = s.DeleteWebAuthnCredential(cred.ID, user.ID, nil)
+	if err != nil || !deleted {
+		t.Fatalf("owner delete: deleted=%v err=%v", deleted, err)
+	}
+}
+
+func TestMFAWipesRemovePasskeys(t *testing.T) {
+	// An administrator resetting MFA, and a user replacing their factors, must both strip
+	// passkeys. A passkey that survives a reset is an attacker-planted factor that outlives
+	// the response to the incident that triggered the reset.
+	for _, tc := range []struct {
+		name string
+		wipe func(*Store, string) error
+	}{
+		{"ResetUserMFA", func(s *Store, uid string) error { return s.ResetUserMFA(uid, nil, nil) }},
+		{"DeleteUserMFAMethods", func(s *Store, uid string) error { return s.DeleteUserMFAMethods(uid) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, cleanup := setupTestStore(t)
+			defer cleanup()
+
+			user := createTestUser(t, s)
+			if err := s.CreateWebAuthnCredential(&WebAuthnCredential{
+				ID: uuid.New().String(), UserID: user.ID,
+				CredentialID: "Y3JlZC0" + tc.name, PublicKeySPKI: "c3BraQ", Name: "key",
+			}, nil); err != nil {
+				t.Fatalf("CreateWebAuthnCredential: %v", err)
+			}
+
+			if err := tc.wipe(s, user.ID); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+
+			list, err := s.ListUserWebAuthnCredentials(user.ID)
+			if err != nil {
+				t.Fatalf("ListUserWebAuthnCredentials: %v", err)
+			}
+			if len(list) != 0 {
+				t.Fatalf("%s left %d passkeys behind", tc.name, len(list))
+			}
+		})
 	}
 }

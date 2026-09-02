@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/netguard"
+	"github.com/Busness-app/kysignon-server/internal/netguard"
 )
 
 // KyRecoveryClient implements the Zero-Code Pairing & Push client contract for KyRecovery.

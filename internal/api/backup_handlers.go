@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/audit"
-	"github.com/Yoshiofthewire/kysignon-server/internal/backup"
-	"github.com/Yoshiofthewire/kysignon-server/internal/config"
-	"github.com/Yoshiofthewire/kysignon-server/internal/store"
+	"github.com/Busness-app/kysignon-server/internal/audit"
+	"github.com/Busness-app/kysignon-server/internal/backup"
+	"github.com/Busness-app/kysignon-server/internal/config"
+	"github.com/Busness-app/kysignon-server/internal/store"
 )
 
 // appVersion is reported in capsule manifests and status responses.

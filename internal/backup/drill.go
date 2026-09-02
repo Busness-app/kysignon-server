@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/config"
-	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/config"
+	"github.com/Busness-app/kysignon-server/internal/crypto"
 	_ "modernc.org/sqlite"
 )
 

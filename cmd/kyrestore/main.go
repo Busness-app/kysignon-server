@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/backup"
+	"github.com/Busness-app/kysignon-server/internal/backup"
 )
 
 type shardFlag []backup.Share

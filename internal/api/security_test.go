@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/auth"
-	"github.com/Yoshiofthewire/kysignon-server/internal/config"
-	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
-	"github.com/Yoshiofthewire/kysignon-server/internal/store"
-	"github.com/Yoshiofthewire/kysignon-server/internal/sync"
+	"github.com/Busness-app/kysignon-server/internal/auth"
+	"github.com/Busness-app/kysignon-server/internal/config"
+	"github.com/Busness-app/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/store"
+	"github.com/Busness-app/kysignon-server/internal/sync"
 	"github.com/google/uuid"
 )
 

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/crypto"
 )
 
 // Settings keys. The token lives under its own key so a value written by an older build,

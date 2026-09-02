@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/mfa"
-	"github.com/Yoshiofthewire/kysignon-server/internal/store"
+	"github.com/Busness-app/kysignon-server/internal/mfa"
+	"github.com/Busness-app/kysignon-server/internal/store"
 	"github.com/google/uuid"
 )
 

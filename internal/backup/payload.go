@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Yoshiofthewire/kysignon-server/internal/config"
+	"github.com/Busness-app/kysignon-server/internal/config"
 )
 
 // Relative paths inside a capsule. They are constants because the restore drill and

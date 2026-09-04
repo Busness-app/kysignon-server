@@ -216,11 +216,11 @@ td.acts .iconbtn.danger:hover{color:var(--danger);border-color:var(--danger)}
     <footer>Sessions end after 24 hours, or 30 minutes idle.</footer>
   </div>
   <div class="form">
-    <form class="card" onsubmit="return false">
+    <form class="card" autocomplete="off" onsubmit="return false">
       <div id="step1" class="step on">
         <h2>Sign in</h2>
-        <label class="field"><span>Username</span><input class="mono" autocomplete="username" value="yoshi"></label>
-        <label class="field"><span>Password</span><input type="password" autocomplete="current-password" value="correct horse battery"></label>
+        <label class="field"><span>Username</span><input class="mono" placeholder="Username"></label>
+        <label class="field"><span>Password</span><input type="password" placeholder="Password"></label>
         <button class="btn wide" type="button" onclick="showStep(2)">Sign in</button>
       </div>
       <div id="step2" class="step">
@@ -278,7 +278,7 @@ td.acts .iconbtn.danger:hover{color:var(--danger);border-color:var(--danger)}
         <div>
           <span class="muted">Signed in as</span>
           <div class="name">yoshi</div>
-          <div class="facts"><span>Yoshi</span><span>yoshi@urlxl.com</span><span>Administrator</span></div>
+          <div class="facts"><span>Yoshi</span><span>yoshi@example.org</span><span>Administrator</span></div>
           <small>2 devices can approve sign-ins. 1 passkey enrolled. 8 recovery codes unused.</small>
         </div>
         <div>
@@ -340,10 +340,10 @@ td.acts .iconbtn.danger:hover{color:var(--danger);border-color:var(--danger)}
         <table>
           <thead><tr><th scope="col">Account</th><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col"><span class="sr">Actions</span></th></tr></thead>
           <tbody>
-            <tr><td class="mono">yoshi</td><td>Yoshi</td><td>yoshi@urlxl.com</td><td>Administrator</td><td><span class="pill ok"><i></i>Active</span></td><td class="acts"><button class="iconbtn" aria-label="Edit yoshi"><svg><use href="#i-edit"/></svg></button><button class="iconbtn" aria-label="Reset MFA for yoshi"><svg><use href="#i-key"/></svg></button><button class="iconbtn" aria-label="Sign yoshi out everywhere"><svg><use href="#i-out"/></svg></button></td></tr>
-            <tr><td class="mono">alice</td><td>Alice Ng</td><td>alice@urlxl.com</td><td>User</td><td><span class="pill ok"><i></i>Active</span></td><td class="acts"><button class="iconbtn" aria-label="Edit alice"><svg><use href="#i-edit"/></svg></button><button class="iconbtn" aria-label="Reset MFA for alice"><svg><use href="#i-key"/></svg></button><button class="iconbtn" aria-label="Sign alice out everywhere"><svg><use href="#i-out"/></svg></button><button class="iconbtn danger" aria-label="Delete alice"><svg><use href="#i-trash"/></svg></button></td></tr>
-            <tr><td class="mono">sam</td><td>Sam Okafor</td><td>sam@urlxl.com</td><td>User</td><td><span class="pill ok"><i></i>Active</span></td><td class="acts"><button class="iconbtn" aria-label="Edit sam"><svg><use href="#i-edit"/></svg></button><button class="iconbtn" aria-label="Reset MFA for sam"><svg><use href="#i-key"/></svg></button><button class="iconbtn" aria-label="Sign sam out everywhere"><svg><use href="#i-out"/></svg></button><button class="iconbtn danger" aria-label="Delete sam"><svg><use href="#i-trash"/></svg></button></td></tr>
-            <tr><td class="mono">guest</td><td>Guest</td><td>guest@urlxl.com</td><td>User</td><td><span class="pill off"><i></i>Disabled</span></td><td class="acts"><button class="iconbtn" aria-label="Edit guest"><svg><use href="#i-edit"/></svg></button><button class="iconbtn" aria-label="Reset MFA for guest"><svg><use href="#i-key"/></svg></button><button class="iconbtn" aria-label="Sign guest out everywhere"><svg><use href="#i-out"/></svg></button><button class="iconbtn danger" aria-label="Delete guest"><svg><use href="#i-trash"/></svg></button></td></tr>
+            <tr><td class="mono">yoshi</td><td>Yoshi</td><td>yoshi@example.org</td><td>Administrator</td><td><span class="pill ok"><i></i>Active</span></td><td class="acts"><button class="iconbtn" aria-label="Edit yoshi"><svg><use href="#i-edit"/></svg></button><button class="iconbtn" aria-label="Reset MFA for yoshi"><svg><use href="#i-key"/></svg></button><button class="iconbtn" aria-label="Sign yoshi out everywhere"><svg><use href="#i-out"/></svg></button></td></tr>
+            <tr><td class="mono">alice</td><td>Alice Ng</td><td>alice@example.org</td><td>User</td><td><span class="pill ok"><i></i>Active</span></td><td class="acts"><button class="iconbtn" aria-label="Edit alice"><svg><use href="#i-edit"/></svg></button><button class="iconbtn" aria-label="Reset MFA for alice"><svg><use href="#i-key"/></svg></button><button class="iconbtn" aria-label="Sign alice out everywhere"><svg><use href="#i-out"/></svg></button><button class="iconbtn danger" aria-label="Delete alice"><svg><use href="#i-trash"/></svg></button></td></tr>
+            <tr><td class="mono">sam</td><td>Sam Okafor</td><td>sam@example.org</td><td>User</td><td><span class="pill ok"><i></i>Active</span></td><td class="acts"><button class="iconbtn" aria-label="Edit sam"><svg><use href="#i-edit"/></svg></button><button class="iconbtn" aria-label="Reset MFA for sam"><svg><use href="#i-key"/></svg></button><button class="iconbtn" aria-label="Sign sam out everywhere"><svg><use href="#i-out"/></svg></button><button class="iconbtn danger" aria-label="Delete sam"><svg><use href="#i-trash"/></svg></button></td></tr>
+            <tr><td class="mono">guest</td><td>Guest</td><td>guest@example.org</td><td>User</td><td><span class="pill off"><i></i>Disabled</span></td><td class="acts"><button class="iconbtn" aria-label="Edit guest"><svg><use href="#i-edit"/></svg></button><button class="iconbtn" aria-label="Reset MFA for guest"><svg><use href="#i-key"/></svg></button><button class="iconbtn" aria-label="Sign guest out everywhere"><svg><use href="#i-out"/></svg></button><button class="iconbtn danger" aria-label="Delete guest"><svg><use href="#i-trash"/></svg></button></td></tr>
           </tbody>
         </table>
       </div>

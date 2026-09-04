@@ -243,8 +243,8 @@ rather than as an account's sole factor.
 
 **Destructive admin operations require step-up re-authentication.** Creating or editing an
 account, resetting someone's MFA, deleting a user, registering or deleting an OAuth client,
-connecting or removing a paired system, and exporting, pairing, pinning a key, running or
-rescheduling a backup each
+connecting or removing a paired system, and exporting, pairing, unpairing, pinning a key,
+running or rescheduling a backup each
 spend a single-use grant that costs your password and an enrolled factor. A stolen session
 cookie cannot produce one. Read-only views and the emergency "revoke sessions" button stay
 on the session alone, so locking an account down during an incident is not slowed by a

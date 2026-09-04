@@ -283,8 +283,42 @@ func TestAdminBackupEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("unpair forgets the token and the URL, keeps the key pin", func(t *testing.T) {
+		if w := do("DELETE", "/api/admin/backup/pairing", nil, true); w.Code != http.StatusOK {
+			t.Fatalf("got %d: %s", w.Code, w.Body.String())
+		}
+		if !auditHas("admin.backup_unpair", "success") {
+			t.Error("unpair not audited")
+		}
+		w := do("GET", "/api/admin/backup/status", nil, false)
+		var resp map[string]any
+		_ = json.NewDecoder(w.Body).Decode(&resp)
+		if resp["paired"] != false || resp["key_pinned"] != true || resp["recovery_key_id"] != priv.Public().ID() || resp["recovery_url"] != nil {
+			t.Errorf("status after unpair %v", resp)
+		}
+		if _, err := dbStore.GetSetting("kyrecovery_token_enc"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("token still stored: %v", err)
+		}
+		fake.got = nil
+		if w := do("POST", "/api/admin/backup/deposit", nil, true); w.Code != http.StatusPreconditionFailed || fake.got != nil {
+			t.Errorf("deposit after unpair: got %d sent=%v: %s", w.Code, fake.got != nil, w.Body.String())
+		}
+		if w := do("DELETE", "/api/admin/backup/pairing", nil, true); w.Code != http.StatusPreconditionFailed {
+			t.Errorf("second unpair: got %d", w.Code)
+		}
+		// Unpairing does not unpin: a different key is still refused, the same key is the way back.
+		body, _ := json.Marshal(map[string]string{"recovery_url": "https://recovery.example.test", "pairing_code": "123456"})
+		if w := do("POST", "/api/admin/backup/pair-remote", body, true); w.Code != http.StatusConflict {
+			t.Fatalf("re-pair to another key after unpair: got %d: %s", w.Code, w.Body.String())
+		}
+		fake.result = backup.PairingResult{APIToken: "kyrec_live_t2", Key: backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}}
+		if w := do("POST", "/api/admin/backup/pair-remote", body, true); w.Code != http.StatusOK {
+			t.Fatalf("re-pair to the same key: got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
 	t.Run("step-up is required on the secret-bearing routes", func(t *testing.T) {
-		for _, tc := range []struct{ method, path string }{{"GET", "/api/admin/backup/export-capsule"}, {"POST", "/api/admin/backup/deposit"}, {"POST", "/api/admin/backup/pair-remote"}, {"POST", "/api/admin/backup/pin-key"}, {"PUT", "/api/admin/backup/schedule"}} {
+		for _, tc := range []struct{ method, path string }{{"GET", "/api/admin/backup/export-capsule"}, {"POST", "/api/admin/backup/deposit"}, {"POST", "/api/admin/backup/pair-remote"}, {"DELETE", "/api/admin/backup/pairing"}, {"POST", "/api/admin/backup/pin-key"}, {"PUT", "/api/admin/backup/schedule"}} {
 			if w := do(tc.method, tc.path, []byte(`{}`), false); w.Code != http.StatusForbidden && w.Code != http.StatusUnauthorized {
 				t.Errorf("%s %s without step-up: got %d", tc.method, tc.path, w.Code)
 			}

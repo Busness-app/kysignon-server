@@ -10,6 +10,7 @@ import {
   XCircle,
   Loader2,
   Link2,
+  Unlink,
   KeyRound,
   Send,
   AlertCircle,
@@ -70,6 +71,8 @@ export const AdminBackup: React.FC = () => {
   const [pairing, setPairing] = useState<boolean>(false);
   const [pairMessage, setPairMessage] = useState<string>('');
   const [pairError, setPairError] = useState<string>('');
+
+  const [unpairing, setUnpairing] = useState<boolean>(false);
 
   const [pinKey, setPinKey] = useState<string>('');
   const [pinK, setPinK] = useState<string>('2');
@@ -214,6 +217,24 @@ export const AdminBackup: React.FC = () => {
       setPairError(errorMessage(err, 'Pairing failed'));
     } finally {
       setPairing(false);
+    }
+  };
+
+  const unpair = async () => {
+    if (!window.confirm('Unpair from KyRecovery?\n\nScheduled deposits stop and the deposit credential is removed from this server. Capsules KyRecovery already holds stay there, the recovery key stays pinned, and the local backup directory keeps working. Ask the KyRecovery admin to revoke this product there as well.')) return;
+    setUnpairing(true);
+    setPairMessage('');
+    setPairError('');
+    try {
+      const grant = await requestGrant('Unpairing stops off-site backups until this server is paired again.');
+      await apiRequest('/api/admin/backup/pairing', { method: 'DELETE', stepUpToken: grant });
+      setPairMessage('Unpaired. Off-site backups have stopped.');
+      await fetchStatus();
+    } catch (err) {
+      if (isCancelled(err)) return;
+      setPairError(errorMessage(err, 'Could not unpair'));
+    } finally {
+      setUnpairing(false);
     }
   };
 
@@ -478,6 +499,12 @@ export const AdminBackup: React.FC = () => {
                 </button>
               </div>
             </form>
+            {paired && (
+              <button type="button" className="secondary-btn sm mt-3" onClick={unpair} disabled={unpairing}>
+                {unpairing ? <Loader2 size={14} className="spin" /> : <Unlink size={14} />}
+                <span>Unpair</span>
+              </button>
+            )}
             {pairMessage && (
               <div className="alert-box success sm mt-3">
                 <CheckCircle2 size={16} /> {pairMessage}

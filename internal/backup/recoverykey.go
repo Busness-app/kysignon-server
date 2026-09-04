@@ -29,6 +29,7 @@ const (
 type SettingsStore interface {
 	GetSetting(key string) (string, error)
 	SetSetting(key, value string) error
+	DeleteSetting(key string) error
 }
 
 // RecoveryKey is what a product holds after pairing: the suite recovery public key and the

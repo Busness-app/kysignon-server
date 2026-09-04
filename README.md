@@ -205,11 +205,14 @@ address, and the chain is walked from the right past hops inside `TRUSTED_PROXY_
 client-supplied entry prepended to the list is never attributed.
 
 **Backups are sealed to the suite recovery key and this server never holds what opens
-them.** Pairing with KyRecovery hands the server the suite recovery public key; every capsule
-is sealed to it, deposited every `KYSIGNON_BACKUP_DEPOSIT_INTERVAL` (default 24h, 15m floor,
-`0` disables) and on demand. Custodian cards come from the KyRecovery ceremony, and a restore
-is `kysignon restore -capsule <file.kycap> -to <dir>` with k shares typed on stdin. An
-unpaired server can run drills but cannot export or deposit a capsule.
+them.** The key arrives by pairing with KyRecovery, or is pasted from the ceremony page on
+the Disaster recovery screen for a server with no KyRecovery. Every capsule is sealed to it
+and goes to each configured destination: KyRecovery when paired, and `KYSIGNON_BACKUP_DIR`
+when set (the newest `KYSIGNON_BACKUP_KEEP`, default 7, are kept). The schedule is set on
+the same screen; `KYSIGNON_BACKUP_DEPOSIT_INTERVAL` (default 24h, 15m floor, `0` disables)
+is only the default until an admin picks one. Custodian cards come from the KyRecovery
+ceremony, and a restore is `kysignon restore -capsule <file.kycap> -to <dir>` with k shares
+typed on stdin. A server with no key pinned can run drills but cannot make a capsule.
 
 **Passkeys are bound to the issuer's origin.** The relying party ID is the hostname of
 `KYSIGNON_ISSUER_URL` and the accepted origin is its scheme, host and port. Changing the
@@ -226,7 +229,8 @@ rather than as an account's sole factor.
 
 **Destructive admin operations require step-up re-authentication.** Creating or editing an
 account, resetting someone's MFA, deleting a user, registering or deleting an OAuth client,
-connecting or removing a paired system, and exporting, pairing or depositing a backup each
+connecting or removing a paired system, and exporting, pairing, pinning a key, running or
+rescheduling a backup each
 spend a single-use grant that costs your password and an enrolled factor. A stolen session
 cookie cannot produce one. Read-only views and the emergency "revoke sessions" button stay
 on the session alone, so locking an account down during an incident is not slowed by a

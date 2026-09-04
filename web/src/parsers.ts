@@ -11,6 +11,7 @@ import type {
   Application,
   AuditEvent,
   BackupDrillResult,
+  BackupRunResult,
   BackupStatus,
   DepositReceipt,
   NativeDevice,
@@ -331,16 +332,45 @@ export function parseDepositReceipt(value: unknown): DepositReceipt {
   };
 }
 
+function optNum(source: Record<string, unknown>, key: string): number | undefined {
+  return typeof source[key] === 'number' ? (source[key] as number) : undefined;
+}
+
+export function parseBackupRun(value: unknown): BackupRunResult {
+  const o = obj(value, 'a backup run result');
+  const m = obj(o.manifest, 'a capsule manifest');
+  return {
+    capsuleId: str(m, 'capsule_id'),
+    sizeBytes: optNum(o, 'size_bytes') ?? 0,
+    localPath: optStr(o, 'local_path'),
+    receipt: isRecord(o.receipt) ? parseDepositReceipt(o.receipt) : undefined,
+  };
+}
+
 export function parseBackupStatus(value: unknown): BackupStatus {
   const o = obj(value, 'a backup status response');
   return {
     paired: bool(o, 'paired'),
+    keyPinned: o.key_pinned === true,
     recovery_url: optStr(o, 'recovery_url'),
     recovery_key_id: optStr(o, 'recovery_key_id'),
-    threshold: typeof o.threshold === 'number' ? o.threshold : undefined,
-    total_shares: typeof o.total_shares === 'number' ? o.total_shares : undefined,
+    recovery_key_error: optStr(o, 'recovery_key_error'),
+    threshold: optNum(o, 'threshold'),
+    total_shares: optNum(o, 'total_shares'),
     last_deposit: isRecord(o.last_deposit) ? parseDepositReceipt(o.last_deposit) : undefined,
-    deposit_interval_sec: typeof o.deposit_interval_sec === 'number' ? o.deposit_interval_sec : undefined,
+    intervalSec: optNum(o, 'interval_sec'),
+    minIntervalSec: optNum(o, 'min_interval_sec'),
+    nextRunAt: optStr(o, 'next_run_at'),
+    localDir: optStr(o, 'local_dir'),
+    localKeep: optNum(o, 'local_keep'),
+    localCopies: Array.isArray(o.local_copies)
+      ? list(o.local_copies, (item) => {
+          const c = obj(item, 'a local copy');
+          return { name: str(c, 'name'), sizeBytes: optNum(c, 'size_bytes') ?? 0, createdAt: optStr(c, 'created_at') ?? '' };
+        })
+      : [],
+    localError: optStr(o, 'local_error'),
+    members: Array.isArray(o.members) ? strArray(o.members) : [],
     app_name: optStr(o, 'app_name') ?? 'KySignOn',
     app_version: optStr(o, 'app_version') ?? '',
   };

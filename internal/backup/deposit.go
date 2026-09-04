@@ -120,52 +120,103 @@ func notPaired(err error) error {
 	return err
 }
 
-// DepositBackup seals the instance's backup to the pinned key, deposits it, and records the
-// receipt. The receipt is what a restore is checked against, so it is written only after
-// kyrecovery has confirmed the digest of the bytes sent.
-func DepositBackup(ctx context.Context, cfg *config.Config, settings SettingsStore, snap Snapshotter, client Depositor, appVersion string) (Receipt, capsule.Manifest, error) {
+// ErrNoDestination means a key is pinned but there is nowhere to put a capsule: not paired
+// with KyRecovery and no KYSIGNON_BACKUP_DIR.
+var ErrNoDestination = errors.New("backup: no destination; pair with KyRecovery or set KYSIGNON_BACKUP_DIR")
+
+// Result is what one backup run produced. LocalPath is set when a copy landed in the local
+// backup directory; Receipt when KyRecovery confirmed the deposit.
+type Result struct {
+	Manifest  capsule.Manifest `json:"manifest"`
+	SizeBytes int              `json:"size_bytes"`
+	LocalPath string           `json:"local_path,omitempty"`
+	Receipt   *Receipt         `json:"receipt,omitempty"`
+}
+
+// RunBackup seals the instance once and sends the capsule everywhere it is configured to
+// go: the local backup directory when one is set, KyRecovery when paired. The receipt is
+// what a restore is checked against, so it is written only after kyrecovery has confirmed
+// the digest of the bytes sent. The attempt is stamped first, so a failing run is retried
+// once per interval rather than on every scheduler tick.
+func RunBackup(ctx context.Context, cfg *config.Config, settings SettingsStore, snap Snapshotter, client Depositor, appVersion string) (Result, error) {
 	if !depositMu.TryLock() {
-		return Receipt{}, capsule.Manifest{}, ErrDepositInProgress
+		return Result{}, ErrDepositInProgress
 	}
 	defer depositMu.Unlock()
-	pairing, err := LoadPairing(cfg.DataDir, settings, cfg.EncryptionKey)
+	if err := markAttempt(settings); err != nil {
+		return Result{}, err
+	}
+	key, err := LoadRecoveryKey(cfg.DataDir, settings)
+	if (errors.Is(err, ErrNotPaired) || errors.Is(err, ErrRecoveryKeyMismatch)) && HasPairing(settings) {
+		return Result{}, fmt.Errorf("%w: %v", ErrKeyPinMissing, err)
+	}
 	if err != nil {
-		return Receipt{}, capsule.Manifest{}, err
+		return Result{}, err
+	}
+	paired := HasPairing(settings)
+	if !paired && cfg.BackupDir == "" {
+		return Result{}, ErrNoDestination
 	}
 	payload, err := CollectSealable(cfg, snap, appVersion)
 	if err != nil {
-		return Receipt{}, capsule.Manifest{}, err
+		return Result{}, err
 	}
-	raw, m, err := Seal(payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, pairing.Key)
+	raw, m, err := Seal(payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, key)
 	if err != nil {
-		return Receipt{}, capsule.Manifest{}, err
+		return Result{}, err
+	}
+	res := Result{Manifest: m, SizeBytes: len(raw)}
+	if cfg.BackupDir != "" {
+		if res.LocalPath, err = WriteLocalCopy(cfg.BackupDir, m.CapsuleID, raw, cfg.BackupKeep); err != nil {
+			return res, fmt.Errorf("local copy: %w", err)
+		}
+	}
+	if !paired {
+		return res, nil
+	}
+	pairing, err := LoadPairing(cfg.DataDir, settings, cfg.EncryptionKey)
+	if err != nil {
+		return res, err
 	}
 	rcpt, err := client.Deposit(ctx, pairing.URL, pairing.Token, raw)
 	if err != nil {
-		return Receipt{}, m, err
+		return res, err
 	}
 	if rcpt.CapsuleID != m.CapsuleID {
-		return Receipt{}, m, fmt.Errorf("%w: deposit receipt names capsule %s, sent %s", ErrRemote, rcpt.CapsuleID, m.CapsuleID)
+		return res, fmt.Errorf("%w: deposit receipt names capsule %s, sent %s", ErrRemote, rcpt.CapsuleID, m.CapsuleID)
 	}
+	res.Receipt = &rcpt
 	b, _ := json.Marshal(rcpt)
 	if err := settings.SetSetting(settingLastDeposit, string(b)); err != nil {
-		return rcpt, m, fmt.Errorf("%w: %s: %w", ErrReceiptUnrecorded, rcpt.CapsuleID, err)
+		return res, fmt.Errorf("%w: %s: %w", ErrReceiptUnrecorded, rcpt.CapsuleID, err)
 	}
-	return rcpt, m, nil
+	return res, nil
 }
 
-// Outcome classifies a DepositBackup result for the audit log, so every caller records the
+// Outcome classifies a RunBackup result for the audit log, so every caller records the
 // same event for the same result. A capsule KyRecovery holds is "deposited" even when this
-// side failed to write the receipt; the cause rides in the details. Every field is bounded
-// here, so the guarantee does not depend on what a caller verified two packages away.
-func Outcome(rcpt Receipt, m capsule.Manifest, err error) (action, outcome string, details map[string]any) {
+// side failed to write the receipt; the cause rides in the details. A local copy that was
+// written before the deposit failed is named too, so the row says what the operator has.
+// Every field is bounded here, so the guarantee does not depend on what a caller verified
+// two packages away.
+func Outcome(res Result, err error) (action, outcome string, details map[string]any) {
+	details = map[string]any{"capsule_id": AuditSafe(res.Manifest.CapsuleID), "size_bytes": res.SizeBytes}
+	if res.LocalPath != "" {
+		details["local_path"] = AuditSafe(res.LocalPath)
+	}
+	if res.Receipt != nil {
+		details["digest"] = AuditSafe(res.Receipt.Digest)
+		details["deposited"] = true
+	}
 	switch {
 	case err == nil:
-		return "admin.backup_deposit", "success", map[string]any{"capsule_id": AuditSafe(rcpt.CapsuleID), "digest": AuditSafe(rcpt.Digest), "size_bytes": rcpt.SizeBytes}
+		return "admin.backup_run", "success", details
 	case errors.Is(err, ErrReceiptUnrecorded):
-		return "admin.backup_deposit", "success", map[string]any{"capsule_id": AuditSafe(rcpt.CapsuleID), "digest": AuditSafe(rcpt.Digest), "size_bytes": rcpt.SizeBytes, "receipt_unrecorded": AuditSafe(err.Error())}
+		details["receipt_unrecorded"] = AuditSafe(err.Error())
+		return "admin.backup_run", "success", details
 	default:
-		return "admin.backup_deposit", "failure", map[string]any{"capsule_id": AuditSafe(m.CapsuleID), "error": AuditSafe(err.Error())}
+		details["error"] = AuditSafe(err.Error())
+		return "admin.backup_run", "failure", details
 	}
 }
 

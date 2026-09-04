@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -186,16 +189,20 @@ func TestAdminBackupEndpoints(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("got %d: %s", w.Code, w.Body.String())
 		}
-		var rcpt backup.Receipt
-		_ = json.NewDecoder(w.Body).Decode(&rcpt)
+		var res backup.Result
+		_ = json.NewDecoder(w.Body).Decode(&res)
+		if res.Receipt == nil || res.LocalPath != "" {
+			t.Fatalf("result %+v", res)
+		}
+		rcpt := *res.Receipt
 		if _, files, err := capsule.Open(fake.got, priv, t.TempDir()); err != nil || len(files) < 5 {
 			t.Fatalf("what the store received does not open with the suite key: %v", err)
 		}
 		if last, ok, _ := backup.LastDeposit(dbStore); !ok || last.CapsuleID != rcpt.CapsuleID {
 			t.Errorf("last deposit %+v %v", last, ok)
 		}
-		if !auditHas("admin.backup_deposit", "success") {
-			t.Error("deposit not audited")
+		if !auditHas("admin.backup_run", "success") {
+			t.Error("backup not audited")
 		}
 		fake.deposit = errors.New(backup.ErrRemote.Error() + ": deposit rejected (429)")
 		fake.deposit = errors.Join(backup.ErrRemote, fake.deposit)
@@ -233,11 +240,106 @@ func TestAdminBackupEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("schedule is set in the UI and shows up in status", func(t *testing.T) {
+		if w := do("PUT", "/api/admin/backup/schedule", []byte(`{"interval_sec":60}`), true); w.Code != http.StatusBadRequest {
+			t.Errorf("below the floor: got %d: %s", w.Code, w.Body.String())
+		}
+		if w := do("PUT", "/api/admin/backup/schedule", []byte(`{"interval_sec":3600}`), true); w.Code != http.StatusOK {
+			t.Fatalf("got %d: %s", w.Code, w.Body.String())
+		}
+		w := do("GET", "/api/admin/backup/status", nil, false)
+		var resp map[string]any
+		_ = json.NewDecoder(w.Body).Decode(&resp)
+		if resp["interval_sec"] != float64(3600) || resp["next_run_at"] == nil || resp["key_pinned"] != true {
+			t.Errorf("status %v", resp)
+		}
+		if !auditHas("admin.backup_schedule", "success") {
+			t.Error("schedule change not audited")
+		}
+		if w := do("PUT", "/api/admin/backup/schedule", []byte(`{"interval_sec":0}`), true); w.Code != http.StatusOK {
+			t.Fatalf("off: got %d: %s", w.Code, w.Body.String())
+		}
+		w = do("GET", "/api/admin/backup/status", nil, false)
+		resp = nil
+		_ = json.NewDecoder(w.Body).Decode(&resp)
+		if resp["interval_sec"] != float64(0) || resp["next_run_at"] != nil {
+			t.Errorf("off status %v", resp)
+		}
+	})
+
+	t.Run("a second key is refused by hand as well as by pairing", func(t *testing.T) {
+		other, _ := recoverykey.Generate()
+		body, _ := json.Marshal(map[string]any{"public_key": base64.StdEncoding.EncodeToString(other.Public().Bytes()), "threshold": 2, "total_shares": 3})
+		if w := do("POST", "/api/admin/backup/pin-key", body, true); w.Code != http.StatusConflict {
+			t.Errorf("got %d: %s", w.Code, w.Body.String())
+		}
+		if !auditHas("admin.backup_key_pin", "failure") {
+			t.Error("refused pin not audited")
+		}
+	})
+
 	t.Run("step-up is required on the secret-bearing routes", func(t *testing.T) {
-		for _, tc := range []struct{ method, path string }{{"GET", "/api/admin/backup/export-capsule"}, {"POST", "/api/admin/backup/deposit"}, {"POST", "/api/admin/backup/pair-remote"}} {
+		for _, tc := range []struct{ method, path string }{{"GET", "/api/admin/backup/export-capsule"}, {"POST", "/api/admin/backup/deposit"}, {"POST", "/api/admin/backup/pair-remote"}, {"POST", "/api/admin/backup/pin-key"}, {"PUT", "/api/admin/backup/schedule"}} {
 			if w := do(tc.method, tc.path, []byte(`{}`), false); w.Code != http.StatusForbidden && w.Code != http.StatusUnauthorized {
 				t.Errorf("%s %s without step-up: got %d", tc.method, tc.path, w.Code)
 			}
 		}
 	})
+}
+
+// An instance with no KyRecovery pins the ceremony's public key by hand and backs up to a
+// local directory. Nothing is sent anywhere, and the copy opens only with the suite shares.
+func TestPinnedKeyBacksUpLocallyWithoutKyRecovery(t *testing.T) {
+	priv, err := recoverykey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeRecovery{}
+	prev := newRecoveryClient
+	newRecoveryClient = func() recoveryClient { return fake }
+	t.Cleanup(func() { newRecoveryClient = prev })
+
+	srv, dbStore, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	srv.cfg.BackupDir = filepath.Join(t.TempDir(), "capsules")
+	srv.cfg.BackupKeep = 3
+	admin := newUser(t, dbStore, "admin")
+	cookie := newSession(t, dbStore, admin, time.Now().UTC().Add(time.Hour))
+
+	bad, _ := json.Marshal(map[string]any{"public_key": "AAAA", "threshold": 2, "total_shares": 3})
+	if w := adminRequest(t, srv, "POST", "/api/admin/backup/pin-key", cookie, string(bad)); w.Code != http.StatusBadRequest {
+		t.Errorf("garbage key: got %d: %s", w.Code, w.Body.String())
+	}
+	pub := base64.StdEncoding.EncodeToString(priv.Public().Bytes())
+	body, _ := json.Marshal(map[string]any{"public_key": pub, "threshold": 1, "total_shares": 1})
+	if w := adminRequest(t, srv, "POST", "/api/admin/backup/pin-key", cookie, string(body)); w.Code != http.StatusBadRequest {
+		t.Errorf("1-of-1: got %d: %s", w.Code, w.Body.String())
+	}
+	body, _ = json.Marshal(map[string]any{"public_key": pub, "threshold": 2, "total_shares": 3})
+	if w := adminRequest(t, srv, "POST", "/api/admin/backup/pin-key", cookie, string(body)); w.Code != http.StatusOK {
+		t.Fatalf("pin: got %d: %s", w.Code, w.Body.String())
+	}
+	w := adminRequest(t, srv, "POST", "/api/admin/backup/deposit", cookie, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("run: got %d: %s", w.Code, w.Body.String())
+	}
+	var res backup.Result
+	_ = json.NewDecoder(w.Body).Decode(&res)
+	if res.Receipt != nil || res.LocalPath == "" || fake.got != nil {
+		t.Fatalf("unpaired run %+v sent=%v", res, fake.got != nil)
+	}
+	raw, err := os.ReadFile(res.LocalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, files, err := capsule.Open(raw, priv, t.TempDir()); err != nil || len(files) < 5 {
+		t.Fatalf("local copy does not open with the suite key: %v", err)
+	}
+	w = adminRequest(t, srv, "GET", "/api/admin/backup/status", cookie, "")
+	var status map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&status)
+	copies, _ := status["local_copies"].([]any)
+	if status["paired"] != false || status["key_pinned"] != true || len(copies) != 1 {
+		t.Errorf("status %v", status)
+	}
 }

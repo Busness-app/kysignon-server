@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/capsule"
+	"github.com/Busness-app/ky-primitives/recoverykey"
 	"github.com/Busness-app/kysignon-server/internal/config"
 	"github.com/Busness-app/kysignon-server/internal/crypto"
 	_ "modernc.org/sqlite"
@@ -28,53 +30,67 @@ type DrillResult struct {
 	ErrorMessage string      `json:"error_message,omitempty"`
 }
 
-// RunRestoreDrill decapsulates the container into an ephemeral 0700 scratch directory, executes the recipe, and scrubs the directory.
-func RunRestoreDrill(ctx context.Context, capsule *Capsule, key []byte) (*DrillResult, error) {
+// RunRestoreDrill proves the backup pipeline: it seals files exactly as a real backup would,
+// but to a throwaway keypair it then opens with, extracts into a 0700 scratch directory, and
+// runs the verification recipe. The product has no recovery private key, so this is the only
+// end-to-end check it can run alone. A separate check reports whether the suite key is pinned.
+func RunRestoreDrill(ctx context.Context, serviceName, appVersion string, files []BackupFile, deps, recipe map[string]any, pinned RecoveryKey) (*DrillResult, error) {
 	start := time.Now()
+	result := &DrillResult{Passed: true, Checks: make([]CheckItem, 0)}
+
+	if pinned.Public.IsZero() {
+		result.Passed = false
+		result.Checks = append(result.Checks, CheckItem{Name: "Recovery Key", Passed: false, Message: ErrNotPaired.Error()})
+	} else {
+		result.Checks = append(result.Checks, CheckItem{Name: "Recovery Key", Passed: true,
+			Message: fmt.Sprintf("Sealing to recovery key %s (%d-of-%d custodians)", pinned.Public.ID()[:16], pinned.Threshold, pinned.TotalShares)})
+	}
+
+	// Seal to a throwaway key and open with it. Topology is display metadata here; the
+	// drill key has no custodians and is dropped when this call returns.
+	drillKey, err := recoverykey.Generate()
+	if err != nil {
+		return nil, fmt.Errorf("drill key: %w", err)
+	}
+	var payloadBytes int64
+	for _, f := range files {
+		payloadBytes += int64(len(f.Data))
+	}
+	raw, _, err := capsule.Seal(serviceName, appVersion, toCapsuleFiles(files), deps, recipe, 2, 3, drillKey.Public())
+	if err != nil {
+		result.Passed = false
+		result.ErrorMessage = fmt.Sprintf("Seal failed: %v", err)
+		result.Checks = append(result.Checks, CheckItem{Name: "Seal", Passed: false,
+			Message: fmt.Sprintf("%s (payload %d bytes across %d files)", result.ErrorMessage, payloadBytes, len(files))})
+		result.DurationMS = time.Since(start).Milliseconds()
+		return result, nil
+	}
 
 	scratchDir, err := os.MkdirTemp("", "kybackup-drill-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create drill sandbox: %w", err)
 	}
-	defer func() {
-		_ = os.RemoveAll(scratchDir)
-	}()
-
+	defer func() { _ = os.RemoveAll(scratchDir) }()
 	_ = os.Chmod(scratchDir, 0700)
 
-	result := &DrillResult{
-		Passed: true,
-		Checks: make([]CheckItem, 0),
-	}
-
-	// 1. Decapsulate and extract
-	files, err := ExtractCapsule(capsule, key, scratchDir)
+	m, extracted, err := capsule.Open(raw, drillKey, scratchDir)
 	if err != nil {
 		result.Passed = false
-		result.ErrorMessage = fmt.Sprintf("Decapsulation failed: %v", err)
-		result.Checks = append(result.Checks, CheckItem{
-			Name:    "Directory Unpack",
-			Passed:  false,
-			Message: result.ErrorMessage,
-		})
+		result.ErrorMessage = fmt.Sprintf("Open failed: %v", err)
+		result.Checks = append(result.Checks, CheckItem{Name: "Directory Unpack", Passed: false, Message: result.ErrorMessage})
 		result.DurationMS = time.Since(start).Milliseconds()
 		return result, nil
 	}
-
 	var totalBytes int64
-	for _, f := range files {
-		totalBytes += int64(len(f.Data))
+	for _, f := range extracted {
+		totalBytes += int64(len(f.Content))
 	}
+	result.Checks = append(result.Checks, CheckItem{Name: "Directory Unpack", Passed: true,
+		Message: fmt.Sprintf("Extracted %d files (%d bytes) into isolated sandbox", len(extracted), totalBytes)})
 
-	result.Checks = append(result.Checks, CheckItem{
-		Name:    "Directory Unpack",
-		Passed:  true,
-		Message: fmt.Sprintf("Extracted %d files (%d bytes) into isolated sandbox", len(files), totalBytes),
-	})
-
-	recipe := capsule.Manifest.VerificationRecipe
+	recipe, _ = m.VerificationRecipe.(map[string]any)
 	if recipe == nil {
-		recipe = make(map[string]interface{})
+		recipe = make(map[string]any)
 	}
 
 	// 2. Verify Required Files

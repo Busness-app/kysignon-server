@@ -213,15 +213,11 @@ func (s *Server) routes() *http.ServeMux {
 
 	mux.Handle("GET /api/admin/audit-events", adminM(http.HandlerFunc(adminH.ListAuditEvents)))
 	mux.Handle("POST /api/admin/backup/drill", adminM(http.HandlerFunc(backupH.RunDrill)))
-	// The kit is collected as separate artifacts: the encrypted capsule and one shard per
-	// custodian, each its own step-up-authorized request, and no principal may collect more
-	// than threshold-1 shards, so no single administrator can assemble a quorum.
-	mux.Handle("POST /api/admin/backup/recovery-kit", adminStepUpM(http.HandlerFunc(backupH.CreateRecoveryKit)))
-	mux.Handle("GET /api/admin/backup/recovery-kit/{id}/capsule", adminStepUpM(http.HandlerFunc(backupH.DownloadCapsule)))
-	mux.Handle("GET /api/admin/backup/recovery-kit/{id}/shard/{index}", adminStepUpM(http.HandlerFunc(backupH.DownloadShard)))
-	mux.Handle("DELETE /api/admin/backup/recovery-kit/{id}", adminM(http.HandlerFunc(backupH.DiscardRecoveryKit)))
+	// The capsule carries the whole identity directory and its keys, sealed to the suite
+	// recovery key; exporting it, pairing, and depositing each spend a step-up grant.
+	mux.Handle("GET /api/admin/backup/export-capsule", adminStepUpM(http.HandlerFunc(backupH.ExportCapsule)))
 	mux.Handle("POST /api/admin/backup/pair-remote", adminStepUpM(http.HandlerFunc(backupH.PairRemote)))
-	mux.Handle("POST /api/admin/backup/push", adminStepUpM(http.HandlerFunc(backupH.PushBackup)))
+	mux.Handle("POST /api/admin/backup/deposit", adminStepUpM(http.HandlerFunc(backupH.Deposit)))
 	mux.Handle("GET /api/admin/backup/status", adminM(http.HandlerFunc(backupH.Status)))
 
 	// Static CSS & Fonts from filesystem if present

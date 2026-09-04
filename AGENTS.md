@@ -11,7 +11,7 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 5. **Dashboard & Application Launcher**: Suite sidebar layout in Space Grotesk and IBM Plex Mono, themed with the fifteen KyPost palettes (`web/src/theme.ts`, Patina Ky default, chosen under Appearance and kept in this browser). Accent is a fill colour only; as text it fails contrast on the light palettes. `css/styles.css` serves the fonts and the pre-bundle fallback page.
    The client table exposes each app's copyable OIDC connection details from the configured issuer, including its client ID, human-readable `username` claim, and compatible credential style; it never displays stored secret hashes or claims a browser-compatible logout endpoint exists.
    Administrators can add non-KySecurity launcher applications and select a built-in icon or an HTTPS site favicon; favicon loading stays in the browser rather than creating a server-side fetch path.
-6. **Disaster Recovery & KyBackup (Feature 0)**: Encrypted capsule container creation (`.kycap`), Shamir Secret Sharing $(k=2, n=3)$ custodian key distribution, automated sandboxed live restore drills, offline HTML emergency recovery kit generation, and remote KyRecovery pairing.
+6. **Disaster Recovery & KyBackup (Feature 0)**: `kycap/3` capsules sealed to the suite recovery public key received at KyRecovery pairing, scheduled and on-demand deposit to KyRecovery, automated sandboxed live restore drills, and a `restore` command that takes custodian shares from the KyRecovery ceremony. The wire contract is `kyrecovery-server/zero_code_pairing_handoff_spec.md`.
 
 ## Security Invariants
 
@@ -77,4 +77,4 @@ Non-trivial logic must include one runnable check (unit test or minimal self-che
 
 ## Child DOX Index
 
-- [internal/backup/AGENTS.md](file:///home/yoshi/busness.app/kysignon-server/internal/backup/AGENTS.md): Feature 0 disaster recovery, container encapsulation (.kycap), Shamir Secret Sharing, automated restore drills, and KyRecovery integration.
+- [internal/backup/AGENTS.md](file:///home/yoshi/busness.app/kysignon-server/internal/backup/AGENTS.md): Feature 0 disaster recovery: sealed capsules, KyRecovery pairing and deposit, restore drills.

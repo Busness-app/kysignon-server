@@ -18,6 +18,14 @@ import (
 // KeyLength is the required size, in bytes, of the secret and encryption keys.
 const KeyLength = 32
 
+// MinBackupDepositInterval is the shortest deposit schedule accepted: each run snapshots the
+// whole database and uploads it, and KyRecovery admits 60 deposits per token per 15 minutes.
+const MinBackupDepositInterval = 15 * time.Minute
+
+// DefaultAppName is the service name this instance pairs and seals under. KyRecovery pins
+// the name sent at pairing and checks every capsule against it.
+const DefaultAppName = "KySignOn"
+
 // Config represents runtime application configuration.
 type Config struct {
 	Port      string
@@ -54,6 +62,11 @@ type Config struct {
 	PushRelayKey          string
 	APNSRelayURL          string
 	APNSRelayKey          string
+	// AppName is the service name KyRecovery knows this instance by.
+	AppName string
+	// BackupDepositInterval is how often a paired instance seals and deposits a capsule to
+	// KyRecovery. Zero disables the schedule; deposits then happen only on request.
+	BackupDepositInterval time.Duration
 }
 
 // Load loads configuration from environment variables. Anything malformed is an error:
@@ -115,6 +128,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	depositInterval, err := loadDepositInterval()
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		Port:                  port,
@@ -138,7 +155,27 @@ func Load() (*Config, error) {
 		PushRelayKey:          strings.TrimSpace(os.Getenv("PUSH_RELAY_KEY")),
 		APNSRelayURL:          apnsRelayURL,
 		APNSRelayKey:          strings.TrimSpace(os.Getenv("APNS_RELAY_KEY")),
+		AppName:               getEnv("KYSIGNON_APP_NAME", DefaultAppName),
+		BackupDepositInterval: depositInterval,
 	}, nil
+}
+
+// loadDepositInterval reads KYSIGNON_BACKUP_DEPOSIT_INTERVAL: a Go duration, default 24h,
+// "0" disables, anything else below the minimum or negative fails startup.
+func loadDepositInterval() (time.Duration, error) {
+	const name = "KYSIGNON_BACKUP_DEPOSIT_INTERVAL"
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative Go duration (for example 24h; 0 disables)", name)
+	}
+	if d != 0 && d < MinBackupDepositInterval {
+		return 0, fmt.Errorf("%s %s is below the %s minimum (0 disables)", name, d, MinBackupDepositInterval)
+	}
+	return d, nil
 }
 
 func loadRelayURL(name string) (string, error) {

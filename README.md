@@ -204,12 +204,12 @@ honoured per deployment because trying several in turn means whichever one your 
 address, and the chain is walked from the right past hops inside `TRUSTED_PROXY_CIDRS`, so a
 client-supplied entry prepended to the list is never attributed.
 
-**Recovery kit shards are capped per administrator.** No single account can collect enough
-shards to rebuild the capsule key, so a 2-of-3 kit needs two administrators to sign in and
-collect their own. A server with only one administrator may collect all of them — otherwise
-it could never produce a kit at all — and every such collection is recorded as
-`admin.backup_single_custodian_quorum`. Add a second administrator to get real custody
-separation.
+**Backups are sealed to the suite recovery key and this server never holds what opens
+them.** Pairing with KyRecovery hands the server the suite recovery public key; every capsule
+is sealed to it, deposited every `KYSIGNON_BACKUP_DEPOSIT_INTERVAL` (default 24h, 15m floor,
+`0` disables) and on demand. Custodian cards come from the KyRecovery ceremony, and a restore
+is `kysignon restore -capsule <file.kycap> -to <dir>` with k shares typed on stdin. An
+unpaired server can run drills but cannot export or deposit a capsule.
 
 **Passkeys are bound to the issuer's origin.** The relying party ID is the hostname of
 `KYSIGNON_ISSUER_URL` and the accepted origin is its scheme, host and port. Changing the
@@ -226,7 +226,7 @@ rather than as an account's sole factor.
 
 **Destructive admin operations require step-up re-authentication.** Creating or editing an
 account, resetting someone's MFA, deleting a user, registering or deleting an OAuth client,
-connecting or removing a paired system, and every recovery-kit or KyRecovery operation each
+connecting or removing a paired system, and exporting, pairing or depositing a backup each
 spend a single-use grant that costs your password and an enrolled factor. A stolen session
 cookie cannot produce one. Read-only views and the emergency "revoke sessions" button stay
 on the session alone, so locking an account down during an incident is not slowed by a

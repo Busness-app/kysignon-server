@@ -1,15 +1,23 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Busness-app/ky-primitives/capsule"
+	"github.com/Busness-app/ky-primitives/recoverykey"
+	"github.com/Busness-app/ky-primitives/shamir"
 
 	"github.com/Busness-app/kysignon-server/internal/api"
 	"github.com/Busness-app/kysignon-server/internal/audit"
@@ -46,18 +54,17 @@ func main() {
 		case "backup-drill":
 			runBackupDrill()
 			return
-		case "export-recovery-kit":
-			kitCmd := flag.NewFlagSet("export-recovery-kit", flag.ExitOnError)
-			outPath := kitCmd.String("out", "kysignon-recovery-kit", "Directory to write the capsule and custodian shard files into")
-			_ = kitCmd.Parse(os.Args[2:])
-			runExportRecoveryKit(*outPath)
+		case "export-capsule":
+			exportCmd := flag.NewFlagSet("export-capsule", flag.ExitOnError)
+			outPath := exportCmd.String("out", "", "output path (default <capsule-id>.kycap in the current directory)")
+			_ = exportCmd.Parse(os.Args[2:])
+			runExportCapsule(*outPath)
 			return
-		case "push-backup":
-			pushCmd := flag.NewFlagSet("push-backup", flag.ExitOnError)
-			recURL := pushCmd.String("recovery-url", "", "KyRecovery server base URL")
-			apiToken := pushCmd.String("token", "", "KyRecovery API bearer token")
-			_ = pushCmd.Parse(os.Args[2:])
-			runPushBackup(*recURL, *apiToken)
+		case "deposit":
+			runDeposit()
+			return
+		case "restore":
+			runRestore(os.Args[2:])
 			return
 		}
 	}
@@ -177,6 +184,10 @@ func main() {
 	}()
 
 	staticFS, _ := web.FS()
+
+	if cfg.BackupDepositInterval > 0 {
+		go depositLoop(ctx, cfg, dbStore, auditLogger)
+	}
 
 	server := api.NewServer(
 		cfg,
@@ -325,22 +336,15 @@ func runBackupDrill() {
 	dbStore := openStoreForBackup(cfg)
 	defer dbStore.Close()
 
-	payload, err := backup.BuildLocalPayload(cfg, dbStore, appVersion)
+	payload, err := backup.CollectSealable(cfg, dbStore, appVersion)
 	if err != nil {
-		log.Fatalf("Failed to build local backup payload: %v", err)
+		log.Fatalf("Failed to collect backup payload: %v", err)
 	}
-	files, err := backup.AsBackupFiles(payload)
-	if err != nil {
-		log.Fatalf("Failed to decode backup payload: %v", err)
+	pinned, err := backup.LoadRecoveryKey(cfg.DataDir, dbStore)
+	if err != nil && !errors.Is(err, backup.ErrNotPaired) {
+		log.Fatalf("Recovery key: %v", err)
 	}
-
-	capsule, key, err := backup.CreateCapsule("KySignOn", appVersion, files,
-		payload.Dependencies, payload.VerificationRecipe, payload.Threshold, payload.TotalShares)
-	if err != nil {
-		log.Fatalf("Failed to create capsule: %v", err)
-	}
-
-	result, err := backup.RunRestoreDrill(context.Background(), capsule, key)
+	result, err := backup.RunRestoreDrill(context.Background(), payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, pinned)
 	if err != nil {
 		log.Fatalf("Drill execution failed: %v", err)
 	}
@@ -365,97 +369,174 @@ func runBackupDrill() {
 	}
 }
 
-// runExportRecoveryKit writes the encrypted capsule and one file per custodian into outDir.
-// The shards are deliberately separate files: a single document holding a quorum reduces the
-// advertised 2-of-3 custody model to 1-of-1.
-func runExportRecoveryKit(outDir string) {
+// runExportCapsule writes the capsule sealed to the suite recovery key. Only k custodian
+// shares open it, so the file is safe anywhere; kyrecovery is where it belongs.
+func runExportCapsule(outPath string) {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
-	if outDir == "" || outDir == "-" {
-		log.Fatalf("Error: -out must name a directory to write the kit into")
-	}
 	dbStore := openStoreForBackup(cfg)
 	defer dbStore.Close()
 
-	payload, err := backup.BuildLocalPayload(cfg, dbStore, appVersion)
+	key, err := backup.LoadRecoveryKey(cfg.DataDir, dbStore)
 	if err != nil {
-		log.Fatalf("Failed to build payload: %v", err)
+		log.Fatalf("Recovery key: %v", err)
 	}
-	files, err := backup.AsBackupFiles(payload)
+	payload, err := backup.CollectSealable(cfg, dbStore, appVersion)
 	if err != nil {
-		log.Fatalf("Failed to decode backup payload: %v", err)
+		log.Fatalf("Failed to collect backup payload: %v", err)
 	}
-
-	capsule, _, err := backup.CreateCapsule("KySignOn", appVersion, files,
-		payload.Dependencies, payload.VerificationRecipe, payload.Threshold, payload.TotalShares)
+	raw, m, err := backup.Seal(payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, key)
 	if err != nil {
-		log.Fatalf("Failed to create capsule: %v", err)
+		log.Fatalf("Seal: %v", err)
 	}
-	capsuleBytes, err := backup.SerializeCapsule(capsule)
-	if err != nil {
-		log.Fatalf("Failed to serialize capsule: %v", err)
+	if outPath == "" {
+		outPath = backup.FilenameSafe(m.CapsuleID) + ".kycap"
 	}
-
-	if err := os.MkdirAll(outDir, 0700); err != nil {
-		log.Fatalf("Failed to create %s: %v", outDir, err)
+	if err := os.WriteFile(outPath, raw, 0600); err != nil {
+		log.Fatalf("Write: %v", err)
 	}
-
-	capsulePath := filepath.Join(outDir, capsule.Manifest.CapsuleID+".kycap")
-	if err := os.WriteFile(capsulePath, capsuleBytes, 0600); err != nil {
-		log.Fatalf("Failed to write capsule: %v", err)
-	}
-	fmt.Printf("Encrypted capsule: %s (%d bytes)\n", capsulePath, len(capsuleBytes))
-
-	for _, share := range capsule.Shares {
-		card := backup.GenerateCustodianCardHTML(capsule.Manifest, share, "KySignOn", cfg.IssuerURL)
-		cardPath := filepath.Join(outDir, fmt.Sprintf("custodian-shard-%d.html", share.Index))
-		if err := os.WriteFile(cardPath, []byte(card), 0600); err != nil {
-			log.Fatalf("Failed to write custodian card %d: %v", share.Index, err)
-		}
-		fmt.Printf("Custodian shard %d:  %s\n", share.Index, cardPath)
-	}
-
-	fmt.Printf("\nDistribute each custodian file to a different custodian, then delete it from\n"+
-		"this host. Any %d of %d shards plus the capsule restores the service:\n"+
-		"  kyrestore -capsule %s -shard 1:<hex> -shard 2:<hex> -out ./restored\n",
-		capsule.Manifest.Threshold, capsule.Manifest.TotalShares, capsulePath)
+	log.Printf("Capsule %s sealed to recovery key %s, written to %s (%d bytes)", m.CapsuleID, m.RecoveryKeyID, outPath, len(raw))
 }
 
-func runPushBackup(recURL, apiToken string) {
+// runDeposit seals and deposits one capsule now, for cron or an operator at a shell.
+func runDeposit() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 	dbStore := openStoreForBackup(cfg)
 	defer dbStore.Close()
+	auditLogger := audit.NewLogger(dbStore)
 
-	if recURL == "" {
-		recURL, _ = backup.LoadRecoveryURL(dbStore)
+	rcpt, m, err := backup.DepositBackup(context.Background(), cfg, dbStore, dbStore, backup.NewKyRecoveryClient(), appVersion)
+	action, outcome, details := backup.Outcome(rcpt, m, err)
+	_ = auditLogger.Record(action, "", "cli", rcpt.CapsuleID, "backup", "", "kysignon-cli", outcome, details)
+	if err != nil {
+		log.Fatalf("Deposit: %v", err)
 	}
-	if apiToken == "" {
-		// The stored credential is encrypted under the deployment key; this is the only path
-		// that decrypts it, and it never prints the value.
-		apiToken, err = backup.LoadRecoveryToken(dbStore, cfg.EncryptionKey)
+	log.Printf("Capsule %s (%d bytes, sealed to recovery key %s) deposited at %s; digest %s",
+		rcpt.CapsuleID, rcpt.SizeBytes, m.RecoveryKeyID, rcpt.DepositedAt.Format(time.RFC3339), rcpt.Digest)
+}
+
+// depositLoop seals and deposits a capsule every BackupDepositInterval while the instance is
+// paired. The wait honours shutdown; the deposit itself does not, so a SIGTERM mid-upload
+// cannot end the process between KyRecovery storing a capsule and the receipt being written.
+func depositLoop(ctx context.Context, cfg *config.Config, dbStore *store.Store, auditLogger *audit.Logger) {
+	client := backup.NewKyRecoveryClient()
+	ticker := time.NewTicker(cfg.BackupDepositInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		rcpt, m, err := backup.DepositBackup(context.WithoutCancel(ctx), cfg, dbStore, dbStore, client, appVersion)
+		if errors.Is(err, backup.ErrNotPaired) {
+			continue
+		}
+		action, outcome, details := backup.Outcome(rcpt, m, err)
+		_ = auditLogger.Record(action, "", "system", rcpt.CapsuleID, "backup", "", "kysignon-scheduler", outcome, details)
 		if err != nil {
-			log.Fatalf("Failed to read the stored KyRecovery token: %v", err)
+			log.Printf("[BACKUP] scheduled deposit: %s", backup.AuditSafe(err.Error()))
+			continue
+		}
+		log.Printf("[BACKUP] deposited capsule %s (%d bytes) with KyRecovery", rcpt.CapsuleID, rcpt.SizeBytes)
+	}
+}
+
+// restore is the product-side half of the ceremony: k custodian shares typed from their cards,
+// combined here, used once, and dropped. It refuses a capsule from another service before
+// touching the key, and prints the authenticated manifest so the operator can compare
+// CapsuleID and CreatedAt against kyrecovery's deposit record.
+func restore(capsulePath, targetDir, expectService string, shareStrings []string, stdout io.Writer) error {
+	raw, err := os.ReadFile(capsulePath)
+	if err != nil {
+		return err
+	}
+	peek, err := capsule.ReadUnverifiedManifest(raw)
+	if err != nil {
+		return err
+	}
+	if peek.ServiceName != expectService {
+		return fmt.Errorf("capsule is for service %q, this instance is %q; pass -service to override", peek.ServiceName, expectService)
+	}
+	shares := make([]shamir.Share, 0, len(shareStrings))
+	for i, s := range shareStrings {
+		sh, err := shamir.ParseShare(s)
+		if err != nil {
+			return fmt.Errorf("share %d: %w", i+1, err)
+		}
+		shares = append(shares, sh)
+	}
+	priv, err := recoverykey.Combine(shares)
+	if err != nil {
+		return err
+	}
+	m, files, err := capsule.Open(raw, priv, targetDir)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Restored %d files from capsule %s\n  service:      %s (v%s)\n  created:      %s\n  recovery key: %s\n  payload hash: %s\n",
+		len(files), m.CapsuleID, m.ServiceName, m.AppVersion, m.CreatedAt.Format(time.RFC3339), m.RecoveryKeyID, m.PayloadHash)
+	return nil
+}
+
+// readShares takes custodian shares off a reader, one per non-empty line. They never travel
+// in argv: /proc/<pid>/cmdline is world-readable, argv lands in shell history, and k of these
+// lines rebuild the suite private key.
+func readShares(r io.Reader) ([]string, error) {
+	var shares []string
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" {
+			shares = append(shares, line)
 		}
 	}
-	if recURL == "" || apiToken == "" {
-		log.Fatalf("Error: KyRecovery URL and API token are required (pass flags or pair via UI)")
-	}
+	return shares, sc.Err()
+}
 
-	payload, err := backup.BuildLocalPayload(cfg, dbStore, appVersion)
+func stdinIsTerminal() bool {
+	st, err := os.Stdin.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
+}
+
+func runRestore(args []string) {
+	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	capsulePath := fs.String("capsule", "", "path to the .kycap file")
+	target := fs.String("to", "", "empty directory to restore into")
+	service := fs.String("service", "", "expected service name (default: $KYSIGNON_APP_NAME or KySignOn)")
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, "Usage: kysignon restore -capsule <file.kycap> -to <dir> [-service <name>]\n\n"+
+			"Custodian shares are read from stdin, one ky2-... share per line, and never from\n"+
+			"the command line: argv is world-readable and lands in shell history.\n\n")
+		fs.PrintDefaults()
+	}
+	_ = fs.Parse(args)
+	if *capsulePath == "" || *target == "" {
+		fs.Usage()
+		os.Exit(2)
+	}
+	if *service == "" {
+		*service = os.Getenv("KYSIGNON_APP_NAME")
+	}
+	if *service == "" {
+		*service = config.DefaultAppName
+	}
+	if stdinIsTerminal() {
+		fmt.Fprintln(os.Stderr, "Paste the custodian shares, one per line, then press Ctrl-D:")
+	}
+	shares, err := readShares(os.Stdin)
 	if err != nil {
-		log.Fatalf("Failed to build payload: %v", err)
+		log.Fatalf("Reading shares: %v", err)
 	}
-
-	client := backup.NewKyRecoveryClient()
-	resp, err := client.PushBackup(context.Background(), recURL, apiToken, *payload)
-	if err != nil {
-		log.Fatalf("Failed to push backup to %s: %v", recURL, err)
+	if len(shares) == 0 {
+		log.Fatal("No shares read from stdin")
 	}
-
-	fmt.Printf("Backup push successful! Capsule ID: %s (%d bytes)\n", resp.CapsuleID, resp.SizeBytes)
+	if err := restore(*capsulePath, *target, *service, shares, os.Stdout); err != nil {
+		log.Fatalf("Restore: %v", err)
+	}
 }

@@ -12,11 +12,11 @@ import type {
   AuditEvent,
   BackupDrillResult,
   BackupStatus,
+  DepositReceipt,
   NativeDevice,
   OAuthClient,
   PairedSystem,
   Passkey,
-  RecoveryKit,
   User,
 } from './types';
 import type { BeginLogin, BeginRegistration } from './webauthn';
@@ -37,11 +37,6 @@ function str(source: Record<string, unknown>, key: string): string {
 function optStr(source: Record<string, unknown>, key: string): string | undefined {
   const v = source[key];
   return typeof v === 'string' ? v : undefined;
-}
-
-function num(source: Record<string, unknown>, key: string): number {
-  const v = source[key];
-  return typeof v === 'number' ? v : fail(`number field "${key}"`);
 }
 
 function bool(source: Record<string, unknown>, key: string): boolean {
@@ -326,11 +321,26 @@ export function parseAuditPage(value: unknown): AuditPage {
   return { events, total: typeof o.total === 'number' ? o.total : events.length };
 }
 
+export function parseDepositReceipt(value: unknown): DepositReceipt {
+  const o = obj(value, 'a deposit receipt');
+  return {
+    capsuleId: str(o, 'capsule_id'),
+    digest: optStr(o, 'digest') ?? '',
+    sizeBytes: typeof o.size_bytes === 'number' ? o.size_bytes : 0,
+    depositedAt: optStr(o, 'deposited_at') ?? '',
+  };
+}
+
 export function parseBackupStatus(value: unknown): BackupStatus {
   const o = obj(value, 'a backup status response');
   return {
     paired: bool(o, 'paired'),
     recovery_url: optStr(o, 'recovery_url'),
+    recovery_key_id: optStr(o, 'recovery_key_id'),
+    threshold: typeof o.threshold === 'number' ? o.threshold : undefined,
+    total_shares: typeof o.total_shares === 'number' ? o.total_shares : undefined,
+    last_deposit: isRecord(o.last_deposit) ? parseDepositReceipt(o.last_deposit) : undefined,
+    deposit_interval_sec: typeof o.deposit_interval_sec === 'number' ? o.deposit_interval_sec : undefined,
     app_name: optStr(o, 'app_name') ?? 'KySignOn',
     app_version: optStr(o, 'app_version') ?? '',
   };
@@ -350,42 +360,6 @@ export function parseDrillResult(value: unknown): BackupDrillResult {
       };
     }),
     error_message: optStr(o, 'error_message'),
-  };
-}
-
-export function parseRecoveryKit(value: unknown): RecoveryKit {
-  const o = obj(value, 'a recovery kit response');
-  return {
-    kitId: str(o, 'kit_id'),
-    capsuleId: str(o, 'capsule_id'),
-    payloadHash: optStr(o, 'payload_hash') ?? '',
-    threshold: num(o, 'threshold'),
-    totalShares: num(o, 'total_shares'),
-    capsuleSize: num(o, 'capsule_size'),
-    expiresAt: optStr(o, 'expires_at') ?? '',
-    shards: list(o.shards, (item) => {
-      const s = obj(item, 'a shard entry');
-      return {
-        index: num(s, 'index'),
-        collected: bool(s, 'collected'),
-        heldBySelf: bool(s, 'heldBySelf'),
-      };
-    }),
-    maxPerCustodian: num(o, 'max_per_custodian'),
-    soleCustodian: bool(o, 'sole_custodian'),
-  };
-}
-
-export interface PushResult {
-  capsuleId: string;
-  sizeBytes: number;
-}
-
-export function parsePushResult(value: unknown): PushResult {
-  const o = obj(value, 'a backup push response');
-  return {
-    capsuleId: optStr(o, 'capsule_id') ?? '',
-    sizeBytes: typeof o.size_bytes === 'number' ? o.size_bytes : 0,
   };
 }
 

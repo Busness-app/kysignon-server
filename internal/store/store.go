@@ -2143,12 +2143,16 @@ func (s *Store) ListAuditEvents(limit, offset int) ([]AuditEvent, int, error) {
 }
 
 // GetSetting retrieves a configuration value from system_settings.
+// ErrNotFound is returned when a setting has never been written. Callers that need to tell
+// "unset" from "empty" branch on it; a setting deliberately set to "" is not ErrNotFound.
+var ErrNotFound = errors.New("store: not found")
+
 func (s *Store) GetSetting(key string) (string, error) {
 	var val string
 	err := s.db.QueryRow(`SELECT value FROM system_settings WHERE key = ?`, key).Scan(&val)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil
+			return "", ErrNotFound
 		}
 		return "", err
 	}

@@ -210,8 +210,10 @@ type WebAuthnCredential struct {
 	SignCount     uint32 `json:"-"`
 	Name          string `json:"name"`
 	// BackupEligible reports whether the authenticator may sync this credential to a
-	// provider cloud; BackupState whether it currently is. Recorded and surfaced, never
-	// enforced here — see the design decisions in the plan.
+	// provider cloud; BackupState whether it currently is. Recorded and surfaced, and also
+	// gates signature-counter enforcement at login (internal/webauthn.VerifyAssertion):
+	// backup-eligible credentials are exempt so a sibling device reporting a lower counter
+	// after a cloud sync isn't locked out permanently.
 	BackupEligible bool       `json:"backupEligible"`
 	BackupState    bool       `json:"backupState"`
 	LastUsedAt     *time.Time `json:"lastUsedAt,omitempty"`

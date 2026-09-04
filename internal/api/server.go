@@ -177,9 +177,10 @@ func (s *Server) routes() *http.ServeMux {
 	//
 	// "Is this session an admin" is the wrong question for creating an administrator,
 	// resetting someone else's MFA, rotating a client secret, or exporting recovery material:
-	// a stolen cookie answers it. The grant costs the password and an existing factor, which
-	// a session thief does not have, and it is single-use, so one re-authentication buys
-	// exactly one change.
+	// a stolen cookie answers it. The grant costs the password plus, for accounts with TOTP
+	// enrolled, an existing factor a session thief does not have; passkey-only accounts
+	// currently get the grant from the password alone (see stepup.go). It is single-use, so
+	// one re-authentication buys exactly one change.
 	adminStepUpM := func(h http.Handler) http.Handler {
 		return adminM(s.requireStepUp(h))
 	}

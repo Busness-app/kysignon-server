@@ -31,8 +31,10 @@ var destructiveAdminRoutes = []struct{ method, path, body string }{
 }
 
 // A stolen admin cookie is the whole threat: it carries every privilege the real
-// administrator has. Step-up costs the password and an existing factor, which the thief does
-// not have, so it is the boundary these operations must sit behind.
+// administrator has. Step-up costs the password plus, for accounts with TOTP enrolled, an
+// existing factor the thief does not have (passkey-only accounts currently get the grant
+// from the password alone; see stepup.go), so it is the boundary these operations must sit
+// behind.
 func TestDestructiveAdminRoutesRequireStepUp(t *testing.T) {
 	srv, db, _, _, _, cleanup := setupTestServer(t)
 	defer cleanup()

@@ -223,8 +223,10 @@ own network behind a TLS proxy, set `KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY=true
 still required, the choice is recorded on every pairing, and loopback stays refused. Either
 way, pin the key by hand from the ceremony page before pairing, or compare the key ID the
 screen shows with the fingerprint in the KyRecovery dashboard; a swapped key then fails
-loudly. In Docker, set `KYSIGNON_DNS` to your LAN's resolver so a name that exists only
-there resolves inside the container.
+loudly. In Docker, a name that exists only on your LAN may not resolve inside the container when the
+host uses a loopback stub resolver; add the `docker-compose.lan-dns.yml` override with
+`KYSIGNON_DNS` set to your LAN's resolver. It replaces the host's resolvers for every lookup
+the container makes, which is why it is an override and not the default.
 
 **Passkeys are bound to the issuer's origin.** The relying party ID is the hostname of
 `KYSIGNON_ISSUER_URL` and the accepted origin is its scheme, host and port. Changing the

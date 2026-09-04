@@ -17,11 +17,10 @@ services:
     ports:
       - "${KYSIGNON_BIND:-127.0.0.1}:5867:5867"
 
-    # Docker's embedded resolver forwards to these instead of the host's stub resolver,
-    # which a container cannot reach. Set KYSIGNON_DNS to your LAN's DNS server so names
-    # that exist only there (a KyRecovery behind your own proxy) resolve inside the container.
-    dns:
-      - ${KYSIGNON_DNS:-1.1.1.1}
+    # Names that exist only on your LAN (a KyRecovery behind your own proxy) may not resolve
+    # in here when the host uses a loopback stub resolver. Add docker-compose.lan-dns.yml
+    # with KYSIGNON_DNS set; it is not in this file because a dns: entry replaces the host's
+    # resolvers for every lookup, which must be a choice, not a default.
 
     environment:
       KYSIGNON_PORT: 5867

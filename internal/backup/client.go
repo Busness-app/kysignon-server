@@ -112,7 +112,7 @@ func allowedIP(ip net.IP, allowPrivate bool) bool {
 	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
 		return false
 	}
-	for _, n := range reservedRanges[1:] {
+	for _, n := range reservedRanges {
 		if n.Contains(ip) {
 			return false
 		}
@@ -120,24 +120,33 @@ func allowedIP(ip net.IP, allowPrivate bool) bool {
 	return true
 }
 
-// reservedRanges are the non-routable or special-purpose blocks net.IP's own predicates miss:
-// carrier-grade NAT (which is also every Tailscale address), IETF protocol assignments,
-// benchmarking, class E, and the NAT64 well-known prefix.
-var reservedRanges = func() []*net.IPNet {
-	var out []*net.IPNet
-	for _, cidr := range []string{"100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96"} {
-		_, n, _ := net.ParseCIDR(cidr)
+// reservedRanges are the special-purpose blocks net.IP's own predicates miss and that no
+// KyRecovery ever lives in, opt-in or not: IETF protocol assignments, benchmarking, class E,
+// and the NAT64 well-known prefix.
+var reservedRanges = mustCIDRs("192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96")
+
+// cgnatRange is carrier-grade NAT, which is also every Tailscale address. Refused by default
+// like the private ranges, admitted with them under BackupAllowPrivateRecovery.
+var cgnatRange = mustCIDRs("100.64.0.0/10")[0]
+
+func mustCIDRs(cidrs ...string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, n, err := net.ParseCIDR(cidr)
+		if err != nil {
+			panic(err)
+		}
 		out = append(out, n)
 	}
 	return out
-}()
+}
 
 // isPublicIP is the default rule for where a capsule may be sent. The backup client never
 // honours AllowPrivateCallbacks: that setting is for paired systems' callbacks. Its own
 // opt-in is BackupAllowPrivateRecovery, because a KyRecovery on a private address makes every
 // scheduled deposit an unattended request into that network and deserves its own decision.
 func isPublicIP(ip net.IP) bool {
-	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() || cgnatRange.Contains(ip) {
 		return false
 	}
 	for _, n := range reservedRanges {

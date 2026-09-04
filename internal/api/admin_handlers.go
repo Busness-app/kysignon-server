@@ -671,6 +671,7 @@ func (h *AdminHandler) DeleteOAuthClient(w http.ResponseWriter, r *http.Request)
 	// The delete, the revocation of every token this client issued, and the record of who
 	// did it are one commit. Reporting "deleted" for a client that is still registered and
 	// still serving is the failure mode that matters here: the admin stops looking.
+	client, _ := h.store.GetOAuthClientByID(clientID)
 	deleted := h.audit.Prepare("admin.oauth_client_deleted", admin.ID, admin.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 	removed, err := h.store.DeleteOAuthClient(clientID, deleted.Row)
 	if err != nil {
@@ -683,6 +684,9 @@ func (h *AdminHandler) DeleteOAuthClient(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	deleted.Committed()
+	if client != nil {
+		h.dropIcon(client.IconName)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -691,9 +695,19 @@ func (h *AdminHandler) DeleteOAuthClient(w http.ResponseWriter, r *http.Request)
 // launcherIcons is the closed set of icons a launcher card may use. The launcher renders
 // whatever it is given, so an open field here is a rendering primitive an admin session can
 // aim at every user's dashboard.
+// The names are lucide icons; web/src/launcherIcons.ts holds the same list and a test
+// keeps the two in step.
 var launcherIcons = map[string]bool{
-	"favicon": true, "globe": true, "mail": true, "lock": true,
-	"bookmark": true, "file-text": true,
+	"favicon": true,
+	"globe":   true, "link": true, "mail": true, "message-square": true, "calendar": true,
+	"sticky-note": true, "file-text": true, "book": true, "bookmark": true, "folder": true,
+	"image": true, "camera": true, "video": true, "film": true, "music": true, "tv": true,
+	"radio": true, "gamepad-2": true, "house": true, "users": true,
+	"lock": true, "key": true, "shield": true, "server": true, "database": true,
+	"hard-drive": true, "cloud": true, "container": true, "network": true, "wifi": true,
+	"cpu": true, "monitor": true, "terminal": true, "code": true, "git-branch": true,
+	"chart-line": true, "activity": true, "printer": true, "download": true, "rss": true,
+	"wrench": true, "bug": true, "clock": true, "map": true,
 }
 
 // maxLauncherDescription bounds the blurb under a card. Long enough for a sentence, short
@@ -735,7 +749,7 @@ func (h *AdminHandler) CreateApplication(w http.ResponseWriter, r *http.Request)
 	if req.IconName == "" {
 		req.IconName = "favicon"
 	}
-	if !launcherIcons[req.IconName] {
+	if !h.iconAllowed(req.IconName) {
 		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
 		return
 	}
@@ -820,7 +834,7 @@ func (h *AdminHandler) UpdateApplication(w http.ResponseWriter, r *http.Request)
 	if req.IconName == "" {
 		req.IconName = "favicon"
 	}
-	if !launcherIcons[req.IconName] {
+	if !h.iconAllowed(req.IconName) {
 		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
 		return
 	}
@@ -840,6 +854,7 @@ func (h *AdminHandler) UpdateApplication(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	previousIcon := app.IconName
 	app.Name = strings.TrimSpace(req.Name)
 	app.URL = strings.TrimSpace(req.URL)
 	app.IconName = req.IconName
@@ -855,6 +870,7 @@ func (h *AdminHandler) UpdateApplication(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.audit.Record("admin.application_updated", admin.ID, admin.Username, app.ID, "application", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	h.dropIcon(previousIcon)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "application": app})
@@ -889,7 +905,7 @@ func (h *AdminHandler) UpdateClientLauncher(w http.ResponseWriter, r *http.Reque
 	if iconName == "" {
 		iconName = "favicon"
 	}
-	if !launcherIcons[iconName] {
+	if !h.iconAllowed(iconName) {
 		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
 		return
 	}
@@ -904,6 +920,7 @@ func (h *AdminHandler) UpdateClientLauncher(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	previousIcon := client.IconName
 	client.Description = description
 	client.IconName = iconName
 
@@ -913,6 +930,7 @@ func (h *AdminHandler) UpdateClientLauncher(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	updated.Committed()
+	h.dropIcon(previousIcon)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "client": client})
@@ -922,6 +940,7 @@ func (h *AdminHandler) DeleteApplication(w http.ResponseWriter, r *http.Request)
 	admin := GetUserFromContext(r.Context())
 	appID := r.PathValue("id")
 
+	app, _ := h.store.GetApplicationByID(appID)
 	deleted := h.audit.Prepare("admin.application_deleted", admin.ID, admin.Username, appID, "application", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 	removed, err := h.store.DeleteApplication(appID, deleted.Row)
 	if err != nil {
@@ -934,6 +953,9 @@ func (h *AdminHandler) DeleteApplication(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	deleted.Committed()
+	if app != nil {
+		h.dropIcon(app.IconName)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})

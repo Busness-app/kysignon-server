@@ -21,3 +21,6 @@ web/node_modules/
 
 # Agent scratch (SDD ledger, briefs, review packages)
 .superpowers/
+
+# Playwright MCP session artifacts (page snapshots record filled form values)
+.playwright-mcp/

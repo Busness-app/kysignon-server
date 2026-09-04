@@ -174,6 +174,14 @@ type Application struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
+// LauncherIcon is an admin-uploaded image a launcher card names as "icon:<id>".
+type LauncherIcon struct {
+	ID          string
+	ContentType string
+	Data        []byte
+	CreatedAt   time.Time
+}
+
 type AuditEvent struct {
 	ID            string    `json:"id"`
 	ActorID       string    `json:"actorId,omitempty"`

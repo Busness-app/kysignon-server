@@ -213,6 +213,13 @@ func (s *Store) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_auth_codes_hash ON authorization_codes(code_hash);
 
+	CREATE TABLE IF NOT EXISTS launcher_icons (
+		id TEXT PRIMARY KEY,
+		content_type TEXT NOT NULL,
+		data BLOB NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE TABLE IF NOT EXISTS applications (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -1982,6 +1989,50 @@ func (s *Store) UpdateApplication(app *Application) error {
 	query := `UPDATE applications SET name = ?, url = ?, icon_name = ?, description = ?, sort_order = ?, enabled = ? WHERE id = ?`
 	_, err := s.db.Exec(query, app.Name, app.URL, app.IconName, app.Description, app.SortOrder, app.Enabled, app.ID)
 	return err
+}
+
+func (s *Store) CreateLauncherIcon(icon *LauncherIcon) error {
+	icon.CreatedAt = time.Now().UTC()
+	_, err := s.db.Exec(`INSERT INTO launcher_icons (id, content_type, data, created_at) VALUES (?, ?, ?, ?)`,
+		icon.ID, icon.ContentType, icon.Data, icon.CreatedAt)
+	return err
+}
+
+func (s *Store) GetLauncherIcon(id string) (*LauncherIcon, error) {
+	icon := &LauncherIcon{}
+	err := s.db.QueryRow(`SELECT id, content_type, data, created_at FROM launcher_icons WHERE id = ?`, id).
+		Scan(&icon.ID, &icon.ContentType, &icon.Data, &icon.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return icon, err
+}
+
+// DeleteLauncherIconIfUnused drops an uploaded icon once no card, custom or client, still
+// names it. Icons are uploaded per card, so this runs whenever a card changes or goes away.
+func (s *Store) DeleteLauncherIconIfUnused(iconName string) error {
+	var refs int
+	err := s.db.QueryRow(`SELECT (SELECT count(*) FROM applications WHERE icon_name = ?) + (SELECT count(*) FROM oauth_clients WHERE icon_name = ?)`,
+		iconName, iconName).Scan(&refs)
+	if err != nil || refs > 0 {
+		return err
+	}
+	_, err = s.db.Exec(`DELETE FROM launcher_icons WHERE id = ?`, strings.TrimPrefix(iconName, "icon:"))
+	return err
+}
+
+// DeleteOrphanedLauncherIcons reaps uploads no card names: a picker dialog closed without
+// saving leaves one behind, and so does any delete path that forgets to. The grace window
+// spares an upload whose card is still being filled in.
+func (s *Store) DeleteOrphanedLauncherIcons(olderThan time.Duration) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM launcher_icons WHERE created_at < ?
+		AND ('icon:' || id) NOT IN (SELECT icon_name FROM applications)
+		AND ('icon:' || id) NOT IN (SELECT icon_name FROM oauth_clients)`,
+		time.Now().UTC().Add(-olderThan))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // DeleteApplication removes a launcher entry and records the removal in the same

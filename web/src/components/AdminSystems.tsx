@@ -219,7 +219,7 @@ export const AdminSystems: React.FC = () => {
                             height: 24,
                             borderRadius: '4px',
                             objectFit: 'contain',
-                            background: 'rgba(255,255,255,0.05)',
+                            background: 'var(--panel-hover)',
                             padding: '2px',
                             border: '1px solid var(--line)',
                           }}

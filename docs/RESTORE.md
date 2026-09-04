@@ -72,10 +72,11 @@ Each custodian enters their share on its own line. After the k-th, press Ctrl-D.
 read from stdin only, never from the command line, because argv is world-readable and lands
 in shell history.
 
-If the shares are already in a file because this is a drill with test cards:
+Only for a rehearsal with synthetic test shares, never with real cards, stdin can be a file.
+Delete it afterwards; a file holding k shares is the suite key in a file.
 
 ```bash
-kysignon restore -capsule cap-KySignOn-XXXXXXXX.kycap -to ./restored < shares.txt
+kysignon restore -capsule cap-KySignOn-XXXXXXXX.kycap -to ./restored < test-shares.txt
 ```
 
 On success it prints the authenticated manifest:
@@ -151,6 +152,24 @@ before, and start.
 3. Have one downstream application sign in through KySignOn. That proves the RSA key.
 4. Check the audit log: the last events before the restore are there, followed by your
    sign-in.
+
+## Step 5: decide what to trust
+
+The restore proves the service works. It does not make the restored state current or safe.
+Everything comes back as of the capsule's `created_at`: users, passwords, MFA enrolments,
+OAuth clients, paired systems, sessions, and `secret.key`. Anything you revoked or changed
+after that moment is undone, and a session cookie minted before the capsule still validates
+against the restored server.
+
+1. Revoke all sessions from the admin UI. Every signed-in user, including you, signs in again.
+2. Walk the audit log from `created_at` to the moment the old server was lost, and re-apply
+   what happened after the capsule: disabled accounts, rotated passwords, deleted or rotated
+   OAuth clients, removed paired systems, reset MFA.
+3. If the reason for the restore was a suspected compromise rather than hardware loss, treat
+   the restored keys as exposed. Rotate the RSA signing key and the secret key, which
+   invalidates every token and session, re-issue OAuth client secrets, and make every admin
+   re-enrol factors. A restore from before a compromise brings the attacker's access back
+   with the service unless you do this.
 
 ## Afterwards
 

@@ -147,10 +147,7 @@ export const AdminAudit: React.FC = () => {
     <div className="admin-page">
       <div className="page-header">
         <div>
-          <h1 className="page-title">Security &amp; Audit Event Stream</h1>
-          <p className="page-subtitle">
-            Content-blind security audit records for authentication, administrative actions, and suite events.
-          </p>
+          <h1 className="page-title">Audit log</h1>
         </div>
         <div className="audit-actions-group">
           <button

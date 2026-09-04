@@ -158,10 +158,7 @@ export const AdminUsers: React.FC = () => {
       {stepUpPrompt}
       <div className="page-header">
         <div>
-          <h1 className="page-title">User Directory & Replication</h1>
-          <p className="page-subtitle">
-            Central source of truth for accounts. New accounts and changes automatically replicate to paired KySecurity products.
-          </p>
+          <h1 className="page-title">Users</h1>
         </div>
         <button
           className="primary-btn sm"
@@ -194,7 +191,7 @@ export const AdminUsers: React.FC = () => {
                 <td>{u.displayName || u.username}</td>
                 <td className="text-muted">{u.email}</td>
                 <td>
-                  <span className={`role-pill ${u.role}`}>{u.role.toUpperCase()}</span>
+                  {u.role === 'admin' ? 'Administrator' : 'User'}
                 </td>
                 <td>
                   {u.status === 'active' ? (

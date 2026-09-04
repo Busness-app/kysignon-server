@@ -3,7 +3,7 @@ import { User, Application } from '../types';
 import { apiJson, apiRequest, errorMessage } from '../api';
 import { parseApplications } from '../parsers';
 import { faviconUrl } from '../favicon';
-import { Globe, Mail, Lock, Bookmark, FileText, ExternalLink, ShieldCheck, Smartphone, ArrowUpRight, Plus, Pencil } from 'lucide-react';
+import { Globe, Mail, Lock, Bookmark, FileText, ExternalLink, ArrowUpRight, Plus, Pencil } from 'lucide-react';
 
 interface UserDashboardProps {
   user: User;
@@ -31,6 +31,12 @@ const ICON_OPTIONS: Array<[string, string]> = [
   ['bookmark', 'Bookmark'],
   ['file-text', 'Document'],
 ];
+
+const METHOD_LABELS: Record<string, string> = {
+  push: 'Phone approval',
+  webauthn: 'Passkey',
+  totp: 'Six-digit codes',
+};
 
 export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateToDevices }) => {
   const [apps, setApps] = useState<Application[]>([]);
@@ -96,79 +102,108 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
     'file-text': FileText,
   };
 
+  const methods = (user.mfaMethods ?? []).filter((m) => m in METHOD_LABELS);
+  const isAdmin = user.role === 'admin';
+  const suite = apps.filter((app) => app.source === 'client');
+  const links = apps.filter((app) => app.source !== 'client');
+
+  const appList = (list: Application[]) => (
+    <ul className="app-list">
+      {list.map((app) => {
+        const IconComp = iconMap[app.iconName || ''] || ExternalLink;
+        const favicon = app.iconName === 'favicon' ? faviconUrl(app.url) : undefined;
+        return (
+          <li key={app.id}>
+            <a href={app.url} target="_blank" rel="noopener noreferrer" className="app-row">
+              <span className="app-icon">
+                {favicon && !failedFavicons.includes(app.id) ? (
+                  <img
+                    className="app-favicon"
+                    src={favicon}
+                    alt=""
+                    referrerPolicy="no-referrer"
+                    onError={() => setFailedFavicons((ids) => [...ids, app.id])}
+                  />
+                ) : (
+                  <IconComp size={20} />
+                )}
+              </span>
+              <span className="app-text">
+                <b>{app.name}</b>
+                {app.description && <span>{app.description}</span>}
+              </span>
+              <ArrowUpRight size={16} className="app-go" />
+            </a>
+            {isAdmin && (
+              <button
+                className="app-edit-btn"
+                onClick={() => editCard(app)}
+                aria-label={`Edit ${app.name}`}
+                title="Edit this card"
+              >
+                <Pencil size={14} />
+              </button>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+
   return (
-    <div className="dashboard-container">
-      <div className="dashboard-header">
-        <div>
-          <h1 className="page-title">Application Launcher</h1>
-          <p className="page-subtitle">Access your single sign-on enabled KySecurity Suite and 3rd-party products</p>
-        </div>
-        {user.role === 'admin' && (
-          <button className="primary-btn sm" onClick={() => setDraft({ ...blankDraft })}>
-            <Plus size={14} /> Add Application
+    <div>
+      <div className="page-header">
+        <h1 className="page-title">Applications</h1>
+        {isAdmin && (
+          <button className="secondary-btn sm" onClick={() => setDraft({ ...blankDraft })}>
+            <Plus size={14} /> Add application
           </button>
         )}
-        <div className="security-status-card" onClick={onNavigateToDevices}>
-          <div className="status-indicator-dot" />
-          <div className="status-info">
-            <span className="status-label">Identity Protection</span>
-            <span className="status-val">
-              {user.mfaMethods && user.mfaMethods.length > 0 ? 'MFA Active' : 'Configure MFA'}
-            </span>
+      </div>
+
+      <div className="identity">
+        <div>
+          <span className="text-muted">Signed in as</span>
+          <div className="identity-name">{user.username}</div>
+          <div className="identity-facts">
+            <span>{user.displayName || user.username}</span>
+            <span>{user.email}</span>
+            <span>{isAdmin ? 'Administrator' : 'User'}</span>
           </div>
-          <Smartphone size={16} className="icon-cyan" />
         </div>
+        <button type="button" className="identity-mfa" onClick={onNavigateToDevices}>
+          <span className="text-muted">Second factor</span>
+          {methods.length > 0 ? (
+            <ul>
+              {methods.map((m) => (
+                <li key={m}>{METHOD_LABELS[m]}</li>
+              ))}
+            </ul>
+          ) : (
+            <b>None. Set one up.</b>
+          )}
+        </button>
       </div>
 
       {apps.length === 0 && (
         <p className="app-empty">
           No applications yet.
-          {user.role === 'admin' ? ' Register an OAuth client or add an external link to fill this page.' : ' An administrator has not published any.'}
+          {isAdmin ? ' Register an OAuth client or add a link.' : ' An administrator has not published any.'}
         </p>
       )}
 
-      <div className="app-grid">
-        {apps.map((app) => {
-          const IconComp = iconMap[app.iconName || ''] || ExternalLink;
-          const favicon = app.iconName === 'favicon' ? faviconUrl(app.url) : undefined;
-          return (
-            <div className="app-card-wrap" key={app.id}>
-              <a href={app.url} target="_blank" rel="noopener noreferrer" className="app-card">
-                <div className="app-card-top">
-                  <div className="app-icon-wrapper">
-                    {favicon && !failedFavicons.includes(app.id) ? (
-                      <img
-                        className="app-favicon"
-                        src={favicon}
-                        alt=""
-                        referrerPolicy="no-referrer"
-                        onError={() => setFailedFavicons((ids) => [...ids, app.id])}
-                      />
-                    ) : (
-                      <IconComp size={24} className="icon-cyan" />
-                    )}
-                  </div>
-                  <ArrowUpRight size={18} className="app-launch-arrow" />
-                </div>
-                <div className="app-card-body">
-                  <h3 className="app-name">{app.name}</h3>
-                  {app.description && <p className="app-desc">{app.description}</p>}
-                </div>
-              </a>
-              {user.role === 'admin' && (
-                <button
-                  className="app-edit-btn"
-                  onClick={() => editCard(app)}
-                  aria-label={`Edit ${app.name}`}
-                  title="Edit this card"
-                >
-                  <Pencil size={14} />
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
+      {suite.length > 0 && (
+        <>
+          <h2 className="section-title">Suite</h2>
+          {appList(suite)}
+        </>
+      )}
+      {links.length > 0 && (
+        <>
+          <h2 className="section-title">Other links</h2>
+          {appList(links)}
+        </>
+      )}
 
       {draft && (
         <div className="modal-backdrop" onMouseDown={() => setDraft(null)}>
@@ -210,7 +245,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
               {isClientCard && (
                 <p className="form-hint">
                   Name and sign-in URL come from this app&apos;s OAuth client registration. Change them
-                  under Admin → OAuth Clients.
+                  under OAuth clients.
                 </p>
               )}
               <div className="form-group">
@@ -240,37 +275,12 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
               </div>
               <div className="modal-footer">
                 <button type="button" className="secondary-btn" onClick={() => setDraft(null)}>Cancel</button>
-                <button type="submit" className="primary-btn">{draft.id ? 'Save Changes' : 'Add Application'}</button>
+                <button type="submit" className="primary-btn">{draft.id ? 'Save changes' : 'Add application'}</button>
               </div>
             </form>
           </div>
         </div>
       )}
-
-      <div className="profile-overview-box">
-        <div className="box-header">
-          <ShieldCheck size={20} className="icon-cyan" />
-          <h2>Single Sign-On Identity Overview</h2>
-        </div>
-        <div className="profile-details-grid">
-          <div className="detail-item">
-            <span className="detail-label">Subject Account</span>
-            <span className="detail-value">{user.username}</span>
-          </div>
-          <div className="detail-item">
-            <span className="detail-label">Display Name</span>
-            <span className="detail-value">{user.displayName || user.username}</span>
-          </div>
-          <div className="detail-item">
-            <span className="detail-label">Primary Email</span>
-            <span className="detail-value">{user.email}</span>
-          </div>
-          <div className="detail-item">
-            <span className="detail-label">Organization Role</span>
-            <span className="detail-value role-text">{user.role.toUpperCase()}</span>
-          </div>
-        </div>
-      </div>
     </div>
   );
 };

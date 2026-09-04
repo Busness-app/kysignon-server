@@ -15,7 +15,6 @@ import { createPasskey, isPasskeySupported } from '../webauthn';
 import QRCode from 'qrcode';
 import {
   Smartphone,
-  KeyRound,
   ScanFace,
   ShieldAlert,
   Trash2,
@@ -354,37 +353,26 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
     <div className="settings-page">
       <div className="page-header">
         <div>
-          <h1 className="page-title">Security & Authenticator Devices</h1>
-          <p className="page-subtitle">
-            Manage multi-factor authentication, paired mobile devices, and recovery backup keys
-          </p>
+          <h1 className="page-title">Security and devices</h1>
         </div>
       </div>
 
       <div className="settings-section">
         <div className="section-header">
           <div className="section-title-wrap">
-            <Smartphone className="icon-cyan" size={20} />
-            <h2>Paired Authenticator Devices</h2>
+            <h2>Phones that approve sign-ins</h2>
           </div>
-          <button className="primary-btn sm" onClick={handleStartDevicePairing}>
+          <button className="secondary-btn sm" onClick={handleStartDevicePairing}>
             <Plus size={14} />
-            <span>Pair New Device</span>
+            <span>Pair a phone</span>
           </button>
         </div>
-
-        <p className="section-desc">
-          Paired devices receive push notifications for instantaneous sign-in approval with 2-digit number matching. Pairing a different device keeps the devices shown here; pairing the same device identifier updates that device.
-        </p>
 
         <div className="device-list">
           {devices.length === 0 ? (
             <div className="empty-box">
               <Smartphone size={32} className="empty-icon" />
-              <p>No paired authenticator devices yet.</p>
-              <button className="secondary-btn sm" onClick={handleStartDevicePairing}>
-                Pair KySecurity Authenticator
-              </button>
+              <p>No phones paired yet.</p>
             </div>
           ) : (
             devices.map((dev) => (
@@ -398,7 +386,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
                 </div>
                 <div className="device-status">
                   <span className="badge-approver">
-                    <CheckCircle size={12} /> Push Approver
+                    <CheckCircle size={12} /> Push approver
                   </span>
                 </div>
                 <button
@@ -417,22 +405,17 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
       <div className="settings-section">
         <div className="section-header">
           <div className="section-title-wrap">
-            <ScanFace className="icon-cyan" size={20} />
             <h2>Passkeys</h2>
           </div>
           {isPasskeySupported() ? (
-            <button className="primary-btn sm" onClick={handleAddPasskey} disabled={passkeyBusy}>
+            <button className="secondary-btn sm" onClick={handleAddPasskey} disabled={passkeyBusy}>
               <Plus size={14} />
-              <span>Add Passkey</span>
+              <span>Add passkey</span>
             </button>
           ) : (
             <span className="text-muted text-sm">Not supported by this browser</span>
           )}
         </div>
-
-        <p className="section-desc">
-          A passkey lets you sign in using this device's built-in authenticator (fingerprint, face, or security key) as your second factor, after your password.
-        </p>
 
         {isPasskeySupported() && (
           <div className="form-group">
@@ -461,7 +444,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
           {passkeys.length === 0 ? (
             <div className="empty-box">
               <ScanFace size={32} className="empty-icon" />
-              <p>No passkeys enrolled yet.</p>
+              <p>No passkeys yet.</p>
             </div>
           ) : (
             passkeys.map((pk) => (
@@ -511,33 +494,24 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
       <div className="settings-section">
         <div className="section-header">
           <div className="section-title-wrap">
-            <KeyRound className="icon-cyan" size={20} />
-            <h2>Time-Based One-Time Password (TOTP)</h2>
+            <h2>Six-digit codes</h2>
+            <p className="section-desc">{user.mfaMethods?.includes('totp') ? 'Configured.' : 'Not configured.'}</p>
           </div>
           <button className="secondary-btn sm" onClick={() => requestStepUp('totp')}>
-            <span>Configure TOTP</span>
+            <span>{user.mfaMethods?.includes('totp') ? 'Replace' : 'Set up'}</span>
           </button>
         </div>
-        <p className="section-desc">
-          {user.mfaMethods?.includes('totp')
-            ? 'One TOTP credential is configured for this account. Any authenticator app that scanned its QR code can generate codes; KySignOn cannot see those individual app copies. Configuring TOTP again replaces the current credential and invalidates its existing codes.'
-            : 'No TOTP credential is configured. Generate 6-digit codes using a standard authenticator app (e.g., KySecurity Authenticator, Aegis, 1Password).'}
-        </p>
       </div>
 
       <div className="settings-section">
         <div className="section-header">
           <div className="section-title-wrap">
-            <ShieldAlert className="icon-cyan" size={20} />
-            <h2>Emergency Recovery Codes</h2>
+            <h2>Recovery codes</h2>
           </div>
           <button className="secondary-btn sm" onClick={() => requestStepUp('recovery-codes')}>
-            <span>Generate New Codes</span>
+            <span>Generate new codes</span>
           </button>
         </div>
-        <p className="section-desc">
-          One-time backup codes can be used to log in if you lose access to your primary authenticator device.
-        </p>
       </div>
 
       {/* Device Pairing Modal (90s Ephemeral Key / QR) */}

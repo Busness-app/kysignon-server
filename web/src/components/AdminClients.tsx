@@ -181,10 +181,7 @@ export const AdminClients: React.FC = () => {
       {stepUpPrompt}
       <div className="page-header">
         <div>
-          <h1 className="page-title">OAuth 2.0 & OpenID Connect Clients</h1>
-          <p className="page-subtitle">
-            Manage authorized application registrations for Single Sign-On and PKCE authorization-code flows.
-          </p>
+          <h1 className="page-title">OAuth clients</h1>
         </div>
         <button className="primary-btn sm" onClick={() => setShowModal(true)}>
           <Plus size={14} />

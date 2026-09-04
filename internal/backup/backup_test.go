@@ -588,3 +588,35 @@ func TestALostKeyPinIsNotSilentlyUnpaired(t *testing.T) {
 		t.Errorf("outcome %s %v", outcome, details)
 	}
 }
+
+// ClearPairing removes rows; it does not claim more. A half-cleared pairing is still
+// clearable, and the key pin survives.
+func TestClearPairingRemovesRowsAndKeepsThePin(t *testing.T) {
+	cfg, st := instance(t)
+	priv := pair(t, cfg, st)
+	if err := backup.ClearPairing(st); err != nil {
+		t.Fatal(err)
+	}
+	if backup.HasPairing(st) {
+		t.Error("still paired")
+	}
+	if _, err := st.GetSetting("kyrecovery_token_enc"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("token row: %v", err)
+	}
+	if k, err := backup.LoadRecoveryKey(cfg.DataDir, st); err != nil || k.Public.ID() != priv.Public().ID() {
+		t.Errorf("key pin lost: %v", err)
+	}
+	if err := backup.ClearPairing(st); !errors.Is(err, backup.ErrNotPaired) {
+		t.Errorf("second clear: %v", err)
+	}
+	// Only the URL survived an earlier failure: still clearable.
+	if err := st.SetSetting("kyrecovery_url", "https://recovery.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.ClearPairing(st); err != nil {
+		t.Errorf("half-cleared: %v", err)
+	}
+	if _, err := st.GetSetting("kyrecovery_url"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("url row: %v", err)
+	}
+}

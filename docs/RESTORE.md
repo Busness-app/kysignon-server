@@ -117,11 +117,34 @@ Expect five or six files, all mode `600`, under `restored/data` and `restored/co
 The server reads keys from `/data` files unless the same keys are given by environment.
 Choose one form and be consistent.
 
-**Docker Compose (the normal deployment).** Stop any running KySignOn first. Copy the
-restored `data/` contents into the data volume, then start:
+**Docker Compose (the normal deployment).** The data volume must be empty before the copy,
+for the same reason Step 1 demands an empty directory. A capsule carries `kysignon.db` but
+never its `-wal` and `-shm` sidecars; a write-ahead log left over from the old database
+would be replayed into the restored one at first open, mixing two databases. Any other
+leftover file the capsule does not overwrite would survive too.
 
 ```bash
 docker compose down
+docker compose run --rm --no-deps --entrypoint sh kysignon-server -c 'ls -A /data | wc -l'
+```
+
+That must print `0`. If it does not, the old volume still holds data. If you might still
+want it, copy it out first:
+
+```bash
+docker compose run --rm --no-deps -v "$PWD/old-data:/out" --entrypoint sh kysignon-server -c 'cp -a /data/. /out/'
+```
+
+Then remove the volume, let compose recreate it, and check again:
+
+```bash
+docker compose down -v
+docker compose run --rm --no-deps --entrypoint sh kysignon-server -c 'ls -A /data | wc -l'
+```
+
+With `0` confirmed, copy the restored files in and start:
+
+```bash
 docker compose run --rm --no-deps --user root --entrypoint sh \
   -v "$PWD/restored/data:/from:ro" kysignon-server \
   -c 'cp -a /from/. /data/ && chown -R kysignon:kysignon /data && chmod 600 /data/*'
@@ -129,12 +152,17 @@ docker compose up -d
 ```
 
 The one-off container mounts the same `kysignon_data` volume the service uses, so the copy
-lands where the server will read it, owned by the image's `kysignon` user. Keep `KYSIGNON_ISSUER_URL` identical to the old
-deployment, from `config/kysignon.json`: the RSA key, every OIDC client and every passkey
-are bound to it. If the old deployment supplied `KYSIGNON_SECRET_KEY` or
-`KYSIGNON_ENCRYPTION_KEY` by environment, keep supplying them; the restored files are the
-same keys, and the environment wins when both are present. To turn a restored key file into
-its environment form: `xxd -p -c 64 restored/data/encryption.key`.
+lands where the server will read it, owned by the image's `kysignon` user. Keep
+`KYSIGNON_ISSUER_URL` identical to the old deployment, from `config/kysignon.json`: the RSA
+key, every OIDC client and every passkey are bound to it.
+
+The restored `encryption.key` and `secret.key` files are the keys; the file form is the one
+to use. If the old deployment supplied `KYSIGNON_SECRET_KEY` or `KYSIGNON_ENCRYPTION_KEY` by
+environment instead, the environment wins when both are present, so either remove those
+variables so the files are read, or keep supplying the same values from wherever the old
+deployment kept them. Never print a key to a terminal or type one on a command line: it lands
+in scrollback, session recordings and shell history. If you must produce the hex form, write
+it straight into the compose project's `.env` with `umask 077` and nothing else on stdout.
 
 **Bare binary.** Point `KYSIGNON_DATA_DIR` at `restored/data`, set `KYSIGNON_ISSUER_URL` as
 before, and start.

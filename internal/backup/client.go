@@ -300,6 +300,16 @@ type Payload struct {
 	VerificationRecipe map[string]any
 }
 
+// Members lists what a capsule from this instance carries, in the order CollectSealable
+// packs it, so the admin screen can say what is being backed up without sealing anything.
+func Members(cfg *config.Config) []string {
+	m := []string{dbRelPath, keyRelPath, encKeyRelPath, secretKeyRelPath}
+	if _, err := os.Stat(RecoveryKeyPath(cfg.DataDir)); err == nil {
+		m = append(m, recoveryPubPath)
+	}
+	return append(m, configRelPath)
+}
+
 // CollectSealable gathers everything a restore needs. Every member is secret or the means to
 // one, so the payload leaves the process only inside a sealed capsule.
 //

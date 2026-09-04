@@ -196,15 +196,16 @@ func TestDepositSealsToThePinnedKeyAndRecordsTheReceipt(t *testing.T) {
 	cfg, st := instance(t)
 	priv := pair(t, cfg, st)
 	fake := &fakeStore{}
-	rcpt, m, err := backup.DepositBackup(context.Background(), cfg, st, st, fake, "1.0.0")
+	res, err := backup.RunBackup(context.Background(), cfg, st, st, fake, "1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fake.url != "https://recovery.example.test" || fake.token != "kyrec_live_t" {
 		t.Errorf("sent to %s with %s", fake.url, fake.token)
 	}
-	if m.ServiceName != "KySignOn" || m.RecoveryKeyID != priv.Public().ID() || rcpt.CapsuleID != m.CapsuleID {
-		t.Errorf("manifest %+v receipt %+v", m, rcpt)
+	m, rcpt := res.Manifest, res.Receipt
+	if rcpt == nil || m.ServiceName != "KySignOn" || m.RecoveryKeyID != priv.Public().ID() || rcpt.CapsuleID != m.CapsuleID || res.LocalPath != "" {
+		t.Fatalf("result %+v", res)
 	}
 	if _, files, err := capsule.Open(fake.container, priv, t.TempDir()); err != nil || len(files) < 5 {
 		t.Fatalf("what the store holds does not open with the suite key: %v (%d files)", err, len(files))
@@ -215,21 +216,176 @@ func TestDepositSealsToThePinnedKeyAndRecordsTheReceipt(t *testing.T) {
 	}
 }
 
-func TestDepositRequiresAFullPairing(t *testing.T) {
+func TestBackupNeedsAKeyAndSomewhereToGo(t *testing.T) {
 	cfg, st := instance(t)
 	fake := &fakeStore{}
-	if _, _, err := backup.DepositBackup(context.Background(), cfg, st, st, fake, "1.0.0"); !errors.Is(err, backup.ErrNotPaired) {
-		t.Fatalf("unpaired: %v", err)
+	if _, err := backup.RunBackup(context.Background(), cfg, st, st, fake, "1.0.0"); !errors.Is(err, backup.ErrNotPaired) {
+		t.Fatalf("no key: %v", err)
 	}
 	priv, _ := recoverykey.Generate()
 	if err := backup.StoreRecoveryKey(cfg.DataDir, st, backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := backup.DepositBackup(context.Background(), cfg, st, st, fake, "1.0.0"); !errors.Is(err, backup.ErrNotPaired) {
-		t.Fatalf("key only: %v", err)
+	if _, err := backup.RunBackup(context.Background(), cfg, st, st, fake, "1.0.0"); !errors.Is(err, backup.ErrNoDestination) {
+		t.Fatalf("key only, nowhere to go: %v", err)
 	}
 	if fake.container != nil {
 		t.Error("bytes were sent without a pairing")
+	}
+}
+
+// An instance with no KyRecovery still gets backups: a pinned key plus a local directory.
+// The directory holds the newest keep capsules, each openable only with the suite shares.
+func TestLocalCopiesWithoutKyRecovery(t *testing.T) {
+	cfg, st := instance(t)
+	cfg.BackupDir = filepath.Join(t.TempDir(), "capsules")
+	cfg.BackupKeep = 2
+	priv, _ := recoverykey.Generate()
+	if err := backup.StoreRecoveryKey(cfg.DataDir, st, backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeStore{}
+	var last backup.Result
+	for i := 0; i < 3; i++ {
+		res, err := backup.RunBackup(context.Background(), cfg, st, st, fake, "1.0.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Receipt != nil || res.LocalPath == "" {
+			t.Fatalf("unpaired run: %+v", res)
+		}
+		last = res
+		time.Sleep(20 * time.Millisecond)
+	}
+	if fake.container != nil {
+		t.Error("bytes were sent without a pairing")
+	}
+	copies, err := backup.ListLocalCopies(cfg.BackupDir, cfg.AppName)
+	if err != nil || len(copies) != 2 || copies[0].Name != filepath.Base(last.LocalPath) {
+		t.Fatalf("copies %+v %v", copies, err)
+	}
+	raw, err := os.ReadFile(last.LocalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := os.Stat(last.LocalPath); info.Mode().Perm() != 0600 {
+		t.Errorf("mode %v", info.Mode())
+	}
+	if _, files, err := capsule.Open(raw, priv, t.TempDir()); err != nil || len(files) < 5 {
+		t.Fatalf("local copy does not open with the suite key: %v", err)
+	}
+}
+
+// The directory may already hold capsules the operator put there: another service's, an
+// export, a restore staged. Pruning touches only what this instance wrote.
+func TestPruneLeavesForeignCapsulesAlone(t *testing.T) {
+	cfg, st := instance(t)
+	cfg.BackupDir = t.TempDir()
+	cfg.BackupKeep = 2
+	foreign := filepath.Join(cfg.BackupDir, "foreign.kycap")
+	otherApp := filepath.Join(cfg.BackupDir, "KyNotes-cap-KyNotes-1.kycap")
+	for _, f := range []string{foreign, otherApp} {
+		if err := os.WriteFile(f, []byte("not ours"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	priv, _ := recoverykey.Generate()
+	if err := backup.StoreRecoveryKey(cfg.DataDir, st, backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{}, "1.0.0"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, f := range []string{foreign, otherApp} {
+		if b, err := os.ReadFile(f); err != nil || string(b) != "not ours" {
+			t.Errorf("%s: %v %q", f, err, b)
+		}
+	}
+	copies, _ := backup.ListLocalCopies(cfg.BackupDir, cfg.AppName)
+	if len(copies) != 2 {
+		t.Errorf("listed %+v", copies)
+	}
+	for _, c := range copies {
+		if !strings.HasPrefix(c.Name, "KySignOn-") {
+			t.Errorf("listed a file this instance did not write: %s", c.Name)
+		}
+	}
+}
+
+// A dead local disk must not stop the off-site copy.
+func TestLocalFailureDoesNotCancelTheDeposit(t *testing.T) {
+	cfg, st := instance(t)
+	cfg.BackupDir = filepath.Join(t.TempDir(), "file-not-dir")
+	if err := os.WriteFile(cfg.BackupDir, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BackupKeep = 7
+	pair(t, cfg, st)
+	fake := &fakeStore{}
+	res, err := backup.RunBackup(context.Background(), cfg, st, st, fake, "1.0.0")
+	if err != nil || res.Receipt == nil || fake.container == nil || res.LocalError == "" || res.LocalPath != "" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	_, outcome, details := backup.Outcome(res, err)
+	if outcome != "success" || details["local_error"] == nil || details["deposited"] != true {
+		t.Errorf("%s %v", outcome, details)
+	}
+}
+
+// A paired instance with a directory gets both. A deposit KyRecovery refuses still leaves the
+// local copy, and the outcome says so.
+func TestPairedRunWritesLocallyAndDeposits(t *testing.T) {
+	cfg, st := instance(t)
+	cfg.BackupDir = t.TempDir()
+	cfg.BackupKeep = 7
+	pair(t, cfg, st)
+	res, err := backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{}, "1.0.0")
+	if err != nil || res.Receipt == nil || res.LocalPath == "" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	res, err = backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{err: fmt.Errorf("%w: down", backup.ErrRemote)}, "1.0.0")
+	if !errors.Is(err, backup.ErrRemote) || res.LocalPath == "" || res.Receipt != nil {
+		t.Fatalf("%+v %v", res, err)
+	}
+	_, outcome, details := backup.Outcome(res, err)
+	if outcome != "failure" || details["local_path"] == nil || details["deposited"] != nil {
+		t.Errorf("%s %v", outcome, details)
+	}
+}
+
+// The schedule is the admin's setting, falling back to the environment default; a run
+// stamps the attempt so the next one is an interval away whether or not it worked.
+func TestScheduleCountsFromTheLastAttempt(t *testing.T) {
+	cfg, st := instance(t)
+	cfg.BackupDepositInterval = 24 * time.Hour
+	if d, err := backup.Interval(cfg, st); err != nil || d != 24*time.Hour {
+		t.Fatalf("default %v %v", d, err)
+	}
+	for _, bad := range []int64{300, -3600, 36028797018963968, int64(backup.MaxInterval/time.Second) + 1} {
+		if err := backup.SetInterval(st, bad); !errors.Is(err, backup.ErrBadInterval) {
+			t.Errorf("%d accepted: %v", bad, err)
+		}
+	}
+	if err := backup.SetInterval(st, 3600); err != nil {
+		t.Fatal(err)
+	}
+	next, on, err := backup.NextRun(cfg, st)
+	if err != nil || !on || next.After(time.Now()) {
+		t.Fatalf("never run: due now, got %v %v %v", next, on, err)
+	}
+	_, _ = backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{}, "1.0.0") // fails: no key
+	next, on, err = backup.NextRun(cfg, st)
+	if err != nil || !on || next.Before(time.Now().Add(59*time.Minute)) {
+		t.Fatalf("after a failed attempt: %v %v %v", next, on, err)
+	}
+	if err := backup.SetInterval(st, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, on, _ := backup.NextRun(cfg, st); on {
+		t.Error("off, still scheduled")
 	}
 }
 
@@ -336,13 +492,13 @@ func TestDepositChecksTheReceiptAgainstTheBytesSent(t *testing.T) {
 }
 
 func TestOutcomeNamesADepositTheStoreHolds(t *testing.T) {
-	rcpt := backup.Receipt{CapsuleID: "cap-1", Digest: "abc", SizeBytes: 3}
 	m := capsule.Manifest{UnverifiedManifest: capsule.UnverifiedManifest{CapsuleID: "cap-1"}}
-	action, outcome, details := backup.Outcome(rcpt, m, fmt.Errorf("%w: cap-1: disk full", backup.ErrReceiptUnrecorded))
-	if action != "admin.backup_deposit" || outcome != "success" || !strings.Contains(fmt.Sprint(details["receipt_unrecorded"]), "disk full") {
+	res := backup.Result{Manifest: m, SizeBytes: 3, Receipt: &backup.Receipt{CapsuleID: "cap-1", Digest: "abc", SizeBytes: 3}}
+	action, outcome, details := backup.Outcome(res, fmt.Errorf("%w: cap-1: disk full", backup.ErrReceiptUnrecorded))
+	if action != "admin.backup_run" || outcome != "success" || details["deposited"] != true || !strings.Contains(fmt.Sprint(details["receipt_unrecorded"]), "disk full") {
 		t.Errorf("%s %s %v", action, outcome, details)
 	}
-	_, outcome, details = backup.Outcome(backup.Receipt{}, m, errors.New("deposit rejected (503): "+strings.Repeat("x", 5000)))
+	_, outcome, details = backup.Outcome(backup.Result{Manifest: m}, errors.New("deposit rejected (503): "+strings.Repeat("x", 5000)))
 	if outcome != "failure" || len(fmt.Sprint(details["error"])) > 300 {
 		t.Errorf("%s %v", outcome, details)
 	}
@@ -400,14 +556,14 @@ func TestALostKeyPinIsNotSilentlyUnpaired(t *testing.T) {
 	if err := os.Remove(backup.RecoveryKeyPath(cfg.DataDir)); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := backup.DepositBackup(context.Background(), cfg, st, st, &fakeStore{}, "1.0.0")
+	_, err := backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{}, "1.0.0")
 	if !errors.Is(err, backup.ErrKeyPinMissing) {
 		t.Fatalf("got %v, want ErrKeyPinMissing", err)
 	}
 	if errors.Is(err, backup.ErrNotPaired) {
 		t.Error("a broken pairing reads as never paired, which the scheduler skips silently")
 	}
-	_, outcome, details := backup.Outcome(backup.Receipt{}, capsule.Manifest{}, err)
+	_, outcome, details := backup.Outcome(backup.Result{}, err)
 	if outcome != "failure" || !strings.Contains(fmt.Sprint(details["error"]), "missing") {
 		t.Errorf("outcome %s %v", outcome, details)
 	}

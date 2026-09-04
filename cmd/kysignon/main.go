@@ -185,9 +185,7 @@ func main() {
 
 	staticFS, _ := web.FS()
 
-	if cfg.BackupDepositInterval > 0 {
-		go depositLoop(ctx, cfg, dbStore, auditLogger)
-	}
+	go backupLoop(ctx, cfg, dbStore, auditLogger)
 
 	server := api.NewServer(
 		cfg,
@@ -410,22 +408,35 @@ func runDeposit() {
 	defer dbStore.Close()
 	auditLogger := audit.NewLogger(dbStore)
 
-	rcpt, m, err := backup.DepositBackup(context.Background(), cfg, dbStore, dbStore, backup.NewKyRecoveryClient(), appVersion)
-	action, outcome, details := backup.Outcome(rcpt, m, err)
-	_ = auditLogger.Record(action, "", "cli", rcpt.CapsuleID, "backup", "", "kysignon-cli", outcome, details)
+	res, err := backup.RunBackup(context.Background(), cfg, dbStore, dbStore, backup.NewKyRecoveryClient(), appVersion)
+	action, outcome, details := backup.Outcome(res, err)
+	_ = auditLogger.Record(action, "", "cli", res.Manifest.CapsuleID, "backup", "", "kysignon-cli", outcome, details)
 	if err != nil {
-		log.Fatalf("Deposit: %v", err)
+		log.Fatalf("Backup: %v", err)
 	}
-	log.Printf("Capsule %s (%d bytes, sealed to recovery key %s) deposited at %s; digest %s",
-		rcpt.CapsuleID, rcpt.SizeBytes, m.RecoveryKeyID, rcpt.DepositedAt.Format(time.RFC3339), rcpt.Digest)
+	log.Print(describe(res))
 }
 
-// depositLoop seals and deposits a capsule every BackupDepositInterval while the instance is
-// paired. The wait honours shutdown; the deposit itself does not, so a SIGTERM mid-upload
+// describe says where one run's capsule went.
+func describe(res backup.Result) string {
+	msg := fmt.Sprintf("capsule %s (%d bytes, sealed to recovery key %s)", res.Manifest.CapsuleID, res.SizeBytes, res.Manifest.RecoveryKeyID)
+	if res.LocalPath != "" {
+		msg += " written to " + res.LocalPath
+	}
+	if res.Receipt != nil {
+		msg += fmt.Sprintf(" deposited with KyRecovery at %s; digest %s", res.Receipt.DepositedAt.Format(time.RFC3339), res.Receipt.Digest)
+	}
+	return msg
+}
+
+// backupLoop runs the schedule the admin set (or the KYSIGNON_BACKUP_DEPOSIT_INTERVAL
+// default). It checks once a minute whether a run is due, so a schedule changed in the UI
+// takes effect without a restart and a restart never loses its place: the last attempt is in
+// the database. The wait honours shutdown; the run itself does not, so a SIGTERM mid-upload
 // cannot end the process between KyRecovery storing a capsule and the receipt being written.
-func depositLoop(ctx context.Context, cfg *config.Config, dbStore *store.Store, auditLogger *audit.Logger) {
+func backupLoop(ctx context.Context, cfg *config.Config, dbStore *store.Store, auditLogger *audit.Logger) {
 	client := backup.NewKyRecoveryClient()
-	ticker := time.NewTicker(cfg.BackupDepositInterval)
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
@@ -433,17 +444,25 @@ func depositLoop(ctx context.Context, cfg *config.Config, dbStore *store.Store, 
 			return
 		case <-ticker.C:
 		}
-		rcpt, m, err := backup.DepositBackup(context.WithoutCancel(ctx), cfg, dbStore, dbStore, client, appVersion)
-		if errors.Is(err, backup.ErrNotPaired) {
-			continue
-		}
-		action, outcome, details := backup.Outcome(rcpt, m, err)
-		_ = auditLogger.Record(action, "", "system", rcpt.CapsuleID, "backup", "", "kysignon-scheduler", outcome, details)
+		next, on, err := backup.NextRun(cfg, dbStore)
 		if err != nil {
-			log.Printf("[BACKUP] scheduled deposit: %s", backup.AuditSafe(err.Error()))
+			log.Printf("[BACKUP] schedule unreadable: %s", backup.AuditSafe(err.Error()))
 			continue
 		}
-		log.Printf("[BACKUP] deposited capsule %s (%d bytes) with KyRecovery", rcpt.CapsuleID, rcpt.SizeBytes)
+		if !on || time.Now().Before(next) {
+			continue
+		}
+		res, err := backup.RunBackup(context.WithoutCancel(ctx), cfg, dbStore, dbStore, client, appVersion)
+		if errors.Is(err, backup.ErrNotPaired) || errors.Is(err, backup.ErrNoDestination) {
+			continue
+		}
+		action, outcome, details := backup.Outcome(res, err)
+		_ = auditLogger.Record(action, "", "system", res.Manifest.CapsuleID, "backup", "", "kysignon-scheduler", outcome, details)
+		if err != nil {
+			log.Printf("[BACKUP] scheduled backup: %s", backup.AuditSafe(err.Error()))
+			continue
+		}
+		log.Printf("[BACKUP] scheduled %s", describe(res))
 	}
 }
 

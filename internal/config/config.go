@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +26,9 @@ const MinBackupDepositInterval = 15 * time.Minute
 // DefaultAppName is the service name this instance pairs and seals under. KyRecovery pins
 // the name sent at pairing and checks every capsule against it.
 const DefaultAppName = "KySignOn"
+
+// DefaultBackupKeep is how many sealed capsules a local backup directory retains.
+const DefaultBackupKeep = 7
 
 // Config represents runtime application configuration.
 type Config struct {
@@ -64,9 +68,14 @@ type Config struct {
 	APNSRelayKey          string
 	// AppName is the service name KyRecovery knows this instance by.
 	AppName string
-	// BackupDepositInterval is how often a paired instance seals and deposits a capsule to
-	// KyRecovery. Zero disables the schedule; deposits then happen only on request.
+	// BackupDepositInterval is the default backup schedule when the admin has not set one in
+	// the UI. Zero disables the schedule; backups then happen only on request.
 	BackupDepositInterval time.Duration
+	// BackupDir, when set, receives a copy of every sealed capsule. It is how an instance with
+	// no KyRecovery keeps backups at all, and a second copy for one that has.
+	BackupDir string
+	// BackupKeep is how many local capsules BackupDir retains; older ones are pruned.
+	BackupKeep int
 }
 
 // Load loads configuration from environment variables. Anything malformed is an error:
@@ -132,6 +141,10 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	backupDir, backupKeep, err := loadBackupDir()
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		Port:                  port,
@@ -157,6 +170,8 @@ func Load() (*Config, error) {
 		APNSRelayKey:          strings.TrimSpace(os.Getenv("APNS_RELAY_KEY")),
 		AppName:               getEnv("KYSIGNON_APP_NAME", DefaultAppName),
 		BackupDepositInterval: depositInterval,
+		BackupDir:             backupDir,
+		BackupKeep:            backupKeep,
 	}, nil
 }
 
@@ -176,6 +191,27 @@ func loadDepositInterval() (time.Duration, error) {
 		return 0, fmt.Errorf("%s %s is below the %s minimum (0 disables)", name, d, MinBackupDepositInterval)
 	}
 	return d, nil
+}
+
+// loadBackupDir reads KYSIGNON_BACKUP_DIR (absolute path, off when empty) and
+// KYSIGNON_BACKUP_KEEP (default 7, at least 1).
+func loadBackupDir() (string, int, error) {
+	dir := strings.TrimSpace(os.Getenv("KYSIGNON_BACKUP_DIR"))
+	if dir != "" {
+		if !filepath.IsAbs(dir) {
+			return "", 0, fmt.Errorf("KYSIGNON_BACKUP_DIR must be an absolute path, got %q", dir)
+		}
+		dir = filepath.Clean(dir)
+	}
+	keep := DefaultBackupKeep
+	if raw := strings.TrimSpace(os.Getenv("KYSIGNON_BACKUP_KEEP")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return "", 0, fmt.Errorf("KYSIGNON_BACKUP_KEEP must be a positive integer, got %q", raw)
+		}
+		keep = n
+	}
+	return dir, keep, nil
 }
 
 func loadRelayURL(name string) (string, error) {

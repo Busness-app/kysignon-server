@@ -99,14 +99,37 @@ export interface DepositReceipt {
   depositedAt: string;
 }
 
+export interface LocalCopy {
+  name: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
+export interface BackupRunResult {
+  capsuleId: string;
+  sizeBytes: number;
+  localPath?: string;
+  localError?: string;
+  receipt?: DepositReceipt;
+}
+
 export interface BackupStatus {
   paired: boolean;
+  keyPinned: boolean;
   recovery_url?: string;
   recovery_key_id?: string;
+  recovery_key_error?: string;
   threshold?: number;
   total_shares?: number;
   last_deposit?: DepositReceipt;
-  deposit_interval_sec?: number;
+  intervalSec?: number;
+  minIntervalSec?: number;
+  nextRunAt?: string;
+  localDir?: string;
+  localKeep?: number;
+  localCopies: LocalCopy[];
+  localError?: string;
+  members: string[];
   app_name: string;
   app_version: string;
 }

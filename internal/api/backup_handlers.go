@@ -2,15 +2,18 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Busness-app/ky-primitives/capsule"
+	"github.com/Busness-app/ky-primitives/recoverykey"
 	"github.com/Busness-app/kysignon-server/internal/audit"
 	"github.com/Busness-app/kysignon-server/internal/backup"
 	"github.com/Busness-app/kysignon-server/internal/config"
@@ -237,9 +240,10 @@ func (h *BackupHandler) PairRemote(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Deposit seals a capsule and deposits it with KyRecovery now, outside the schedule. The
-// deposit runs on a context that outlives the request: once bytes are on their way, a closed
-// tab must not leave KyRecovery holding a capsule this instance has no receipt for.
+// Deposit backs up now, outside the schedule: one capsule to the local directory and, when
+// paired, to KyRecovery. The run uses a context that outlives the request: once bytes are on
+// their way, a closed tab must not leave KyRecovery holding a capsule this instance has no
+// receipt for.
 func (h *BackupHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -248,12 +252,12 @@ func (h *BackupHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(depositWriteBudget))
 	adminID, adminUsername := h.actor(r)
 	ctx := context.WithoutCancel(r.Context())
-	rcpt, m, err := backup.DepositBackup(ctx, h.cfg, h.store, h.store, h.recovery, appVersion)
-	action, outcome, details := backup.Outcome(rcpt, m, err)
-	_ = h.record(r, action, adminID, adminUsername, rcpt.CapsuleID, outcome, details)
+	res, err := backup.RunBackup(ctx, h.cfg, h.store, h.store, h.recovery, appVersion)
+	action, outcome, details := backup.Outcome(res, err)
+	_ = h.record(r, action, adminID, adminUsername, res.Manifest.CapsuleID, outcome, details)
 	if errors.Is(err, backup.ErrReceiptUnrecorded) {
-		log.Printf("[BACKUP] deposit %s: receipt not recorded: %s", rcpt.CapsuleID, backup.AuditSafe(err.Error()))
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Capsule %s was deposited but the receipt could not be recorded locally", rcpt.CapsuleID))
+		log.Printf("[BACKUP] run %s: receipt not recorded: %s", res.Manifest.CapsuleID, backup.AuditSafe(err.Error()))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Capsule %s was deposited but the receipt could not be recorded locally", res.Manifest.CapsuleID))
 		return
 	}
 	if err != nil {
@@ -261,48 +265,164 @@ func (h *BackupHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, backup.ErrKeyPinMissing):
 			writeError(w, http.StatusPreconditionFailed, "Paired with KyRecovery but the recovery public key is missing or does not match the pin; restore recovery.pub or re-pair")
 		case errors.Is(err, backup.ErrNotPaired):
-			writeError(w, http.StatusPreconditionFailed, "Not paired with KyRecovery")
+			writeError(w, http.StatusPreconditionFailed, "No recovery key: pair with KyRecovery or pin the suite recovery key first")
+		case errors.Is(err, backup.ErrNoDestination):
+			writeError(w, http.StatusPreconditionFailed, "Nowhere to put a capsule: pair with KyRecovery or set KYSIGNON_BACKUP_DIR")
 		case errors.Is(err, backup.ErrRecoveryKeyMismatch):
 			writeError(w, http.StatusConflict, "Recovery key file does not match the pinned key ID; refusing to seal")
 		case errors.Is(err, backup.ErrDepositInProgress):
-			writeError(w, http.StatusConflict, "A deposit is already in progress")
+			writeError(w, http.StatusConflict, "A backup is already in progress")
 		case errors.Is(err, capsule.ErrCapsuleTooLarge):
 			writeError(w, http.StatusRequestEntityTooLarge, backup.TooLargeMessage)
 		case errors.Is(err, backup.ErrRemote):
 			log.Printf("[BACKUP] deposit failed: %s", backup.AuditSafe(err.Error()))
-			writeError(w, http.StatusBadGateway, "KyRecovery did not accept the deposit")
+			msg := "KyRecovery did not accept the deposit"
+			if res.LocalPath != "" {
+				msg += "; the local copy was written"
+			}
+			if res.LocalError != "" {
+				msg += "; " + res.LocalError
+			}
+			writeError(w, http.StatusBadGateway, msg)
 		default:
-			log.Printf("[BACKUP] deposit failed (local): %s", backup.AuditSafe(err.Error()))
-			writeError(w, http.StatusInternalServerError, "Deposit failed before reaching KyRecovery")
+			log.Printf("[BACKUP] backup failed (local): %s", backup.AuditSafe(err.Error()))
+			writeError(w, http.StatusInternalServerError, "Backup failed before reaching KyRecovery")
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, rcpt)
+	writeJSON(w, http.StatusOK, res)
+}
+
+type PinKeyRequest struct {
+	PublicKey   string `json:"public_key"`
+	Threshold   int    `json:"threshold"`
+	TotalShares int    `json:"total_shares"`
+}
+
+// PinKey pins the suite recovery public key by hand, for an instance with no KyRecovery to
+// pair with. The key is the one the ceremony page shows; the topology is the k-of-n it was
+// split with. Write-once, like pairing.
+func (h *BackupHandler) PinKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	adminID, adminUsername := h.actor(r)
+	var req PinKeyRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid JSON request body")
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(req.PublicKey), ""))
+	if err != nil || len(raw) != recoverykey.PublicKeyBytes {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("public_key must be the %d-byte suite recovery public key in base64", recoverykey.PublicKeyBytes))
+		return
+	}
+	pub, err := recoverykey.ParsePublicKey(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "public_key is not a recovery public key")
+		return
+	}
+	key := backup.RecoveryKey{Public: pub, Threshold: req.Threshold, TotalShares: req.TotalShares}
+	fail := func(status int, msg string) {
+		_ = h.record(r, "admin.backup_key_pin", adminID, adminUsername, pub.ID(), "failure", map[string]any{"recovery_key_id": pub.ID(), "error": backup.AuditSafe(msg)})
+		writeError(w, status, msg)
+	}
+	if err := backup.StoreRecoveryKey(h.cfg.DataDir, h.store, key); err != nil {
+		switch {
+		case errors.Is(err, fs.ErrExist):
+			fail(http.StatusConflict, "Already pinned to a different recovery key")
+		case strings.Contains(err.Error(), "custodian topology"):
+			fail(http.StatusBadRequest, "threshold and total_shares must describe a k-of-n split with k at least 2")
+		default:
+			fail(http.StatusInternalServerError, "Failed to save recovery key")
+		}
+		return
+	}
+	_ = h.record(r, "admin.backup_key_pin", adminID, adminUsername, pub.ID(), "success", map[string]any{
+		"recovery_key_id": pub.ID(), "threshold": key.Threshold, "total_shares": key.TotalShares,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"recovery_key_id": pub.ID(), "threshold": key.Threshold, "total_shares": key.TotalShares})
+}
+
+type ScheduleRequest struct {
+	IntervalSec int64 `json:"interval_sec"`
+}
+
+// SetSchedule stores how often the scheduler backs up. Zero turns it off, which is why it
+// sits behind step-up: a quietly disabled schedule is the failure mode that hurts most.
+func (h *BackupHandler) SetSchedule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	adminID, adminUsername := h.actor(r)
+	var req ScheduleRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid JSON request body")
+		return
+	}
+	if err := backup.SetInterval(h.store, req.IntervalSec); err != nil {
+		if errors.Is(err, backup.ErrBadInterval) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "Failed to save the schedule")
+		return
+	}
+	// Read back what the store holds, so the audit row and the reply never describe a
+	// schedule the scheduler will not run.
+	stored, err := backup.Interval(h.cfg, h.store)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to read the schedule back")
+		return
+	}
+	sec := int64(stored / time.Second)
+	_ = h.record(r, "admin.backup_schedule", adminID, adminUsername, "", "success", map[string]any{"interval_sec": sec})
+	writeJSON(w, http.StatusOK, map[string]any{"interval_sec": sec})
 }
 
 // Status reports pairing and the last receipt. It never decrypts or echoes the credential.
 func (h *BackupHandler) Status(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"paired":      false,
+		"key_pinned":  false,
 		"app_name":    h.cfg.AppName,
 		"app_version": appVersion,
+		"members":     backup.Members(h.cfg),
 	}
 	if u, err := h.store.GetSetting("kyrecovery_url"); err == nil {
 		out["recovery_url"] = u
 	}
 	if key, err := backup.LoadRecoveryKey(h.cfg.DataDir, h.store); err == nil {
+		out["key_pinned"] = true
 		out["paired"] = backup.HasPairing(h.store)
 		out["recovery_key_id"] = key.Public.ID()
 		out["threshold"] = key.Threshold
 		out["total_shares"] = key.TotalShares
 	} else if errors.Is(err, backup.ErrRecoveryKeyMismatch) {
 		out["recovery_key_error"] = "recovery.pub does not match the pinned key ID"
+	} else if backup.HasPairing(h.store) {
+		out["recovery_key_error"] = "paired, but recovery.pub is missing; restore it or re-pair"
 	}
 	if last, ok, err := backup.LastDeposit(h.store); err == nil && ok {
 		out["last_deposit"] = last
 	}
-	if h.cfg.BackupDepositInterval > 0 {
-		out["deposit_interval_sec"] = int64(h.cfg.BackupDepositInterval / time.Second)
+	if h.cfg.BackupDir != "" {
+		out["local_dir"] = h.cfg.BackupDir
+		out["local_keep"] = h.cfg.BackupKeep
+		if copies, err := backup.ListLocalCopies(h.cfg.BackupDir, h.cfg.AppName); err == nil {
+			out["local_copies"] = copies
+		} else {
+			out["local_error"] = backup.AuditSafe(err.Error())
+		}
+	}
+	if interval, err := backup.Interval(h.cfg, h.store); err == nil {
+		out["interval_sec"] = int64(interval / time.Second)
+		out["min_interval_sec"] = int64(config.MinBackupDepositInterval / time.Second)
+		if next, ok, err := backup.NextRun(h.cfg, h.store); err == nil && ok {
+			out["next_run_at"] = next.Format(time.RFC3339)
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

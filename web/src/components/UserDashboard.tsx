@@ -3,7 +3,8 @@ import { User, Application } from '../types';
 import { apiJson, apiRequest, errorMessage } from '../api';
 import { parseApplications } from '../parsers';
 import { faviconUrl } from '../favicon';
-import { Globe, Mail, Lock, Bookmark, FileText, ExternalLink, ArrowUpRight, Plus, Pencil } from 'lucide-react';
+import { Image, ExternalLink, ArrowUpRight, Plus, Pencil } from 'lucide-react';
+import { LAUNCHER_ICONS, launcherIcon } from '../launcherIcons';
 
 interface UserDashboardProps {
   user: User;
@@ -21,16 +22,6 @@ interface CardDraft {
 }
 
 const blankDraft: CardDraft = { id: '', name: '', url: '', description: '', iconName: 'favicon' };
-
-/** Mirrors the server's launcherIcons allowlist; anything else is rejected at the API. */
-const ICON_OPTIONS: Array<[string, string]> = [
-  ['favicon', 'Site favicon (automatic)'],
-  ['globe', 'Globe'],
-  ['mail', 'Mail'],
-  ['lock', 'Lock'],
-  ['bookmark', 'Bookmark'],
-  ['file-text', 'Document'],
-];
 
 const METHOD_LABELS: Record<string, string> = {
   push: 'Phone approval',
@@ -51,6 +42,11 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
   useEffect(() => {
     fetchApps();
   }, []);
+
+  // The picker is a scrolling grid; open it on the card's current icon rather than the top.
+  useEffect(() => {
+    document.querySelector('.icon-pick[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest' });
+  }, [draft?.id]);
 
   const editCard = (app: Application) =>
     setDraft({
@@ -94,14 +90,6 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
     }
   };
 
-  const iconMap: Record<string, React.FC<{ size?: number; style?: React.CSSProperties; className?: string }>> = {
-    globe: Globe,
-    mail: Mail,
-    lock: Lock,
-    bookmark: Bookmark,
-    'file-text': FileText,
-  };
-
   const methods = (user.mfaMethods ?? []).filter((m) => m in METHOD_LABELS);
   const isAdmin = user.role === 'admin';
   const suite = apps.filter((app) => app.source === 'client');
@@ -110,7 +98,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
   const appList = (list: Application[]) => (
     <ul className="app-list">
       {list.map((app) => {
-        const IconComp = iconMap[app.iconName || ''] || ExternalLink;
+        const IconComp = launcherIcon(app.iconName) ?? ExternalLink;
         const favicon = app.iconName === 'favicon' ? faviconUrl(app.url) : undefined;
         return (
           <li key={app.id}>
@@ -260,19 +248,32 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
                   autoFocus={isClientCard}
                 />
               </div>
-              <div className="form-group">
-                <label className="form-label" htmlFor="app-icon">Icon</label>
-                <select
-                  id="app-icon"
-                  className="form-select"
-                  value={draft.iconName}
-                  onChange={(event) => setDraft({ ...draft, iconName: event.target.value })}
+              <fieldset className="form-group icon-picker">
+                <legend className="form-label">Icon</legend>
+                <button
+                  type="button"
+                  className="icon-pick"
+                  aria-pressed={draft.iconName === 'favicon'}
+                  title="Site favicon"
+                  onClick={() => setDraft({ ...draft, iconName: 'favicon' })}
                 >
-                  {ICON_OPTIONS.map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-              </div>
+                  <Image size={20} />
+                  <span>Favicon</span>
+                </button>
+                {LAUNCHER_ICONS.map(([name, label, Icon]) => (
+                  <button
+                    key={name}
+                    type="button"
+                    className="icon-pick"
+                    aria-pressed={draft.iconName === name}
+                    title={label}
+                    onClick={() => setDraft({ ...draft, iconName: name })}
+                  >
+                    <Icon size={20} />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </fieldset>
               <div className="modal-footer">
                 <button type="button" className="secondary-btn" onClick={() => setDraft(null)}>Cancel</button>
                 <button type="submit" className="primary-btn">{draft.id ? 'Save changes' : 'Add application'}</button>

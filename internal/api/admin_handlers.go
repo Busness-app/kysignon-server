@@ -691,9 +691,19 @@ func (h *AdminHandler) DeleteOAuthClient(w http.ResponseWriter, r *http.Request)
 // launcherIcons is the closed set of icons a launcher card may use. The launcher renders
 // whatever it is given, so an open field here is a rendering primitive an admin session can
 // aim at every user's dashboard.
+// The names are lucide icons; web/src/launcherIcons.ts holds the same list and a test
+// keeps the two in step.
 var launcherIcons = map[string]bool{
-	"favicon": true, "globe": true, "mail": true, "lock": true,
-	"bookmark": true, "file-text": true,
+	"favicon": true,
+	"globe":   true, "link": true, "mail": true, "message-square": true, "calendar": true,
+	"sticky-note": true, "file-text": true, "book": true, "bookmark": true, "folder": true,
+	"image": true, "camera": true, "video": true, "film": true, "music": true, "tv": true,
+	"radio": true, "gamepad-2": true, "house": true, "users": true,
+	"lock": true, "key": true, "shield": true, "server": true, "database": true,
+	"hard-drive": true, "cloud": true, "container": true, "network": true, "wifi": true,
+	"cpu": true, "monitor": true, "terminal": true, "code": true, "git-branch": true,
+	"chart-line": true, "activity": true, "printer": true, "download": true, "rss": true,
+	"wrench": true, "bug": true, "clock": true, "map": true,
 }
 
 // maxLauncherDescription bounds the blurb under a card. Long enough for a sentence, short

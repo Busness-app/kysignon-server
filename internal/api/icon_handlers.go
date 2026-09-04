@@ -112,16 +112,39 @@ func iconContentType(data []byte, declared string) (string, error) {
 	return "", errors.New("Icon must be a PNG, JPEG, WebP, or SVG image")
 }
 
-// fetchesInCSS matches the two ways a stylesheet can reach outside the file.
-func fetchesInCSS(css string) bool {
-	lower := strings.ToLower(css)
-	return strings.Contains(lower, "url(") || strings.Contains(lower, "@import")
+// fetchesOutside reports whether CSS or a funcIRI attribute value reaches beyond the file:
+// an @import, or a url() that is not a same-document fragment such as url(#gradient).
+func fetchesOutside(value string) bool {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "@import") {
+		return true
+	}
+	for rest := lower; ; {
+		i := strings.Index(rest, "url(")
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+4:]
+		end := strings.IndexByte(rest, ')')
+		if end < 0 {
+			return true
+		}
+		target := strings.Trim(strings.TrimSpace(rest[:end]), `"'`)
+		if !strings.HasPrefix(target, "#") {
+			return true
+		}
+		rest = rest[end:]
+	}
 }
 
-// checkSVG walks the document and rejects anything that could run or fetch: scripts,
+// funcIRIAttrs are the presentation attributes that accept url(): each is a fetch unless it
+// points at a fragment of this document.
+var funcIRIAttrs = map[string]bool{"style": true, "fill": true, "stroke": true, "filter": true, "mask": true, "clip-path": true, "marker-start": true, "marker-mid": true, "marker-end": true, "cursor": true}
+
+// checkSVG walks the document and rejects the ways an SVG can run or fetch: scripts,
 // event handlers, animation, entities, processing instructions (an XSL stylesheet is a
-// fetch), and any href, style attribute, or text that names a URL. Inline <style> stays
-// because it is how logos colour themselves, but not if it fetches.
+// fetch), and any href, funcIRI attribute, or text that names a URL outside the file.
+// Inline <style> stays because it is how logos colour themselves, but not if it fetches.
 func checkSVG(data []byte) error {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.Strict = true
@@ -138,7 +161,7 @@ func checkSVG(data []byte) error {
 		case xml.ProcInst:
 			return errors.New("SVG must not contain processing instructions")
 		case xml.CharData:
-			if fetchesInCSS(string(t)) {
+			if fetchesOutside(string(t)) {
 				return errors.New("SVG must not reference external resources")
 			}
 		case xml.Directive:
@@ -166,7 +189,7 @@ func checkSVG(data []byte) error {
 				if attrName == "href" && !strings.HasPrefix(attr.Value, "#") && !strings.HasPrefix(attr.Value, "data:image/") {
 					return errors.New("SVG must not reference external resources")
 				}
-				if attrName == "style" && fetchesInCSS(attr.Value) {
+				if funcIRIAttrs[attrName] && fetchesOutside(attr.Value) {
 					return errors.New("SVG must not reference external resources")
 				}
 			}

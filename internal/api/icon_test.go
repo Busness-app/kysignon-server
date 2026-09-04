@@ -194,6 +194,8 @@ func TestUploadedIconRejectsUnsafeContent(t *testing.T) {
 		"style import":          {"image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"><style>@import url("https://evil.test/x.css");</style></svg>`},
 		"style attr url":        {"image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:url(https://evil.test/x.svg#p)"/></svg>`},
 		"animateTransform":      {"image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"><rect><animateTransform attributeName="transform"/></rect></svg>`},
+		"fill funcIRI":          {"image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(https://evil.test/p.svg#p)"/></svg>`},
+		"filter funcIRI quoted": {"image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"><rect filter="url('//evil.test/f.svg#f')"/></svg>`},
 	}
 	for name, c := range cases {
 		if rr := uploadIcon(t, srv, cookie, c.contentType, []byte(c.body)); rr.Code != http.StatusBadRequest {
@@ -201,7 +203,7 @@ func TestUploadedIconRejectsUnsafeContent(t *testing.T) {
 		}
 	}
 
-	safe := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><style>.a{fill:#4deeea}</style><use href="#c"/><circle id="c" class="a" cx="5" cy="5" r="4"/></svg>`
+	safe := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><defs><linearGradient id="g"/></defs><style>.a{fill:url(#g)}</style><use href="#c"/><circle id="c" class="a" cx="5" cy="5" r="4" stroke="url( '#g' )" style="filter:url(#g)"/></svg>`
 	if rr := uploadIcon(t, srv, cookie, "image/svg+xml", []byte(safe)); rr.Code != http.StatusOK {
 		t.Errorf("plain svg rejected: %d %s", rr.Code, rr.Body.String())
 	}

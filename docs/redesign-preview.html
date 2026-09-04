@@ -12,7 +12,7 @@
 :root{
   --bg:#0d0f14;--panel:#161a22;--ink:#94a3b8;--ink-strong:#e2e8f0;--accent:#4deeea;--accent-soft:#0e4a48;
   --line:#1e293b;--glow:rgba(77,238,234,.22);--sidebar-start:#0d0f14;--sidebar-end:#1b212c;--button-text:#04120d;
-  --danger:#fb7185;--ok:#34d399;
+  --danger:#fb7185;--ok:#34d399;--brand-tag:#4deeea;
   --sans:"Space Grotesk",system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,monospace;
 }
 *{box-sizing:border-box}
@@ -35,9 +35,10 @@ p{margin:0}
 .shell{display:grid;grid-template-columns:15.5rem 1fr;min-height:100vh}
 .side{background:linear-gradient(180deg,var(--sidebar-start),var(--sidebar-end));border-right:1px solid var(--line);display:flex;flex-direction:column;padding:1.25rem 1rem;position:sticky;top:0;height:100vh}
 .brand{display:flex;gap:.75rem;align-items:center;padding:.25rem .5rem 1.25rem}
-.brand svg{width:1.75rem;height:1.75rem;flex:none}
-.brand b{display:block;font-size:1.05rem;font-weight:600;letter-spacing:-.02em}
-.brand small{display:block;color:var(--ink);font-size:.78rem;line-height:1.2}
+.brand .tile{flex:none;width:2.6rem;height:2.6rem;border-radius:8px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent-soft) 55%,var(--panel));border:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
+.brand .tile svg{width:1.5rem;height:1.5rem;color:var(--accent)}
+.brand b{display:block;font-size:1.3rem;font-weight:700;letter-spacing:-.02em;line-height:1.1}
+.brand small{display:block;font-family:var(--mono);font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;color:var(--brand-tag);margin-top:.15rem}
 .side h4{margin:1rem .5rem .35rem;font-size:.78rem;font-weight:500;color:var(--ink)}
 .nav{display:flex;flex-direction:column;gap:2px}
 .nav button{display:flex;align-items:center;gap:.6rem;width:100%;text-align:left;border:0;background:none;border-radius:6px;padding:.45rem .6rem;color:var(--ink-strong);font-size:.925rem;border-left:2px solid transparent}
@@ -207,7 +208,7 @@ td.acts .iconbtn.danger:hover{color:var(--danger);border-color:var(--danger)}
 <!-- ===================== Sign in ===================== -->
 <section id="login" class="login screen">
   <div class="intro">
-    <div class="brand"><svg><use href="#i-shield"/></svg><div><b>KySignOn</b><small>Busness.app homelab</small></div></div>
+    <div class="brand"><span class="tile"><svg><use href="#i-shield"/></svg></span><div><b>KySignOn</b><small>ID Authority</small></div></div>
     <h1>Sign in once, then open everything.</h1>
     <p>Your account here unlocks the rest of the suite. Nothing else asks for a password again this session.</p>
     <ul>
@@ -248,7 +249,7 @@ td.acts .iconbtn.danger:hover{color:var(--danger);border-color:var(--danger)}
 <!-- ===================== App shell ===================== -->
 <div id="app" class="shell">
   <aside class="side">
-    <div class="brand"><svg><use href="#i-shield"/></svg><div><b>KySignOn</b><small>Identity for the KySecurity suite</small></div></div>
+    <div class="brand"><span class="tile"><svg><use href="#i-shield"/></svg></span><div><b>KySignOn</b><small>ID Authority</small></div></div>
     <nav class="nav" aria-label="Your account">
       <h4>Your account</h4>
       <button data-screen="apps" aria-current="page"><svg><use href="#i-grid"/></svg>Applications</button>
@@ -370,6 +371,7 @@ function apply(name){
   root.style.colorScheme=light?"light":"dark";
   root.style.setProperty("--danger",light?"#b91c1c":"#fb7185");
   root.style.setProperty("--ok",light?"#15803d":"#34d399");
+  root.style.setProperty("--brand-tag",light?t.inkStrong:t.accent);
 }
 function stored(){try{const v=localStorage.getItem(KEY);return Object.hasOwn(THEMES,v)?v:DEFAULT}catch(e){return DEFAULT}}
 apply(stored());

@@ -88,6 +88,9 @@ func main() {
 	// Paired systems on a shared container network need private callbacks; on a public
 	// deployment allowing them turns an attacker-chosen callback into an SSRF primitive.
 	netguard.AllowPrivate = cfg.AllowPrivateCallbacks
+	if cfg.BackupAllowPrivateRecovery {
+		log.Printf("[BACKUP] KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY is set: capsules may be deposited to a KyRecovery on a private address (HTTPS still required)")
+	}
 	if cfg.AllowPrivateCallbacks {
 		log.Println("WARNING: KYSIGNON_ALLOW_PRIVATE_CALLBACKS is on; paired systems may register internal callback URLs")
 	}
@@ -408,7 +411,7 @@ func runDeposit() {
 	defer dbStore.Close()
 	auditLogger := audit.NewLogger(dbStore)
 
-	res, err := backup.RunBackup(context.Background(), cfg, dbStore, dbStore, backup.NewKyRecoveryClient(), appVersion)
+	res, err := backup.RunBackup(context.Background(), cfg, dbStore, dbStore, backup.NewKyRecoveryClient(cfg.BackupAllowPrivateRecovery), appVersion)
 	action, outcome, details := backup.Outcome(res, err)
 	_ = auditLogger.Record(action, "", "cli", res.Manifest.CapsuleID, "backup", "", "kysignon-cli", outcome, details)
 	if err != nil {
@@ -435,7 +438,7 @@ func describe(res backup.Result) string {
 // the database. The wait honours shutdown; the run itself does not, so a SIGTERM mid-upload
 // cannot end the process between KyRecovery storing a capsule and the receipt being written.
 func backupLoop(ctx context.Context, cfg *config.Config, dbStore *store.Store, auditLogger *audit.Logger) {
-	client := backup.NewKyRecoveryClient()
+	client := backup.NewKyRecoveryClient(cfg.BackupAllowPrivateRecovery)
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {

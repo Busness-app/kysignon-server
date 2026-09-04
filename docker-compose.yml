@@ -17,6 +17,11 @@ services:
     ports:
       - "${KYSIGNON_BIND:-127.0.0.1}:5867:5867"
 
+    # Names that exist only on your LAN (a KyRecovery behind your own proxy) may not resolve
+    # in here when the host uses a loopback stub resolver. Add docker-compose.lan-dns.yml
+    # with KYSIGNON_DNS set; it is not in this file because a dns: entry replaces the host's
+    # resolvers for every lookup, which must be a choice, not a default.
+
     environment:
       KYSIGNON_PORT: 5867
       KYSIGNON_ISSUER_URL: ${KYSIGNON_ISSUER_URL:-http://localhost:5867}
@@ -41,6 +46,14 @@ services:
       # are internal by design. Set to false if KySignOn is reachable from the internet
       # and paired systems live on public hostnames.
       KYSIGNON_ALLOW_PRIVATE_CALLBACKS: ${KYSIGNON_ALLOW_PRIVATE_CALLBACKS:-true}
+      # Backups. The schedule is set in the admin UI; this is only its default. A local
+      # capsule directory is a second destination (or the only one, with no KyRecovery);
+      # mount a volume there. Allow a private KyRecovery only for one on your own network
+      # behind TLS: HTTPS stays required, and the setting is recorded on every pairing.
+      KYSIGNON_BACKUP_DEPOSIT_INTERVAL: ${KYSIGNON_BACKUP_DEPOSIT_INTERVAL:-24h}
+      KYSIGNON_BACKUP_DIR: ${KYSIGNON_BACKUP_DIR:-}
+      KYSIGNON_BACKUP_KEEP: ${KYSIGNON_BACKUP_KEEP:-7}
+      KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY: ${KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY:-false}
       BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
       BOOTSTRAP_ADMIN_PASS: ${BOOTSTRAP_ADMIN_PASS:-}
 

@@ -44,7 +44,9 @@ type BackupHandler struct {
 
 // newRecoveryClient builds the KyRecovery client; tests swap in a fake, since the real one
 // refuses loopback and plain HTTP by design.
-var newRecoveryClient = func() recoveryClient { return backup.NewKyRecoveryClient() }
+var newRecoveryClient = func(cfg *config.Config) recoveryClient {
+	return backup.NewKyRecoveryClient(cfg.BackupAllowPrivateRecovery)
+}
 
 func NewBackupHandler(cfg *config.Config, s *store.Store, audit *audit.Logger, mm *MiddlewareManager) *BackupHandler {
 	return &BackupHandler{
@@ -52,7 +54,7 @@ func NewBackupHandler(cfg *config.Config, s *store.Store, audit *audit.Logger, m
 		store:      s,
 		audit:      audit,
 		middleware: mm,
-		recovery:   newRecoveryClient(),
+		recovery:   newRecoveryClient(cfg),
 	}
 }
 
@@ -194,7 +196,7 @@ func (h *BackupHandler) PairRemote(w http.ResponseWriter, r *http.Request) {
 	}
 	// Validated here as well as in the client so a bad URL is rejected before it is stored
 	// or audited as a pairing attempt.
-	if err := backup.ValidateRecoveryURL(req.RecoveryURL); err != nil {
+	if err := backup.ValidateRecoveryURL(req.RecoveryURL, h.cfg.BackupAllowPrivateRecovery); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -230,6 +232,7 @@ func (h *BackupHandler) PairRemote(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.record(r, "admin.backup_remote_pair", adminID, adminUsername, target, "success", map[string]any{
 		"recovery_url": target, "recovery_key_id": result.Key.Public.ID(), "threshold": result.Key.Threshold, "total_shares": result.Key.TotalShares,
+		"private_recovery_allowed": h.cfg.BackupAllowPrivateRecovery,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"paired":          true,

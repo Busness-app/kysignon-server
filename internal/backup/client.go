@@ -41,10 +41,14 @@ const uploadTimeout = 15 * time.Minute
 
 // KyRecoveryClient is the product half of the pairing and deposit contract.
 type KyRecoveryClient struct {
-	client *http.Client
+	client       *http.Client
+	allowPrivate bool
 }
 
-func NewKyRecoveryClient() *KyRecoveryClient {
+// NewKyRecoveryClient builds the client. allowPrivate is Config.BackupAllowPrivateRecovery:
+// with it, a KyRecovery on the operator's LAN is dialled; without it, only public addresses.
+// HTTPS is required either way.
+func NewKyRecoveryClient(allowPrivate bool) *KyRecoveryClient {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
@@ -56,14 +60,17 @@ func NewKyRecoveryClient() *KyRecoveryClient {
 			return nil, err
 		}
 		for _, ip := range ips {
-			if isPublicIP(ip) {
+			if allowedIP(ip, allowPrivate) {
 				return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 			}
 		}
-		return nil, errors.New("recovery host resolves only to private or reserved addresses")
+		if allowPrivate {
+			return nil, errors.New("recovery host resolves only to loopback or unroutable addresses")
+		}
+		return nil, errors.New("recovery host resolves only to private or reserved addresses; set KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY=true for a KyRecovery on your own network")
 	}}
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport, CheckRedirect: refuseRedirect}
-	return &KyRecoveryClient{client: client}
+	return &KyRecoveryClient{client: client, allowPrivate: allowPrivate}
 }
 
 // refuseRedirect is the client's redirect policy: none. A validated destination must not be
@@ -74,8 +81,9 @@ func refuseRedirect(req *http.Request, _ []*http.Request) error {
 }
 
 // ValidateRecoveryURL is the rule for where this server will send a capsule: HTTPS, no
-// credentials, not a private or reserved address. Handlers call it before storing a URL.
-func ValidateRecoveryURL(raw string) error {
+// credentials, and unless allowPrivate, not a private or reserved address. Handlers call it
+// before storing a URL.
+func ValidateRecoveryURL(raw string, allowPrivate bool) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
 		return errors.New("recovery URL must be an HTTPS URL without credentials")
@@ -85,30 +93,60 @@ func ValidateRecoveryURL(raw string) error {
 	if u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return errors.New("recovery URL must not carry a query string or fragment")
 	}
-	if ip := net.ParseIP(u.Hostname()); ip != nil && !isPublicIP(ip) {
-		return errors.New("recovery URL cannot target a private or reserved address")
+	if ip := net.ParseIP(u.Hostname()); ip != nil && !allowedIP(ip, allowPrivate) {
+		if allowPrivate {
+			return errors.New("recovery URL cannot target a loopback or unroutable address")
+		}
+		return errors.New("recovery URL cannot target a private or reserved address; set KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY=true for a KyRecovery on your own network")
 	}
 	return nil
 }
 
-// reservedRanges are the non-routable or special-purpose blocks net.IP's own predicates miss:
-// carrier-grade NAT (which is also every Tailscale address), IETF protocol assignments,
-// benchmarking, class E, and the NAT64 well-known prefix.
-var reservedRanges = func() []*net.IPNet {
-	var out []*net.IPNet
-	for _, cidr := range []string{"100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96"} {
-		_, n, _ := net.ParseCIDR(cidr)
+// allowedIP is isPublicIP, or with allowPrivate the wider rule for an operator's own network:
+// private ranges and carrier-grade NAT (Tailscale) are in; loopback, link-local, multicast
+// and the unspecified address never are, because none of them is a KyRecovery.
+func allowedIP(ip net.IP, allowPrivate bool) bool {
+	if !allowPrivate {
+		return isPublicIP(ip)
+	}
+	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	for _, n := range reservedRanges {
+		if n.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+// reservedRanges are the special-purpose blocks net.IP's own predicates miss and that no
+// KyRecovery ever lives in, opt-in or not: IETF protocol assignments, benchmarking, class E,
+// and the NAT64 well-known prefix.
+var reservedRanges = mustCIDRs("192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96")
+
+// cgnatRange is carrier-grade NAT, which is also every Tailscale address. Refused by default
+// like the private ranges, admitted with them under BackupAllowPrivateRecovery.
+var cgnatRange = mustCIDRs("100.64.0.0/10")[0]
+
+func mustCIDRs(cidrs ...string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, n, err := net.ParseCIDR(cidr)
+		if err != nil {
+			panic(err)
+		}
 		out = append(out, n)
 	}
 	return out
-}()
+}
 
-// isPublicIP is the rule for where a capsule may be sent. The backup client never honours
-// AllowPrivateCallbacks: a paired system's callback is the operator's own network by design,
-// while a KyRecovery on a private address is a misconfiguration that would make every
-// scheduled deposit an unattended request into that network.
+// isPublicIP is the default rule for where a capsule may be sent. The backup client never
+// honours AllowPrivateCallbacks: that setting is for paired systems' callbacks. Its own
+// opt-in is BackupAllowPrivateRecovery, because a KyRecovery on a private address makes every
+// scheduled deposit an unattended request into that network and deserves its own decision.
 func isPublicIP(ip net.IP) bool {
-	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() || cgnatRange.Contains(ip) {
 		return false
 	}
 	for _, n := range reservedRanges {
@@ -121,10 +159,10 @@ func isPublicIP(ip net.IP) bool {
 
 // endpoint joins the server URL and an API path after checking the URL is one the client is
 // willing to talk to.
-func endpoint(serverURL, path string) (string, error) {
+func endpoint(serverURL, path string, allowPrivate bool) (string, error) {
 	u := strings.TrimRight(serverURL, "/") + path
-	if err := ValidateRecoveryURL(u); err != nil {
-		return "", errors.New("invalid recovery URL")
+	if err := ValidateRecoveryURL(u, allowPrivate); err != nil {
+		return "", fmt.Errorf("invalid recovery URL: %w", err)
 	}
 	return u, nil
 }
@@ -144,7 +182,7 @@ type PairingResult struct {
 // later deposit whose manifest names a different service, so it must be the same value Seal
 // is given.
 func (c *KyRecoveryClient) ClaimPairing(ctx context.Context, serverURL, pairingCode, serviceName, appName string) (PairingResult, error) {
-	u, err := endpoint(serverURL, "/api/pairing/claim")
+	u, err := endpoint(serverURL, "/api/pairing/claim", c.allowPrivate)
 	if err != nil {
 		return PairingResult{}, err
 	}
@@ -213,7 +251,7 @@ type Receipt struct {
 // exactly what left here. 200 is kyrecovery re-sending the receipt for bytes it already
 // holds, which is a success.
 func (c *KyRecoveryClient) Deposit(ctx context.Context, serverURL, apiToken string, container []byte) (Receipt, error) {
-	u, err := endpoint(serverURL, "/api/backup/deposit")
+	u, err := endpoint(serverURL, "/api/backup/deposit", c.allowPrivate)
 	if err != nil {
 		return Receipt{}, err
 	}

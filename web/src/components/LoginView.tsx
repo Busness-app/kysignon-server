@@ -4,7 +4,8 @@ import { parseAuthStep, parseBeginLogin, parsePushStatus } from '../parsers';
 import { sameOriginPath } from '../returnTo';
 import { getPasskeyAssertion, isPasskeySupported } from '../webauthn';
 import type { User } from '../types';
-import { Shield, Smartphone, KeyRound, ScanFace, ArrowRight, RefreshCw, AlertCircle } from 'lucide-react';
+import { ScanFace, RefreshCw, AlertCircle } from 'lucide-react';
+import { Brand } from './Sidebar';
 
 interface LoginViewProps {
   onLoginSuccess: (user: User) => void;
@@ -207,206 +208,154 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
   };
 
   const canUseWebauthn = mfaMethods.includes('webauthn') && isPasskeySupported();
+  const spinner = <RefreshCw className="spin" size={16} />;
 
   return (
     <div className="login-page">
-      <div className="login-card">
-        <div className="login-header">
-          <div className="login-logo">
-            <Shield className="icon-cyan" size={32} />
-          </div>
-          <h1 className="login-title">KySignOn</h1>
-          <p className="login-subtitle">KySecurity Suite Single Sign-On</p>
+      <aside className="login-intro">
+        <Brand />
+        <h1>Sign in once, then open everything.</h1>
+      </aside>
+
+      <div className="login-col">
+        <div className="login-card">
+          {error && (
+            <div className="alert-box error" role="alert">
+              <AlertCircle size={16} />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {!mfaRequired && (
+            <form onSubmit={handlePasswordSubmit} className="login-form">
+              <h2>Sign in</h2>
+              <div className="form-group">
+                <label className="form-label" htmlFor="username">Username</label>
+                <input
+                  id="username"
+                  type="text"
+                  className="form-input font-mono"
+                  autoComplete="username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  autoFocus
+                  required
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label" htmlFor="password">Password</label>
+                <input
+                  id="password"
+                  type="password"
+                  className="form-input"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              </div>
+              <button type="submit" className="primary-btn full-width" disabled={loading}>
+                {loading ? spinner : 'Sign in'}
+              </button>
+            </form>
+          )}
+
+          {mfaRequired && mfaMode === 'webauthn' && (
+            <div className="login-form">
+              <h2>Use a passkey</h2>
+              <p className="text-muted">Your browser will ask for a fingerprint, face, or security key.</p>
+              <div className="match"><ScanFace size={56} /></div>
+              <button type="button" className="primary-btn full-width" onClick={submitPasskey} disabled={loading}>
+                {loading ? spinner : 'Continue with passkey'}
+              </button>
+              <div className="mfa-alt-links">
+                {matchDigits && (
+                  <button type="button" className="text-btn" onClick={() => setMfaMode('push')}>Approve on your phone instead</button>
+                )}
+                <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>Enter a six-digit code</button>
+                <button type="button" className="text-btn" onClick={() => setMfaMode('recovery')}>Use a recovery code</button>
+              </div>
+            </div>
+          )}
+
+          {mfaRequired && mfaMode === 'push' && (
+            <div className="login-form">
+              <h2>Check your phone</h2>
+              <p className="text-muted">Open KySecurity Authenticator and tap the number you see here.</p>
+              <div className="match" aria-live="polite">
+                <b>{matchDigits}</b>
+                <span>Only one of the numbers on your phone matches.</span>
+              </div>
+              <div className="wait"><i />Waiting for approval.</div>
+              <div className="mfa-alt-links">
+                {canUseWebauthn && (
+                  <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>Use a passkey instead</button>
+                )}
+                <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>Enter a six-digit code</button>
+              </div>
+            </div>
+          )}
+
+          {mfaRequired && mfaMode === 'totp' && (
+            <form onSubmit={handleTOTPSubmit} className="login-form">
+              <h2>Enter your six-digit code</h2>
+              <div className="form-group">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  className="form-input text-center text-mono text-large"
+                  placeholder="000000"
+                  aria-label="Six-digit code"
+                  value={totpCode}
+                  onChange={(e) => setTotpCode(e.target.value)}
+                  autoFocus
+                  required
+                />
+              </div>
+              <button type="submit" className="primary-btn full-width" disabled={loading || totpCode.length < 6}>
+                {loading ? spinner : 'Continue'}
+              </button>
+              <div className="mfa-alt-links">
+                {canUseWebauthn && (
+                  <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>Use a passkey instead</button>
+                )}
+                {matchDigits && (
+                  <button type="button" className="text-btn" onClick={() => setMfaMode('push')}>Approve on your phone instead</button>
+                )}
+                <button type="button" className="text-btn" onClick={() => setMfaMode('recovery')}>Use a recovery code</button>
+              </div>
+            </form>
+          )}
+
+          {mfaRequired && mfaMode === 'recovery' && (
+            <form onSubmit={handleRecoverySubmit} className="login-form">
+              <h2>Use a recovery code</h2>
+              <p className="text-muted">Each code works once.</p>
+              <div className="form-group">
+                <input
+                  type="text"
+                  className="form-input text-center text-mono"
+                  placeholder="XXXX-XXXX"
+                  aria-label="Recovery code"
+                  value={recoveryCode}
+                  onChange={(e) => setRecoveryCode(e.target.value)}
+                  autoFocus
+                  required
+                />
+              </div>
+              <button type="submit" className="primary-btn full-width" disabled={loading || !recoveryCode}>
+                {loading ? spinner : 'Continue'}
+              </button>
+              <div className="mfa-alt-links">
+                {canUseWebauthn && (
+                  <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>Use a passkey instead</button>
+                )}
+                <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>Enter a six-digit code</button>
+              </div>
+            </form>
+          )}
         </div>
-
-        {error && (
-          <div className="alert-box error">
-            <AlertCircle size={16} />
-            <span>{error}</span>
-          </div>
-        )}
-
-        {!mfaRequired ? (
-          <form onSubmit={handlePasswordSubmit} className="login-form">
-            <div className="form-group">
-              <label className="form-label" htmlFor="username">
-                Username
-              </label>
-              <input
-                id="username"
-                type="text"
-                className="form-input"
-                placeholder="e.g. alice"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoFocus
-                required
-              />
-            </div>
-
-            <div className="form-group">
-              <label className="form-label" htmlFor="password">
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                className="form-input"
-                placeholder="••••••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-            </div>
-
-            <button type="submit" className="primary-btn full-width" disabled={loading}>
-              {loading ? <RefreshCw className="spin" size={16} /> : <span>Sign In</span>}
-              {!loading && <ArrowRight size={16} />}
-            </button>
-          </form>
-        ) : (
-          <div className="mfa-challenge-container">
-            {mfaMode === 'webauthn' && (
-              <div className="mfa-push-box">
-                <div className="push-icon-circle">
-                  <ScanFace size={28} className="icon-cyan" />
-                </div>
-                <h3>Sign In With a Passkey</h3>
-                <p className="mfa-desc">
-                  Use your device's built-in authenticator (fingerprint, face, or security key) to continue.
-                </p>
-                <button
-                  type="button"
-                  className="primary-btn full-width"
-                  onClick={submitPasskey}
-                  disabled={loading}
-                >
-                  {loading ? <RefreshCw className="spin" size={16} /> : <span>Continue With Passkey</span>}
-                </button>
-                <div className="mfa-alt-links">
-                  {matchDigits && (
-                    <button type="button" className="text-btn" onClick={() => setMfaMode('push')}>
-                      Use Push notification instead
-                    </button>
-                  )}
-                  <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>
-                    Use 6-digit TOTP code instead
-                  </button>
-                  <button type="button" className="text-btn" onClick={() => setMfaMode('recovery')}>
-                    Use emergency recovery code
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {mfaMode === 'push' && (
-              <div className="mfa-push-box">
-                <div className="push-icon-circle">
-                  <Smartphone size={28} className="icon-cyan" />
-                </div>
-                <h3>Authenticator Challenge</h3>
-                <p className="mfa-desc">
-                  Open your <strong>KySecurity Authenticator</strong> app and tap the matching number:
-                </p>
-                <div className="match-digits-display">
-                  <span className="match-digits">{matchDigits}</span>
-                </div>
-                <div className="poll-status">
-                  <RefreshCw className="spin icon-cyan" size={14} />
-                  <span>Waiting for mobile approval...</span>
-                </div>
-                <div className="mfa-alt-links">
-                  {canUseWebauthn && (
-                    <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>
-                      Use a passkey instead
-                    </button>
-                  )}
-                  <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>
-                    Use 6-digit TOTP code instead
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {mfaMode === 'totp' && (
-              <form onSubmit={handleTOTPSubmit} className="login-form">
-                <div className="push-icon-circle">
-                  <KeyRound size={28} className="icon-cyan" />
-                </div>
-                <h3>Enter Authenticator Code</h3>
-                <p className="mfa-desc">Provide the 6-digit code from your authenticator app.</p>
-
-                <div className="form-group">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={6}
-                    className="form-input text-center text-mono text-large"
-                    placeholder="000000"
-                    value={totpCode}
-                    onChange={(e) => setTotpCode(e.target.value)}
-                    autoFocus
-                    required
-                  />
-                </div>
-
-                <button type="submit" className="primary-btn full-width" disabled={loading || totpCode.length < 6}>
-                  {loading ? <RefreshCw className="spin" size={16} /> : <span>Verify & Continue</span>}
-                </button>
-
-                <div className="mfa-alt-links">
-                  {canUseWebauthn && (
-                    <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>
-                      Use a passkey instead
-                    </button>
-                  )}
-                  {matchDigits && (
-                    <button type="button" className="text-btn" onClick={() => setMfaMode('push')}>
-                      Switch back to Push notification
-                    </button>
-                  )}
-                  <button type="button" className="text-btn" onClick={() => setMfaMode('recovery')}>
-                    Use emergency recovery code
-                  </button>
-                </div>
-              </form>
-            )}
-
-            {mfaMode === 'recovery' && (
-              <form onSubmit={handleRecoverySubmit} className="login-form">
-                <h3>Emergency Recovery Code</h3>
-                <p className="mfa-desc">Enter an unused 8-character recovery code.</p>
-
-                <div className="form-group">
-                  <input
-                    type="text"
-                    className="form-input text-center text-mono"
-                    placeholder="XXXX-XXXX"
-                    value={recoveryCode}
-                    onChange={(e) => setRecoveryCode(e.target.value)}
-                    autoFocus
-                    required
-                  />
-                </div>
-
-                <button type="submit" className="primary-btn full-width" disabled={loading || !recoveryCode}>
-                  {loading ? <RefreshCw className="spin" size={16} /> : <span>Redeem Recovery Code</span>}
-                </button>
-
-                <div className="mfa-alt-links">
-                  {canUseWebauthn && (
-                    <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>
-                      Use a passkey instead
-                    </button>
-                  )}
-                  <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>
-                    Back to TOTP code
-                  </button>
-                </div>
-              </form>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );

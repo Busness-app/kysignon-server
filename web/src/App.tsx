@@ -2,10 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { User } from './types';
 import { apiJson, apiRequest } from './api';
 import { parseMe } from './parsers';
-import { Navbar } from './components/Navbar';
+import { Sidebar } from './components/Sidebar';
 import { LoginView } from './components/LoginView';
 import { UserDashboard } from './components/UserDashboard';
 import { DeviceSettings } from './components/DeviceSettings';
+import { Appearance } from './components/Appearance';
 import { AdminUsers } from './components/AdminUsers';
 import { AdminSystems } from './components/AdminSystems';
 import { AdminClients } from './components/AdminClients';
@@ -54,7 +55,7 @@ export const App: React.FC = () => {
     return (
       <div className="loading-screen">
         <RefreshCw className="spin icon-cyan" size={32} />
-        <p className="loading-text">Authenticating with KySignOn...</p>
+        <p className="loading-text">Checking your session</p>
       </div>
     );
   }
@@ -64,8 +65,8 @@ export const App: React.FC = () => {
   }
 
   return (
-    <div className="app-layout">
-      <Navbar
+    <div className="shell">
+      <Sidebar
         user={currentUser}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -83,6 +84,8 @@ export const App: React.FC = () => {
         {activeTab === 'devices' && (
           <DeviceSettings user={currentUser} onUserUpdate={checkSession} />
         )}
+
+        {activeTab === 'appearance' && <Appearance />}
 
         {currentUser.role === 'admin' && (
           <>

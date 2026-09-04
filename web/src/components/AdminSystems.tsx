@@ -178,10 +178,7 @@ export const AdminSystems: React.FC = () => {
       {stepUpPrompt}
       <div className="page-header">
         <div>
-          <h1 className="page-title">SCIM 2.0 Downstream Directory Sync</h1>
-          <p className="page-subtitle">
-            Connect KySecurity Suite products and 3rd-party services via standard SCIM 2.0 (RFC 7643/7644) for automated account replication.
-          </p>
+          <h1 className="page-title">Suite sync</h1>
         </div>
         <button className="primary-btn sm" onClick={handleOpenModal}>
           <Plus size={14} />

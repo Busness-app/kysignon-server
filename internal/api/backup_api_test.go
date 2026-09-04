@@ -145,7 +145,7 @@ func TestAdminBackupEndpoints(t *testing.T) {
 	})
 
 	t.Run("pairing refuses internal and non-https recovery URLs", func(t *testing.T) {
-		for _, target := range []string{"http://recovery.example.test", "https://127.0.0.1:8095", "https://10.0.0.5", "https://user:pw@recovery.example.test"} {
+		for _, target := range []string{"http://recovery.example.test", "https://127.0.0.1:8095", "https://10.0.0.5", "https://user:pw@recovery.example.test", "https://recovery.example.test/#frag", "https://recovery.example.test/?a=b"} {
 			body, _ := json.Marshal(map[string]string{"recovery_url": target, "pairing_code": "123456"})
 			if w := do("POST", "/api/admin/backup/pair-remote", body, true); w.Code != http.StatusBadRequest {
 				t.Errorf("%s: got %d: %s", target, w.Code, w.Body.String())

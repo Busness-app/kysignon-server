@@ -385,6 +385,11 @@ func TestRecoveryURLRefusesReservedRanges(t *testing.T) {
 	if err := backup.ValidateRecoveryURL("https://203.0.113.10"); err != nil {
 		t.Errorf("a public address refused: %v", err)
 	}
+	for _, u := range []string{"https://recovery.example.test/?x=1", "https://recovery.example.test/#frag", "https://recovery.example.test?"} {
+		if err := backup.ValidateRecoveryURL(u); err == nil {
+			t.Errorf("%s accepted; the API path would land on the wrong URL", u)
+		}
+	}
 }
 
 // A paired instance whose recovery.pub is gone has stopped backing up; that is a failure to

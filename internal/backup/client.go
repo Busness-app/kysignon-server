@@ -80,6 +80,11 @@ func ValidateRecoveryURL(raw string) error {
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
 		return errors.New("recovery URL must be an HTTPS URL without credentials")
 	}
+	// The API path is appended to this URL; a query or fragment would silently send the
+	// claim and the capsule to the host's root instead of the deposit endpoint.
+	if u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		return errors.New("recovery URL must not carry a query string or fragment")
+	}
 	if ip := net.ParseIP(u.Hostname()); ip != nil && !isPublicIP(ip) {
 		return errors.New("recovery URL cannot target a private or reserved address")
 	}

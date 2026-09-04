@@ -16,7 +16,8 @@ Owns backup payload collection (database snapshot, RSA signing key, encryption a
 - Restore drills seal to a throwaway key generated and discarded within the same call, extract into an ephemeral `0700` directory wiped on return, and report only checks they actually execute: file presence, SQLite integrity, required tables, an active admin, secret decryption, token signing.
 - KyRecovery connections require HTTPS, reject private, loopback, link-local and reserved destinations (including carrier-grade NAT, so every Tailscale address), and follow no redirects. The backup client never honours `AllowPrivateCallbacks`: that setting is for paired systems on the operator's own network, not for where unattended deposits go.
 - `LoadPairing` reports `ErrKeyPinMissing`, not `ErrNotPaired`, when a pairing record exists but `recovery.pub` is gone or disagrees with the pin; the scheduler skips only a never-paired instance and audits everything else.
-- `TestNothingInTheServerDecrypts` pins that no non-test file calls `recoverykey.Combine`, `recoverykey.FromSeed` or `capsule.Open` except the `restore` command.
+- No server code opens a capsule sealed to the suite key. `TestNothingInTheServerDecrypts` pins that `recoverykey.Combine` and `FromSeed` are called only inside the `restore` function, and `capsule.Open` only there and inside `RunRestoreDrill`, which opens a capsule sealed to a throwaway key it generated and discards in the same call.
+- `ValidateRecoveryURL` refuses a query string or fragment: the API path is appended to the stored URL.
 
 ## Verification
 - `go test -v ./internal/backup/...`

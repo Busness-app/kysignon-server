@@ -32,13 +32,21 @@ func Interval(cfg *config.Config, settings SettingsStore) (time.Duration, error)
 	return time.Duration(sec) * time.Second, nil
 }
 
-// SetInterval stores the schedule. Zero disables it; anything else is at least
-// config.MinBackupDepositInterval, because each run snapshots the whole database.
-func SetInterval(settings SettingsStore, d time.Duration) error {
-	if d < 0 || (d != 0 && d < config.MinBackupDepositInterval) {
-		return fmt.Errorf("backup: interval must be 0 (off) or at least %s", config.MinBackupDepositInterval)
+// MaxInterval is the longest schedule accepted: a year. Beyond that the setting is a way of
+// turning backups off without saying so.
+const MaxInterval = 366 * 24 * time.Hour
+
+// ErrBadInterval is returned for a schedule outside 0 (off) or [MinBackupDepositInterval, MaxInterval].
+var ErrBadInterval = fmt.Errorf("backup: interval must be 0 (off) or between %s and %s", config.MinBackupDepositInterval, MaxInterval)
+
+// SetInterval stores the schedule in whole seconds. Zero disables it; anything else is at
+// least config.MinBackupDepositInterval, because each run snapshots the whole database. The
+// bound is checked on the seconds before any conversion, so no value wraps to zero.
+func SetInterval(settings SettingsStore, sec int64) error {
+	if sec != 0 && (sec < int64(config.MinBackupDepositInterval/time.Second) || sec > int64(MaxInterval/time.Second)) {
+		return ErrBadInterval
 	}
-	return settings.SetSetting(settingInterval, strconv.FormatInt(int64(d/time.Second), 10))
+	return settings.SetSetting(settingInterval, strconv.FormatInt(sec, 10))
 }
 
 // NextRun is when the scheduler will next back up, or ok=false when the schedule is off.

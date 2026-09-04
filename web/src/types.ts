@@ -109,6 +109,7 @@ export interface BackupRunResult {
   capsuleId: string;
   sizeBytes: number;
   localPath?: string;
+  localError?: string;
   receipt?: DepositReceipt;
 }
 

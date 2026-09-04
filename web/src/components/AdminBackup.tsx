@@ -111,6 +111,7 @@ export const AdminBackup: React.FC = () => {
       if (res.localPath) went.push(`written to ${res.localPath}`);
       if (res.receipt) went.push(`deposited with KyRecovery at ${when(res.receipt.depositedAt)}`);
       setRunMessage(`Capsule ${res.capsuleId} (${bytes(res.sizeBytes)}) ${went.join(' and ')}.`);
+      if (res.localError) setRunError(`The local copy failed: ${res.localError}`);
       await fetchStatus();
     } catch (err) {
       if (isCancelled(err)) return;

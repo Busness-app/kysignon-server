@@ -280,6 +280,9 @@ func (h *BackupHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 			if res.LocalPath != "" {
 				msg += "; the local copy was written"
 			}
+			if res.LocalError != "" {
+				msg += "; " + res.LocalError
+			}
 			writeError(w, http.StatusBadGateway, msg)
 		default:
 			log.Printf("[BACKUP] backup failed (local): %s", backup.AuditSafe(err.Error()))
@@ -359,17 +362,24 @@ func (h *BackupHandler) SetSchedule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Invalid JSON request body")
 		return
 	}
-	d := time.Duration(req.IntervalSec) * time.Second
-	if err := backup.SetInterval(h.store, d); err != nil {
-		if req.IntervalSec < 0 || d < config.MinBackupDepositInterval {
+	if err := backup.SetInterval(h.store, req.IntervalSec); err != nil {
+		if errors.Is(err, backup.ErrBadInterval) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "Failed to save the schedule")
 		return
 	}
-	_ = h.record(r, "admin.backup_schedule", adminID, adminUsername, "", "success", map[string]any{"interval_sec": req.IntervalSec})
-	writeJSON(w, http.StatusOK, map[string]any{"interval_sec": req.IntervalSec})
+	// Read back what the store holds, so the audit row and the reply never describe a
+	// schedule the scheduler will not run.
+	stored, err := backup.Interval(h.cfg, h.store)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to read the schedule back")
+		return
+	}
+	sec := int64(stored / time.Second)
+	_ = h.record(r, "admin.backup_schedule", adminID, adminUsername, "", "success", map[string]any{"interval_sec": sec})
+	writeJSON(w, http.StatusOK, map[string]any{"interval_sec": sec})
 }
 
 // Status reports pairing and the last receipt. It never decrypts or echoes the credential.
@@ -401,7 +411,7 @@ func (h *BackupHandler) Status(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.BackupDir != "" {
 		out["local_dir"] = h.cfg.BackupDir
 		out["local_keep"] = h.cfg.BackupKeep
-		if copies, err := backup.ListLocalCopies(h.cfg.BackupDir); err == nil {
+		if copies, err := backup.ListLocalCopies(h.cfg.BackupDir, h.cfg.AppName); err == nil {
 			out["local_copies"] = copies
 		} else {
 			out["local_error"] = backup.AuditSafe(err.Error())

@@ -260,7 +260,7 @@ func TestLocalCopiesWithoutKyRecovery(t *testing.T) {
 	if fake.container != nil {
 		t.Error("bytes were sent without a pairing")
 	}
-	copies, err := backup.ListLocalCopies(cfg.BackupDir)
+	copies, err := backup.ListLocalCopies(cfg.BackupDir, cfg.AppName)
 	if err != nil || len(copies) != 2 || copies[0].Name != filepath.Base(last.LocalPath) {
 		t.Fatalf("copies %+v %v", copies, err)
 	}
@@ -273,6 +273,65 @@ func TestLocalCopiesWithoutKyRecovery(t *testing.T) {
 	}
 	if _, files, err := capsule.Open(raw, priv, t.TempDir()); err != nil || len(files) < 5 {
 		t.Fatalf("local copy does not open with the suite key: %v", err)
+	}
+}
+
+// The directory may already hold capsules the operator put there: another service's, an
+// export, a restore staged. Pruning touches only what this instance wrote.
+func TestPruneLeavesForeignCapsulesAlone(t *testing.T) {
+	cfg, st := instance(t)
+	cfg.BackupDir = t.TempDir()
+	cfg.BackupKeep = 2
+	foreign := filepath.Join(cfg.BackupDir, "foreign.kycap")
+	otherApp := filepath.Join(cfg.BackupDir, "KyNotes-cap-KyNotes-1.kycap")
+	for _, f := range []string{foreign, otherApp} {
+		if err := os.WriteFile(f, []byte("not ours"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	priv, _ := recoverykey.Generate()
+	if err := backup.StoreRecoveryKey(cfg.DataDir, st, backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{}, "1.0.0"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, f := range []string{foreign, otherApp} {
+		if b, err := os.ReadFile(f); err != nil || string(b) != "not ours" {
+			t.Errorf("%s: %v %q", f, err, b)
+		}
+	}
+	copies, _ := backup.ListLocalCopies(cfg.BackupDir, cfg.AppName)
+	if len(copies) != 2 {
+		t.Errorf("listed %+v", copies)
+	}
+	for _, c := range copies {
+		if !strings.HasPrefix(c.Name, "KySignOn-") {
+			t.Errorf("listed a file this instance did not write: %s", c.Name)
+		}
+	}
+}
+
+// A dead local disk must not stop the off-site copy.
+func TestLocalFailureDoesNotCancelTheDeposit(t *testing.T) {
+	cfg, st := instance(t)
+	cfg.BackupDir = filepath.Join(t.TempDir(), "file-not-dir")
+	if err := os.WriteFile(cfg.BackupDir, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BackupKeep = 7
+	pair(t, cfg, st)
+	fake := &fakeStore{}
+	res, err := backup.RunBackup(context.Background(), cfg, st, st, fake, "1.0.0")
+	if err != nil || res.Receipt == nil || fake.container == nil || res.LocalError == "" || res.LocalPath != "" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	_, outcome, details := backup.Outcome(res, err)
+	if outcome != "success" || details["local_error"] == nil || details["deposited"] != true {
+		t.Errorf("%s %v", outcome, details)
 	}
 }
 
@@ -305,13 +364,12 @@ func TestScheduleCountsFromTheLastAttempt(t *testing.T) {
 	if d, err := backup.Interval(cfg, st); err != nil || d != 24*time.Hour {
 		t.Fatalf("default %v %v", d, err)
 	}
-	if err := backup.SetInterval(st, 5*time.Minute); err == nil {
-		t.Error("below the floor accepted")
+	for _, bad := range []int64{300, -3600, 36028797018963968, int64(backup.MaxInterval/time.Second) + 1} {
+		if err := backup.SetInterval(st, bad); !errors.Is(err, backup.ErrBadInterval) {
+			t.Errorf("%d accepted: %v", bad, err)
+		}
 	}
-	if err := backup.SetInterval(st, -time.Hour); err == nil {
-		t.Error("negative accepted")
-	}
-	if err := backup.SetInterval(st, time.Hour); err != nil {
+	if err := backup.SetInterval(st, 3600); err != nil {
 		t.Fatal(err)
 	}
 	next, on, err := backup.NextRun(cfg, st)

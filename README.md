@@ -208,7 +208,9 @@ client-supplied entry prepended to the list is never attributed.
 them.** The key arrives by pairing with KyRecovery, or is pasted from the ceremony page on
 the Disaster recovery screen for a server with no KyRecovery. Every capsule is sealed to it
 and goes to each configured destination: KyRecovery when paired, and `KYSIGNON_BACKUP_DIR`
-when set (the newest `KYSIGNON_BACKUP_KEEP`, default 7, are kept). The schedule is set on
+when set. Files there are named `<KYSIGNON_APP_NAME>-<capsule-id>.kycap`; the newest
+`KYSIGNON_BACKUP_KEEP` (default 7) with that prefix are kept and anything else in the
+directory is never listed or deleted. The schedule is set on
 the same screen; `KYSIGNON_BACKUP_DEPOSIT_INTERVAL` (default 24h, 15m floor, `0` disables)
 is only the default until an admin picks one. Custodian cards come from the KyRecovery
 ceremony, and a restore is `kysignon restore -capsule <file.kycap> -to <dir>` with k shares

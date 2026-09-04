@@ -247,6 +247,10 @@ func TestAdminBackupEndpoints(t *testing.T) {
 		if w := do("PUT", "/api/admin/backup/schedule", []byte(`{"interval_sec":3600}`), true); w.Code != http.StatusOK {
 			t.Fatalf("got %d: %s", w.Code, w.Body.String())
 		}
+		// 2^55 seconds wraps to exactly zero as a Duration; it must not read as "off".
+		if w := do("PUT", "/api/admin/backup/schedule", []byte(`{"interval_sec":36028797018963968}`), true); w.Code != http.StatusBadRequest {
+			t.Errorf("overflowing interval: got %d: %s", w.Code, w.Body.String())
+		}
 		w := do("GET", "/api/admin/backup/status", nil, false)
 		var resp map[string]any
 		_ = json.NewDecoder(w.Body).Decode(&resp)

@@ -16,15 +16,23 @@ type LocalCopy struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// WriteLocalCopy stores a sealed capsule as <capsule-id>.kycap in dir and prunes the oldest
-// beyond keep. The bytes are sealed to the suite key, so the directory needs no more
-// protection than any other file the operator keeps; 0600 anyway. The write goes through a
-// temp file and rename so a crash never leaves a truncated .kycap that looks like a backup.
-func WriteLocalCopy(dir string, capsuleID string, raw []byte, keep int) (string, error) {
+// localPrefix scopes this instance's files in the backup directory: only names carrying it
+// are listed or pruned, so capsules the operator put there by hand, or another service's,
+// are never touched.
+func localPrefix(appName string) string {
+	return FilenameSafe(appName) + "-"
+}
+
+// WriteLocalCopy stores a sealed capsule as <app>-<capsule-id>.kycap in dir and prunes this
+// instance's oldest beyond keep. The bytes are sealed to the suite key, so the directory
+// needs no more protection than any other file the operator keeps; 0600 anyway. The write
+// goes through a temp file and rename so a crash never leaves a truncated .kycap that looks
+// like a backup.
+func WriteLocalCopy(dir, appName, capsuleID string, raw []byte, keep int) (string, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("backup dir: %w", err)
 	}
-	final := filepath.Join(dir, FilenameSafe(capsuleID)+".kycap")
+	final := filepath.Join(dir, localPrefix(appName)+FilenameSafe(capsuleID)+".kycap")
 	tmp, err := os.CreateTemp(dir, ".kycap-*")
 	if err != nil {
 		return "", fmt.Errorf("backup dir: %w", err)
@@ -53,7 +61,7 @@ func WriteLocalCopy(dir string, capsuleID string, raw []byte, keep int) (string,
 		cleanup()
 		return "", err
 	}
-	copies, err := ListLocalCopies(dir)
+	copies, err := ListLocalCopies(dir, appName)
 	if err != nil {
 		return final, err
 	}
@@ -65,9 +73,9 @@ func WriteLocalCopy(dir string, capsuleID string, raw []byte, keep int) (string,
 	return final, nil
 }
 
-// ListLocalCopies returns the .kycap files in dir, newest first. A missing directory is
-// an empty list: nothing has been written yet.
-func ListLocalCopies(dir string) ([]LocalCopy, error) {
+// ListLocalCopies returns this instance's .kycap files in dir, newest first. A missing
+// directory is an empty list: nothing has been written yet.
+func ListLocalCopies(dir, appName string) ([]LocalCopy, error) {
 	if dir == "" {
 		return nil, nil
 	}
@@ -80,7 +88,7 @@ func ListLocalCopies(dir string) ([]LocalCopy, error) {
 	}
 	var out []LocalCopy
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".kycap") {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), localPrefix(appName)) || !strings.HasSuffix(e.Name(), ".kycap") {
 			continue
 		}
 		info, err := e.Info()

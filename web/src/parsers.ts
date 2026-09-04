@@ -343,6 +343,7 @@ export function parseBackupRun(value: unknown): BackupRunResult {
     capsuleId: str(m, 'capsule_id'),
     sizeBytes: optNum(o, 'size_bytes') ?? 0,
     localPath: optStr(o, 'local_path'),
+    localError: optStr(o, 'local_error'),
     receipt: isRecord(o.receipt) ? parseDepositReceipt(o.receipt) : undefined,
   };
 }

@@ -125,12 +125,15 @@ func notPaired(err error) error {
 var ErrNoDestination = errors.New("backup: no destination; pair with KyRecovery or set KYSIGNON_BACKUP_DIR")
 
 // Result is what one backup run produced. LocalPath is set when a copy landed in the local
-// backup directory; Receipt when KyRecovery confirmed the deposit.
+// backup directory, LocalError when that destination failed; Receipt when KyRecovery
+// confirmed the deposit. The destinations are independent: a full local disk does not stop
+// the off-site copy, and the run is an error only when every configured destination failed.
 type Result struct {
-	Manifest  capsule.Manifest `json:"manifest"`
-	SizeBytes int              `json:"size_bytes"`
-	LocalPath string           `json:"local_path,omitempty"`
-	Receipt   *Receipt         `json:"receipt,omitempty"`
+	Manifest   capsule.Manifest `json:"manifest"`
+	SizeBytes  int              `json:"size_bytes"`
+	LocalPath  string           `json:"local_path,omitempty"`
+	LocalError string           `json:"local_error,omitempty"`
+	Receipt    *Receipt         `json:"receipt,omitempty"`
 }
 
 // RunBackup seals the instance once and sends the capsule everywhere it is configured to
@@ -166,13 +169,15 @@ func RunBackup(ctx context.Context, cfg *config.Config, settings SettingsStore, 
 		return Result{}, err
 	}
 	res := Result{Manifest: m, SizeBytes: len(raw)}
+	var localErr error
 	if cfg.BackupDir != "" {
-		if res.LocalPath, err = WriteLocalCopy(cfg.BackupDir, m.CapsuleID, raw, cfg.BackupKeep); err != nil {
-			return res, fmt.Errorf("local copy: %w", err)
+		if res.LocalPath, localErr = WriteLocalCopy(cfg.BackupDir, cfg.AppName, m.CapsuleID, raw, cfg.BackupKeep); localErr != nil {
+			localErr = fmt.Errorf("local copy: %w", localErr)
+			res.LocalError = AuditSafe(localErr.Error())
 		}
 	}
 	if !paired {
-		return res, nil
+		return res, localErr
 	}
 	pairing, err := LoadPairing(cfg.DataDir, settings, cfg.EncryptionKey)
 	if err != nil {
@@ -203,6 +208,9 @@ func Outcome(res Result, err error) (action, outcome string, details map[string]
 	details = map[string]any{"capsule_id": AuditSafe(res.Manifest.CapsuleID), "size_bytes": res.SizeBytes}
 	if res.LocalPath != "" {
 		details["local_path"] = AuditSafe(res.LocalPath)
+	}
+	if res.LocalError != "" {
+		details["local_error"] = AuditSafe(res.LocalError)
 	}
 	if res.Receipt != nil {
 		details["digest"] = AuditSafe(res.Receipt.Digest)

@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { User, Application } from '../types';
-import { apiJson, apiRequest, errorMessage } from '../api';
+import { apiJson, apiRequest, errorMessage, isRecord } from '../api';
 import { parseApplications } from '../parsers';
 import { faviconUrl } from '../favicon';
-import { Image, ExternalLink, ArrowUpRight, Plus, Pencil } from 'lucide-react';
+import { Image, Upload, ExternalLink, ArrowUpRight, Plus, Pencil } from 'lucide-react';
 import { LAUNCHER_ICONS, launcherIcon } from '../launcherIcons';
 
 interface UserDashboardProps {
@@ -23,6 +23,12 @@ interface CardDraft {
 
 const blankDraft: CardDraft = { id: '', name: '', url: '', description: '', iconName: 'favicon' };
 
+/** Uploaded icons are named "icon:<id>" and served by the API; built-ins are drawn inline. */
+function uploadedIconUrl(iconName: string): string | undefined {
+  const id = iconName.startsWith('icon:') ? iconName.slice(5) : '';
+  return /^[0-9a-f-]{36}$/.test(id) ? `/api/icons/${id}` : undefined;
+}
+
 const METHOD_LABELS: Record<string, string> = {
   push: 'Phone approval',
   webauthn: 'Passkey',
@@ -33,6 +39,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
   const [apps, setApps] = useState<Application[]>([]);
   const [failedFavicons, setFailedFavicons] = useState<string[]>([]);
   const [draft, setDraft] = useState<CardDraft | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const fetchApps = () =>
     apiJson('/api/user/applications', parseApplications)
@@ -90,6 +97,27 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
     }
   };
 
+  const uploadIcon = async (file: File | undefined) => {
+    if (!file || !draft) return;
+    setUploadError(null);
+    if (file.size > 128 * 1024) {
+      setUploadError('Icon must be 128 KiB or smaller.');
+      return;
+    }
+    try {
+      const body = await apiRequest('/api/admin/icons', {
+        method: 'POST',
+        body: file,
+        headers: { 'Content-Type': file.type },
+      });
+      const iconName = isRecord(body) && typeof body.iconName === 'string' ? body.iconName : '';
+      if (!iconName) throw new Error('Upload returned no icon');
+      setDraft({ ...draft, iconName });
+    } catch (err) {
+      setUploadError(errorMessage(err, 'Upload failed'));
+    }
+  };
+
   const methods = (user.mfaMethods ?? []).filter((m) => m in METHOD_LABELS);
   const isAdmin = user.role === 'admin';
   const suite = apps.filter((app) => app.source === 'client');
@@ -99,7 +127,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
     <ul className="app-list">
       {list.map((app) => {
         const IconComp = launcherIcon(app.iconName) ?? ExternalLink;
-        const favicon = app.iconName === 'favicon' ? faviconUrl(app.url) : undefined;
+        const favicon = app.iconName === 'favicon' ? faviconUrl(app.url) : uploadedIconUrl(app.iconName);
         return (
           <li key={app.id}>
             <a href={app.url} target="_blank" rel="noopener noreferrer" className="app-row">
@@ -250,6 +278,19 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
               </div>
               <fieldset className="form-group icon-picker">
                 <legend className="form-label">Icon</legend>
+                <label className="icon-pick" aria-pressed={draft.iconName.startsWith('icon:')} title="Upload an image">
+                  {uploadedIconUrl(draft.iconName) ? (
+                    <img className="app-favicon" src={uploadedIconUrl(draft.iconName)} alt="" />
+                  ) : (
+                    <Upload size={20} />
+                  )}
+                  <span>Upload</span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                    onChange={(event) => uploadIcon(event.target.files?.[0])}
+                  />
+                </label>
                 <button
                   type="button"
                   className="icon-pick"
@@ -274,6 +315,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
                   </button>
                 ))}
               </fieldset>
+              {uploadError && <p className="form-hint text-danger">{uploadError}</p>}
               <div className="modal-footer">
                 <button type="button" className="secondary-btn" onClick={() => setDraft(null)}>Cancel</button>
                 <button type="submit" className="primary-btn">{draft.id ? 'Save changes' : 'Add application'}</button>

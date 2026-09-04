@@ -745,7 +745,7 @@ func (h *AdminHandler) CreateApplication(w http.ResponseWriter, r *http.Request)
 	if req.IconName == "" {
 		req.IconName = "favicon"
 	}
-	if !launcherIcons[req.IconName] {
+	if !h.iconAllowed(req.IconName) {
 		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
 		return
 	}
@@ -830,7 +830,7 @@ func (h *AdminHandler) UpdateApplication(w http.ResponseWriter, r *http.Request)
 	if req.IconName == "" {
 		req.IconName = "favicon"
 	}
-	if !launcherIcons[req.IconName] {
+	if !h.iconAllowed(req.IconName) {
 		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
 		return
 	}
@@ -850,6 +850,7 @@ func (h *AdminHandler) UpdateApplication(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	previousIcon := app.IconName
 	app.Name = strings.TrimSpace(req.Name)
 	app.URL = strings.TrimSpace(req.URL)
 	app.IconName = req.IconName
@@ -865,6 +866,7 @@ func (h *AdminHandler) UpdateApplication(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.audit.Record("admin.application_updated", admin.ID, admin.Username, app.ID, "application", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
+	h.dropIcon(previousIcon)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "application": app})
@@ -899,7 +901,7 @@ func (h *AdminHandler) UpdateClientLauncher(w http.ResponseWriter, r *http.Reque
 	if iconName == "" {
 		iconName = "favicon"
 	}
-	if !launcherIcons[iconName] {
+	if !h.iconAllowed(iconName) {
 		http.Error(w, `{"error":"invalid_request","error_description":"Unknown application icon"}`, http.StatusBadRequest)
 		return
 	}
@@ -914,6 +916,7 @@ func (h *AdminHandler) UpdateClientLauncher(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	previousIcon := client.IconName
 	client.Description = description
 	client.IconName = iconName
 
@@ -923,6 +926,7 @@ func (h *AdminHandler) UpdateClientLauncher(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	updated.Committed()
+	h.dropIcon(previousIcon)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "client": client})
@@ -932,6 +936,7 @@ func (h *AdminHandler) DeleteApplication(w http.ResponseWriter, r *http.Request)
 	admin := GetUserFromContext(r.Context())
 	appID := r.PathValue("id")
 
+	app, _ := h.store.GetApplicationByID(appID)
 	deleted := h.audit.Prepare("admin.application_deleted", admin.ID, admin.Username, appID, "application", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 	removed, err := h.store.DeleteApplication(appID, deleted.Row)
 	if err != nil {
@@ -944,6 +949,9 @@ func (h *AdminHandler) DeleteApplication(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	deleted.Committed()
+	if app != nil {
+		h.dropIcon(app.IconName)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})

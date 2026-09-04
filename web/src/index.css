@@ -461,6 +461,21 @@ button {
   color: var(--ink-strong);
 }
 
+.icon-pick input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.icon-pick {
+  position: relative;
+}
+
+.text-danger {
+  color: var(--danger);
+}
+
 /* Appearance */
 .theme-grid {
   list-style: none;

@@ -258,6 +258,8 @@ func (h *BackupHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		switch {
+		case errors.Is(err, backup.ErrKeyPinMissing):
+			writeError(w, http.StatusPreconditionFailed, "Paired with KyRecovery but the recovery public key is missing or does not match the pin; restore recovery.pub or re-pair")
 		case errors.Is(err, backup.ErrNotPaired):
 			writeError(w, http.StatusPreconditionFailed, "Not paired with KyRecovery")
 		case errors.Is(err, backup.ErrRecoveryKeyMismatch):

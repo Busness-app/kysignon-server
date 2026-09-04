@@ -62,14 +62,15 @@ func NewKyRecoveryClient() *KyRecoveryClient {
 		}
 		return nil, errors.New("recovery host resolves only to private or reserved addresses")
 	}}
-	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 3 {
-			return errors.New("too many redirects")
-		}
-		return ValidateRecoveryURL(req.URL.String())
-	}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: transport, CheckRedirect: refuseRedirect}
 	return &KyRecoveryClient{client: client}
+}
+
+// refuseRedirect is the client's redirect policy: none. A validated destination must not be
+// able to bounce a claim or a sealed capsule to a host the operator never named, and nothing
+// in the deposit contract needs a redirect. Go would otherwise replay the POST body on a 308.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("KyRecovery redirected to %s; redirects are refused", req.URL.Redacted())
 }
 
 // ValidateRecoveryURL is the rule for where this server will send a capsule: HTTPS, no
@@ -85,8 +86,32 @@ func ValidateRecoveryURL(raw string) error {
 	return nil
 }
 
+// reservedRanges are the non-routable or special-purpose blocks net.IP's own predicates miss:
+// carrier-grade NAT (which is also every Tailscale address), IETF protocol assignments,
+// benchmarking, class E, and the NAT64 well-known prefix.
+var reservedRanges = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, cidr := range []string{"100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96"} {
+		_, n, _ := net.ParseCIDR(cidr)
+		out = append(out, n)
+	}
+	return out
+}()
+
+// isPublicIP is the rule for where a capsule may be sent. The backup client never honours
+// AllowPrivateCallbacks: a paired system's callback is the operator's own network by design,
+// while a KyRecovery on a private address is a misconfiguration that would make every
+// scheduled deposit an unattended request into that network.
 func isPublicIP(ip net.IP) bool {
-	return ip != nil && !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsUnspecified() && !ip.IsMulticast()
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	for _, n := range reservedRanges {
+		if n.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 // endpoint joins the server URL and an API path after checking the URL is one the client is

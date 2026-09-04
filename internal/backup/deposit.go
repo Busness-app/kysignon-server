@@ -26,6 +26,12 @@ const (
 	recoveryTokenLabel = "kysignon:setting:kyrecovery_token"
 )
 
+// ErrKeyPinMissing means the instance has a pairing record but the recovery public key it
+// seals to cannot be resolved: recovery.pub is gone or disagrees with the pin. Unlike
+// ErrNotPaired it is a failure to report, not a quiet skip, because scheduled backups have
+// stopped on an instance the operator believes is covered.
+var ErrKeyPinMissing = errors.New("backup: paired with KyRecovery but the recovery public key is missing or does not match the pin")
+
 // ErrReceiptUnrecorded means KyRecovery holds the capsule but this instance failed to write
 // the receipt. The deposit happened; the caller must say so rather than report a refusal.
 var ErrReceiptUnrecorded = errors.New("backup: deposit succeeded but the receipt was not recorded")
@@ -82,6 +88,9 @@ func HasPairing(settings SettingsStore) bool {
 // LoadPairing returns ErrNotPaired unless the key, URL and token are all present.
 func LoadPairing(dataDir string, settings SettingsStore, encryptionKey []byte) (Pairing, error) {
 	key, err := LoadRecoveryKey(dataDir, settings)
+	if (errors.Is(err, ErrNotPaired) || errors.Is(err, ErrRecoveryKeyMismatch)) && HasPairing(settings) {
+		return Pairing{}, fmt.Errorf("%w: %v", ErrKeyPinMissing, err)
+	}
 	if err != nil {
 		return Pairing{}, err
 	}

@@ -11,7 +11,8 @@ import (
 )
 
 // Nothing in the server decrypts a capsule. The only caller of recoverykey.Combine and
-// capsule.Open outside tests is the restore command, which takes shares from an operator.
+// capsule.Open outside tests is the restore function, which takes shares from an operator;
+// the exemption is that one function, not the file that also holds the server's startup.
 func TestNothingInTheServerDecrypts(t *testing.T) {
 	root := filepath.Join("..", "..")
 	forbidden := map[string]bool{"Combine": true, "FromSeed": true, "Open": true, "Generate": false}
@@ -37,8 +38,7 @@ func TestNothingInTheServerDecrypts(t *testing.T) {
 		for _, imp := range f.Imports {
 			p := strings.Trim(imp.Path.Value, `"`)
 			if p == "github.com/Busness-app/ky-primitives/recoverykey" || p == "github.com/Busness-app/ky-primitives/capsule" {
-				name := path[strings.LastIndex(p, "/")+1:]
-				name = p[strings.LastIndex(p, "/")+1:]
+				name := p[strings.LastIndex(p, "/")+1:]
 				if imp.Name != nil {
 					name = imp.Name.Name
 				}
@@ -48,7 +48,12 @@ func TestNothingInTheServerDecrypts(t *testing.T) {
 		if len(aliases) == 0 {
 			return nil
 		}
+		var enclosing string
 		ast.Inspect(f, func(n ast.Node) bool {
+			if fn, ok := n.(*ast.FuncDecl); ok {
+				enclosing = fn.Name.Name
+				return true
+			}
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
 				return true
@@ -62,8 +67,8 @@ func TestNothingInTheServerDecrypts(t *testing.T) {
 			}
 			if forbidden[sel.Sel.Name] {
 				rel, _ := filepath.Rel(root, path)
-				// The restore command is the one legitimate caller: shares typed by an operator.
-				if rel == filepath.Join("cmd", "kysignon", "main.go") {
+				// The restore function is the one legitimate caller: shares typed by an operator.
+				if rel == filepath.Join("cmd", "kysignon", "main.go") && enclosing == "restore" {
 					return true
 				}
 				t.Errorf("%s: %s.%s reaches a capsule's plaintext", fset.Position(sel.Pos()), id.Name, sel.Sel.Name)

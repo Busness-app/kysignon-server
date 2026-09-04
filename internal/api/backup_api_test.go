@@ -20,6 +20,7 @@ import (
 	"github.com/Busness-app/ky-primitives/recoverykey"
 	"github.com/Busness-app/kysignon-server/internal/auth"
 	"github.com/Busness-app/kysignon-server/internal/backup"
+	"github.com/Busness-app/kysignon-server/internal/config"
 	"github.com/Busness-app/kysignon-server/internal/crypto"
 	"github.com/Busness-app/kysignon-server/internal/store"
 	"github.com/google/uuid"
@@ -58,7 +59,7 @@ func TestAdminBackupEndpoints(t *testing.T) {
 	}
 	fake := &fakeRecovery{result: backup.PairingResult{APIToken: "kyrec_live_t", Key: backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}}}
 	prev := newRecoveryClient
-	newRecoveryClient = func() recoveryClient { return fake }
+	newRecoveryClient = func(*config.Config) recoveryClient { return fake }
 	t.Cleanup(func() { newRecoveryClient = prev })
 
 	srv, dbStore, _, _, _, cleanup := setupTestServer(t)
@@ -300,7 +301,7 @@ func TestPinnedKeyBacksUpLocallyWithoutKyRecovery(t *testing.T) {
 	}
 	fake := &fakeRecovery{}
 	prev := newRecoveryClient
-	newRecoveryClient = func() recoveryClient { return fake }
+	newRecoveryClient = func(*config.Config) recoveryClient { return fake }
 	t.Cleanup(func() { newRecoveryClient = prev })
 
 	srv, dbStore, _, _, _, cleanup := setupTestServer(t)

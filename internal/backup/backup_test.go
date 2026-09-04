@@ -533,18 +533,38 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 // Carrier-grade NAT is every Tailscale address; benchmarking, class E and NAT64 are not
 // places a capsule goes either.
 func TestRecoveryURLRefusesReservedRanges(t *testing.T) {
-	for _, u := range []string{"https://100.64.0.1", "https://100.127.255.254", "https://192.0.0.9", "https://198.18.0.1", "https://240.0.0.1", "https://[64:ff9b::a00:1]"} {
-		if err := backup.ValidateRecoveryURL(u); err == nil {
+	for _, u := range []string{"https://100.64.0.1", "https://100.127.255.254", "https://192.0.0.9", "https://198.18.0.1", "https://240.0.0.1", "https://[64:ff9b::a00:1]", "https://192.168.1.91", "https://10.0.0.5"} {
+		if err := backup.ValidateRecoveryURL(u, false); err == nil {
 			t.Errorf("%s accepted", u)
 		}
 	}
-	if err := backup.ValidateRecoveryURL("https://203.0.113.10"); err != nil {
+	if err := backup.ValidateRecoveryURL("https://203.0.113.10", false); err != nil {
 		t.Errorf("a public address refused: %v", err)
 	}
 	for _, u := range []string{"https://recovery.example.test/?x=1", "https://recovery.example.test/#frag", "https://recovery.example.test?"} {
-		if err := backup.ValidateRecoveryURL(u); err == nil {
+		if err := backup.ValidateRecoveryURL(u, false); err == nil {
 			t.Errorf("%s accepted; the API path would land on the wrong URL", u)
 		}
+	}
+}
+
+// The opt-in is for a KyRecovery on the operator's own network: LAN and Tailscale addresses
+// become reachable, and nothing else changes. Plain HTTP and loopback stay refused.
+func TestPrivateRecoveryOptIn(t *testing.T) {
+	for _, u := range []string{"https://192.168.1.91", "https://10.0.0.5", "https://100.64.0.1", "https://203.0.113.10", "https://kyrecovery.lan"} {
+		if err := backup.ValidateRecoveryURL(u, true); err != nil {
+			t.Errorf("%s refused with the opt-in: %v", u, err)
+		}
+	}
+	for _, u := range []string{"http://192.168.1.91", "https://127.0.0.1", "https://[::1]", "https://0.0.0.0", "https://169.254.1.1", "https://240.0.0.1", "https://user:pw@192.168.1.91"} {
+		if err := backup.ValidateRecoveryURL(u, true); err == nil {
+			t.Errorf("%s accepted even with the opt-in", u)
+		}
+	}
+	// The refusal names the switch to flip.
+	_, err := backup.NewKyRecoveryClient(false).Deposit(context.Background(), "https://192.168.1.91", "tok", []byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY") {
+		t.Errorf("default client on a LAN address: %v", err)
 	}
 }
 

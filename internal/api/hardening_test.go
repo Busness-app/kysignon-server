@@ -11,6 +11,7 @@ import (
 
 	"github.com/Busness-app/ky-primitives/recoverykey"
 	"github.com/Busness-app/kysignon-server/internal/backup"
+	"github.com/Busness-app/kysignon-server/internal/config"
 	_ "modernc.org/sqlite"
 )
 
@@ -154,7 +155,7 @@ func TestSecretExportIsRefusedWhenTheAuditTrailCannotBeWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	prev := newRecoveryClient
-	newRecoveryClient = func() recoveryClient {
+	newRecoveryClient = func(*config.Config) recoveryClient {
 		return &fakeRecovery{result: backup.PairingResult{APIToken: "tok", Key: backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}}}
 	}
 	t.Cleanup(func() { newRecoveryClient = prev })

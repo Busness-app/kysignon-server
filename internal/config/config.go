@@ -76,6 +76,11 @@ type Config struct {
 	BackupDir string
 	// BackupKeep is how many local capsules BackupDir retains; older ones are pruned.
 	BackupKeep int
+	// BackupAllowPrivateRecovery lets the KyRecovery URL resolve to a private or carrier-grade
+	// NAT address: a KyRecovery on the operator's own LAN behind a TLS proxy with split DNS.
+	// HTTPS stays mandatory; only the address rule is relaxed. Off by default because it turns
+	// every scheduled deposit into an unattended request into the internal network.
+	BackupAllowPrivateRecovery bool
 }
 
 // Load loads configuration from environment variables. Anything malformed is an error:
@@ -147,31 +152,32 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		Port:                  port,
-		IssuerURL:             issuerURL,
-		RPID:                  rpID,
-		Origin:                rpOrigin,
-		DBPath:                dbPath,
-		DataDir:               dataDir,
-		SecretKey:             secretKey,
-		EncryptionKey:         encKey,
-		RSAKeyPath:            rsaKeyPath,
-		TrustedProxyCIDRs:     trustedCIDRs,
-		ForwardedHeader:       forwardedHeader,
-		BootstrapUser:         getEnv("BOOTSTRAP_ADMIN_USER", "admin"),
-		BootstrapPass:         os.Getenv("BOOTSTRAP_ADMIN_PASS"),
-		SecureCookies:         issuer.Scheme == "https" || strings.EqualFold(os.Getenv("KYSIGNON_SECURE_COOKIES"), "true"),
-		SessionTTL:            sessionTTL,
-		SessionIdleTTL:        sessionIdleTTL,
-		AllowPrivateCallbacks: strings.EqualFold(os.Getenv("KYSIGNON_ALLOW_PRIVATE_CALLBACKS"), "true"),
-		PushRelayURL:          pushRelayURL,
-		PushRelayKey:          strings.TrimSpace(os.Getenv("PUSH_RELAY_KEY")),
-		APNSRelayURL:          apnsRelayURL,
-		APNSRelayKey:          strings.TrimSpace(os.Getenv("APNS_RELAY_KEY")),
-		AppName:               getEnv("KYSIGNON_APP_NAME", DefaultAppName),
-		BackupDepositInterval: depositInterval,
-		BackupDir:             backupDir,
-		BackupKeep:            backupKeep,
+		Port:                       port,
+		IssuerURL:                  issuerURL,
+		RPID:                       rpID,
+		Origin:                     rpOrigin,
+		DBPath:                     dbPath,
+		DataDir:                    dataDir,
+		SecretKey:                  secretKey,
+		EncryptionKey:              encKey,
+		RSAKeyPath:                 rsaKeyPath,
+		TrustedProxyCIDRs:          trustedCIDRs,
+		ForwardedHeader:            forwardedHeader,
+		BootstrapUser:              getEnv("BOOTSTRAP_ADMIN_USER", "admin"),
+		BootstrapPass:              os.Getenv("BOOTSTRAP_ADMIN_PASS"),
+		SecureCookies:              issuer.Scheme == "https" || strings.EqualFold(os.Getenv("KYSIGNON_SECURE_COOKIES"), "true"),
+		SessionTTL:                 sessionTTL,
+		SessionIdleTTL:             sessionIdleTTL,
+		AllowPrivateCallbacks:      strings.EqualFold(os.Getenv("KYSIGNON_ALLOW_PRIVATE_CALLBACKS"), "true"),
+		PushRelayURL:               pushRelayURL,
+		PushRelayKey:               strings.TrimSpace(os.Getenv("PUSH_RELAY_KEY")),
+		APNSRelayURL:               apnsRelayURL,
+		APNSRelayKey:               strings.TrimSpace(os.Getenv("APNS_RELAY_KEY")),
+		AppName:                    getEnv("KYSIGNON_APP_NAME", DefaultAppName),
+		BackupDepositInterval:      depositInterval,
+		BackupDir:                  backupDir,
+		BackupKeep:                 backupKeep,
+		BackupAllowPrivateRecovery: strings.EqualFold(os.Getenv("KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY"), "true"),
 	}, nil
 }
 

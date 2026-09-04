@@ -115,6 +115,65 @@ func TestUploadedIconLifecycle(t *testing.T) {
 	}
 }
 
+// An upload the picker never saved has no card to be dropped with; the sweep gets it.
+func TestOrphanedIconsAreSwept(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+
+	orphan := strings.TrimPrefix(iconNameFrom(t, uploadIcon(t, srv, cookie, "image/png", tinyPNG(t))), "icon:")
+	kept := iconNameFrom(t, uploadIcon(t, srv, cookie, "image/png", tinyPNG(t)))
+	if rr := adminRequestNoStepUp(t, srv, "POST", "/api/admin/applications", cookie,
+		`{"name":"Kept","url":"https://kept.example.test","iconName":"`+kept+`"}`); rr.Code != http.StatusOK {
+		t.Fatalf("create returned %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Inside the grace window nothing goes.
+	if n, err := db.DeleteOrphanedLauncherIcons(time.Hour); err != nil || n != 0 {
+		t.Fatalf("sweep inside grace window removed %d (err %v), want 0", n, err)
+	}
+	if n, err := db.DeleteOrphanedLauncherIcons(0); err != nil || n != 1 {
+		t.Fatalf("sweep removed %d (err %v), want the one orphan", n, err)
+	}
+	if icon, err := db.GetLauncherIcon(orphan); err != nil || icon != nil {
+		t.Errorf("orphan still stored after sweep: %v %v", icon, err)
+	}
+	if icon, err := db.GetLauncherIcon(strings.TrimPrefix(kept, "icon:")); err != nil || icon == nil {
+		t.Errorf("referenced icon was swept: %v %v", icon, err)
+	}
+}
+
+// A client card's upload goes with the client, the same as an application card's does.
+func TestDeletingClientDropsItsUploadedIcon(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+	newClient(t, db, "kynotes", []string{"https://notes.example.test/cb"}, []string{"openid"})
+
+	iconName := iconNameFrom(t, uploadIcon(t, srv, cookie, "image/png", tinyPNG(t)))
+	id := strings.TrimPrefix(iconName, "icon:")
+	if rr := adminRequestNoStepUp(t, srv, "PUT", "/api/admin/clients/kynotes/launcher", cookie,
+		`{"description":"Notes","iconName":"`+iconName+`"}`); rr.Code != http.StatusOK {
+		t.Fatalf("launcher edit returned %d: %s", rr.Code, rr.Body.String())
+	}
+
+	grant := adminRequestNoStepUp(t, srv, "POST", "/api/auth/step-up", cookie, `{"password":"correct-horse-battery"}`)
+	var stepUp struct {
+		Token string `json:"stepUpToken"`
+	}
+	if err := json.Unmarshal(grant.Body.Bytes(), &stepUp); err != nil || stepUp.Token == "" {
+		t.Fatalf("step-up grant failed: %d %s", grant.Code, grant.Body.String())
+	}
+	if rr := adminRequestWithStepUp(t, srv, "DELETE", "/api/admin/clients/kynotes", cookie, "", stepUp.Token); rr.Code != http.StatusOK {
+		t.Fatalf("client delete returned %d: %s", rr.Code, rr.Body.String())
+	}
+	if icon, err := db.GetLauncherIcon(id); err != nil || icon != nil {
+		t.Errorf("icon survived its client: %v %v", icon, err)
+	}
+}
+
 func TestUploadedIconRejectsUnsafeContent(t *testing.T) {
 	srv, db, _, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
@@ -131,6 +190,10 @@ func TestUploadedIconRejectsUnsafeContent(t *testing.T) {
 		"svg with external ref": {"image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.test/x.png"/></svg>`},
 		"svg with entities":     {"image/svg+xml", `<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg">&x;</svg>`},
 		"not svg":               {"image/svg+xml", `<html xmlns="http://www.w3.org/1999/xhtml"></html>`},
+		"xsl stylesheet pi":     {"image/svg+xml", `<?xml-stylesheet href="https://evil.test/x.xsl" type="text/xsl"?><svg xmlns="http://www.w3.org/2000/svg"/>`},
+		"style import":          {"image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"><style>@import url("https://evil.test/x.css");</style></svg>`},
+		"style attr url":        {"image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill:url(https://evil.test/x.svg#p)"/></svg>`},
+		"animateTransform":      {"image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg"><rect><animateTransform attributeName="transform"/></rect></svg>`},
 	}
 	for name, c := range cases {
 		if rr := uploadIcon(t, srv, cookie, c.contentType, []byte(c.body)); rr.Code != http.StatusBadRequest {

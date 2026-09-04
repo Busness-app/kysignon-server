@@ -671,6 +671,7 @@ func (h *AdminHandler) DeleteOAuthClient(w http.ResponseWriter, r *http.Request)
 	// The delete, the revocation of every token this client issued, and the record of who
 	// did it are one commit. Reporting "deleted" for a client that is still registered and
 	// still serving is the failure mode that matters here: the admin stops looking.
+	client, _ := h.store.GetOAuthClientByID(clientID)
 	deleted := h.audit.Prepare("admin.oauth_client_deleted", admin.ID, admin.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 	removed, err := h.store.DeleteOAuthClient(clientID, deleted.Row)
 	if err != nil {
@@ -683,6 +684,9 @@ func (h *AdminHandler) DeleteOAuthClient(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	deleted.Committed()
+	if client != nil {
+		h.dropIcon(client.IconName)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})

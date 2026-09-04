@@ -208,7 +208,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/admin/applications", adminM(http.HandlerFunc(adminH.CreateApplication)))
 	mux.Handle("PUT /api/admin/applications/{id}", adminM(http.HandlerFunc(adminH.UpdateApplication)))
 	mux.Handle("DELETE /api/admin/applications/{id}", adminM(http.HandlerFunc(adminH.DeleteApplication)))
-	mux.Handle("POST /api/admin/icons", adminM(http.HandlerFunc(adminH.UploadIcon)))
+	mux.Handle("POST /api/admin/icons", adminM(s.middleware.RateLimit("icon_upload", 20, 0.1)(http.HandlerFunc(adminH.UploadIcon))))
 	mux.Handle("GET /api/icons/{id}", authM(http.HandlerFunc(adminH.ServeIcon)))
 
 	mux.Handle("GET /api/admin/audit-events", adminM(http.HandlerFunc(adminH.ListAuditEvents)))

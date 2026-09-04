@@ -157,6 +157,7 @@ func main() {
 			_ = dbStore.DeleteExpiredWebAuthnChallenges()
 			_ = dbStore.DeleteDeliveredSyncEvents(time.Now().UTC().Add(-7 * 24 * time.Hour))
 			_ = dbStore.DeleteAuditEventsOlderThan(time.Now().UTC().Add(-auditRetention))
+			_, _ = dbStore.DeleteOrphanedLauncherIcons(time.Hour)
 			if err := clearFirstRunPasswordFile(dbStore, cfg.DataDir); err != nil {
 				log.Printf("Housekeeping: %v", err)
 			}

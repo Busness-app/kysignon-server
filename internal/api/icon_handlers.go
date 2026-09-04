@@ -32,7 +32,8 @@ func (h *AdminHandler) iconAllowed(name string) bool {
 }
 
 // dropIcon removes an upload once nothing names it. Best effort: an orphaned blob is
-// wasted space, not a fault worth failing the admin's edit over.
+// wasted space, not a fault worth failing the admin's edit over, and the periodic
+// DeleteOrphanedLauncherIcons sweep catches whatever this misses.
 func (h *AdminHandler) dropIcon(name string) {
 	if !strings.HasPrefix(name, "icon:") {
 		return
@@ -43,9 +44,9 @@ func (h *AdminHandler) dropIcon(name string) {
 }
 
 // UploadIcon stores an image sent as the raw request body and returns the name a card uses
-// to reference it. Bitmaps are accepted on their bytes, not the declared type. SVG is
-// accepted only without scripts, event handlers, or references outside the file, and is
-// served under a CSP that forbids all of those anyway; the parse is the second lock.
+// to reference it. Bitmaps are accepted on their bytes, not the declared type. SVG goes
+// through checkSVG. The sandboxing CSP on ServeIcon and the <img> render context are the
+// control; the parse is the second lock, so a later header change does not open a hole.
 func (h *AdminHandler) UploadIcon(w http.ResponseWriter, r *http.Request) {
 	admin := GetUserFromContext(r.Context())
 	data, err := io.ReadAll(io.LimitReader(r.Body, maxIconBytes+1))
@@ -111,8 +112,16 @@ func iconContentType(data []byte, declared string) (string, error) {
 	return "", errors.New("Icon must be a PNG, JPEG, WebP, or SVG image")
 }
 
-// checkSVG walks the document and rejects anything that could run or fetch. Inline
-// <style> stays: it is how logos colour themselves and it cannot execute.
+// fetchesInCSS matches the two ways a stylesheet can reach outside the file.
+func fetchesInCSS(css string) bool {
+	lower := strings.ToLower(css)
+	return strings.Contains(lower, "url(") || strings.Contains(lower, "@import")
+}
+
+// checkSVG walks the document and rejects anything that could run or fetch: scripts,
+// event handlers, animation, entities, processing instructions (an XSL stylesheet is a
+// fetch), and any href, style attribute, or text that names a URL. Inline <style> stays
+// because it is how logos colour themselves, but not if it fetches.
 func checkSVG(data []byte) error {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.Strict = true
@@ -126,6 +135,12 @@ func checkSVG(data []byte) error {
 			return errors.New("SVG is not well-formed XML")
 		}
 		switch t := tok.(type) {
+		case xml.ProcInst:
+			return errors.New("SVG must not contain processing instructions")
+		case xml.CharData:
+			if fetchesInCSS(string(t)) {
+				return errors.New("SVG must not reference external resources")
+			}
 		case xml.Directive:
 			if bytes.HasPrefix(bytes.TrimSpace(t), []byte("DOCTYPE")) && bytes.Contains(t, []byte("ENTITY")) {
 				return errors.New("SVG must not declare entities")
@@ -139,7 +154,8 @@ func checkSVG(data []byte) error {
 				root = true
 			}
 			switch name {
-			case "script", "foreignobject", "iframe", "embed", "object", "handler", "animate", "set":
+			case "script", "foreignobject", "iframe", "embed", "object", "handler",
+				"animate", "animatetransform", "animatemotion", "set", "discard":
 				return errors.New("SVG must not contain <" + name + "> elements")
 			}
 			for _, attr := range t.Attr {
@@ -148,6 +164,9 @@ func checkSVG(data []byte) error {
 					return errors.New("SVG must not contain event handler attributes")
 				}
 				if attrName == "href" && !strings.HasPrefix(attr.Value, "#") && !strings.HasPrefix(attr.Value, "data:image/") {
+					return errors.New("SVG must not reference external resources")
+				}
+				if attrName == "style" && fetchesInCSS(attr.Value) {
 					return errors.New("SVG must not reference external resources")
 				}
 			}

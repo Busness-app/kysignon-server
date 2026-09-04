@@ -2021,6 +2021,20 @@ func (s *Store) DeleteLauncherIconIfUnused(iconName string) error {
 	return err
 }
 
+// DeleteOrphanedLauncherIcons reaps uploads no card names: a picker dialog closed without
+// saving leaves one behind, and so does any delete path that forgets to. The grace window
+// spares an upload whose card is still being filled in.
+func (s *Store) DeleteOrphanedLauncherIcons(olderThan time.Duration) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM launcher_icons WHERE created_at < ?
+		AND ('icon:' || id) NOT IN (SELECT icon_name FROM applications)
+		AND ('icon:' || id) NOT IN (SELECT icon_name FROM oauth_clients)`,
+		time.Now().UTC().Add(-olderThan))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // DeleteApplication removes a launcher entry and records the removal in the same
 // transaction, reporting whether a row actually went away.
 func (s *Store) DeleteApplication(id string, audit *AuditEvent) (bool, error) {

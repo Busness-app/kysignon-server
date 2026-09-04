@@ -3,13 +3,14 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/recoverykey"
+	"github.com/Busness-app/kysignon-server/internal/backup"
 	_ "modernc.org/sqlite"
 )
 
@@ -25,9 +26,9 @@ var destructiveAdminRoutes = []struct{ method, path, body string }{
 	{"PUT", "/api/admin/clients/kynotes", `{"rotateSecret":true}`},
 	{"DELETE", "/api/admin/clients/kynotes", ``},
 	{"POST", "/api/admin/systems", `{"name":"S","systemType":"scim","callbackUrl":"https://s.test/scim/v2"}`},
-	{"POST", "/api/admin/backup/recovery-kit", ``},
+	{"GET", "/api/admin/backup/export-capsule", ``},
 	{"POST", "/api/admin/backup/pair-remote", `{"recovery_url":"https://r.test","pairing_code":"123456"}`},
-	{"POST", "/api/admin/backup/push", ``},
+	{"POST", "/api/admin/backup/deposit", ``},
 }
 
 // A stolen admin cookie is the whole threat: it carries every privilege the real
@@ -57,37 +58,6 @@ func TestDestructiveAdminRoutesRequireStepUp(t *testing.T) {
 				t.Fatalf("expected step_up_required, got %v", body["error"])
 			}
 		})
-	}
-}
-
-// The capsule and the shards are the recovery quorum. Fetching them over GET does not make
-// them less secret than the POST that built them.
-func TestRecoveryArtifactDownloadsRequireStepUp(t *testing.T) {
-	srv, db, _, _, _, cleanup := setupTestServer(t)
-	defer cleanup()
-
-	admin := newUser(t, db, "admin")
-	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
-
-	rr := adminRequest(t, srv, "POST", "/api/admin/backup/recovery-kit", cookie, "")
-	if rr.Code != http.StatusOK {
-		t.Fatalf("kit creation failed: %d %s", rr.Code, rr.Body.String())
-	}
-	var kit struct {
-		KitID string `json:"kit_id"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &kit); err != nil || kit.KitID == "" {
-		t.Fatalf("no kit id: %v %s", err, rr.Body.String())
-	}
-
-	for _, path := range []string{
-		"/api/admin/backup/recovery-kit/" + kit.KitID + "/capsule",
-		"/api/admin/backup/recovery-kit/" + kit.KitID + "/shard/1",
-	} {
-		got := adminRequestNoStepUp(t, srv, "GET", path, cookie, "")
-		if got.Code != http.StatusForbidden {
-			t.Errorf("%s was served to a bare session: %d", path, got.Code)
-		}
 	}
 }
 
@@ -133,100 +103,6 @@ func TestNonDestructiveAdminRoutesStayReachable(t *testing.T) {
 	}
 }
 
-// With two administrators, neither may walk away holding a reconstructable set.
-func TestSecondAdminIsRequiredToCollectAQuorum(t *testing.T) {
-	srv, db, _, _, _, cleanup := setupTestServer(t)
-	defer cleanup()
-
-	adminA := newUser(t, db, "admin")
-	adminB := newUser(t, db, "admin")
-	cookieA := newSession(t, db, adminA, time.Now().UTC().Add(time.Hour))
-	cookieB := newSession(t, db, adminB, time.Now().UTC().Add(time.Hour))
-	_ = adminB
-
-	rr := adminRequest(t, srv, "POST", "/api/admin/backup/recovery-kit", cookieA, "")
-	if rr.Code != http.StatusOK {
-		t.Fatalf("kit creation failed: %d %s", rr.Code, rr.Body.String())
-	}
-	var kit struct {
-		KitID           string `json:"kit_id"`
-		Threshold       int    `json:"threshold"`
-		MaxPerCustodian int    `json:"max_per_custodian"`
-		SoleCustodian   bool   `json:"sole_custodian"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &kit); err != nil {
-		t.Fatal(err)
-	}
-	if kit.SoleCustodian {
-		t.Fatal("a two-administrator deployment reported itself as single-custodian")
-	}
-	if kit.MaxPerCustodian != kit.Threshold-1 {
-		t.Fatalf("max_per_custodian = %d, want threshold-1 = %d", kit.MaxPerCustodian, kit.Threshold-1)
-	}
-
-	shard := func(cookie string, i int) *httptest.ResponseRecorder {
-		return adminRequest(t, srv, "GET", fmt.Sprintf("/api/admin/backup/recovery-kit/%s/shard/%d", kit.KitID, i), cookie, "")
-	}
-
-	if got := shard(cookieA, 1); got.Code != http.StatusOK {
-		t.Fatalf("the first shard was refused: %d %s", got.Code, got.Body.String())
-	}
-	if got := shard(cookieA, 2); got.Code != http.StatusForbidden {
-		t.Fatalf("one administrator collected a quorum: %d %s", got.Code, got.Body.String())
-	}
-	if got := shard(cookieB, 2); got.Code != http.StatusOK {
-		t.Fatalf("the second custodian was refused: %d %s", got.Code, got.Body.String())
-	}
-	// A shard belongs to the one custodian who collected it. Retrying is for its holder;
-	// it is never a way for a second principal to accumulate a quorum.
-	if got := shard(cookieB, 1); got.Code != http.StatusForbidden {
-		t.Fatalf("a shard held by another administrator was served: %d %s", got.Code, got.Body.String())
-	}
-}
-
-// A single-admin homelab still needs a recovery kit; the alternative is no backup at all.
-// The relaxation is allowed, and recorded as the custody gap it is.
-func TestSoleAdminMayCollectAllShardsAndItIsAudited(t *testing.T) {
-	srv, db, _, _, _, cleanup := setupTestServer(t)
-	defer cleanup()
-
-	admin := newUser(t, db, "admin")
-	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
-
-	rr := adminRequest(t, srv, "POST", "/api/admin/backup/recovery-kit", cookie, "")
-	var kit struct {
-		KitID         string `json:"kit_id"`
-		TotalShares   int    `json:"total_shares"`
-		SoleCustodian bool   `json:"sole_custodian"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &kit); err != nil {
-		t.Fatal(err)
-	}
-	if !kit.SoleCustodian {
-		t.Fatal("a one-administrator deployment did not report itself as single-custodian")
-	}
-	for i := 1; i <= kit.TotalShares; i++ {
-		got := adminRequest(t, srv, "GET", fmt.Sprintf("/api/admin/backup/recovery-kit/%s/shard/%d", kit.KitID, i), cookie, "")
-		if got.Code != http.StatusOK {
-			t.Fatalf("shard %d refused for the only administrator: %d %s", i, got.Code, got.Body.String())
-		}
-	}
-
-	events, _, err := db.ListAuditEvents(200, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var warnings int
-	for _, e := range events {
-		if e.Action == "admin.backup_single_custodian_quorum" {
-			warnings++
-		}
-	}
-	if warnings != kit.TotalShares {
-		t.Errorf("recorded %d single-custodian warnings for %d shards", warnings, kit.TotalShares)
-	}
-}
-
 // Readiness must answer "can this instance authenticate someone", which /healthz never could.
 func TestReadinessReflectsDatabaseHealth(t *testing.T) {
 	srv, db, _, _, _, cleanup := setupTestServer(t)
@@ -268,23 +144,28 @@ func TestReadinessReflectsDatabaseHealth(t *testing.T) {
 	}
 }
 
-// An export whose durable record vanished is an unattributed disclosure of the recovery
-// quorum. Refusing is the only outcome that keeps the trail meaning anything.
+// An export whose durable record vanished is an unattributed disclosure of the whole
+// directory and its keys. Refusing is the only outcome that keeps the trail meaning anything.
 func TestSecretExportIsRefusedWhenTheAuditTrailCannotBeWritten(t *testing.T) {
+	priv, err := recoverykey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := newRecoveryClient
+	newRecoveryClient = func() recoveryClient {
+		return &fakeRecovery{result: backup.PairingResult{APIToken: "tok", Key: backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}}}
+	}
+	t.Cleanup(func() { newRecoveryClient = prev })
+
 	srv, db, _, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
 	admin := newUser(t, db, "admin")
 	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
-
-	rr := adminRequest(t, srv, "POST", "/api/admin/backup/recovery-kit", cookie, "")
+	rr := adminRequest(t, srv, "POST", "/api/admin/backup/pair-remote", cookie, `{"recovery_url":"https://recovery.example.test","pairing_code":"123456"}`)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("kit creation failed: %d %s", rr.Code, rr.Body.String())
+		t.Fatalf("pairing failed: %d %s", rr.Code, rr.Body.String())
 	}
-	var kit struct {
-		KitID string `json:"kit_id"`
-	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &kit)
 
 	// Break audit persistence the way a failing volume would: the write errors, everything
 	// else still works.
@@ -297,9 +178,9 @@ func TestSecretExportIsRefusedWhenTheAuditTrailCannotBeWritten(t *testing.T) {
 		t.Fatalf("could not break the audit table: %v", err)
 	}
 
-	got := adminRequest(t, srv, "GET", "/api/admin/backup/recovery-kit/"+kit.KitID+"/shard/1", cookie, "")
+	got := adminRequest(t, srv, "GET", "/api/admin/backup/export-capsule", cookie, "")
 	if got.Code != http.StatusServiceUnavailable {
-		t.Fatalf("a shard was exported with no audit record: %d %s", got.Code, got.Body.String())
+		t.Fatalf("a capsule was exported with no audit record: %d", got.Code)
 	}
 	if !strings.Contains(got.Body.String(), "audit_unavailable") {
 		t.Errorf("the refusal did not name the cause: %s", got.Body.String())

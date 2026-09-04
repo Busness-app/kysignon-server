@@ -92,36 +92,21 @@ export interface BackupDrillResult {
   error_message?: string;
 }
 
+export interface DepositReceipt {
+  capsuleId: string;
+  digest: string;
+  sizeBytes: number;
+  depositedAt: string;
+}
+
 export interface BackupStatus {
   paired: boolean;
   recovery_url?: string;
+  recovery_key_id?: string;
+  threshold?: number;
+  total_shares?: number;
+  last_deposit?: DepositReceipt;
+  deposit_interval_sec?: number;
   app_name: string;
   app_version: string;
-}
-
-
-export interface RecoveryShard {
-  index: number;
-  collected: boolean;
-  /** True when this administrator is the one already holding the shard. */
-  heldBySelf: boolean;
-}
-
-/**
- * A pending recovery kit. The capsule and each shard are collected separately, so this
- * carries only metadata — never key material.
- */
-export interface RecoveryKit {
-  kitId: string;
-  capsuleId: string;
-  payloadHash: string;
-  threshold: number;
-  totalShares: number;
-  capsuleSize: number;
-  expiresAt: string;
-  shards: RecoveryShard[];
-  /** The most shards one administrator may hold without being able to rebuild the key. */
-  maxPerCustodian: number;
-  /** True when this deployment has a single administrator, so custody cannot be split. */
-  soleCustodian: boolean;
 }

@@ -2,14 +2,19 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/capsule"
+	"github.com/Busness-app/ky-primitives/recoverykey"
 	"github.com/Busness-app/kysignon-server/internal/auth"
 	"github.com/Busness-app/kysignon-server/internal/backup"
 	"github.com/Busness-app/kysignon-server/internal/crypto"
@@ -17,220 +22,222 @@ import (
 	"github.com/google/uuid"
 )
 
+// fakeRecovery stands in for KyRecovery: the real client refuses non-HTTPS and private hosts,
+// so the handlers cannot be exercised against a test listener.
+type fakeRecovery struct {
+	result   backup.PairingResult
+	claimErr error
+	deposit  error
+	got      []byte
+}
+
+func (f *fakeRecovery) ClaimPairing(context.Context, string, string, string, string) (backup.PairingResult, error) {
+	return f.result, f.claimErr
+}
+
+func (f *fakeRecovery) Deposit(_ context.Context, _, _ string, container []byte) (backup.Receipt, error) {
+	f.got = container
+	if f.deposit != nil {
+		return backup.Receipt{}, f.deposit
+	}
+	m, err := capsule.ReadUnverifiedManifest(container)
+	if err != nil {
+		return backup.Receipt{}, err
+	}
+	sum := sha256.Sum256(container)
+	return backup.Receipt{CapsuleID: m.CapsuleID, Digest: hex.EncodeToString(sum[:]), SizeBytes: int64(len(container)), DepositedAt: time.Now().UTC()}, nil
+}
+
 func TestAdminBackupEndpoints(t *testing.T) {
+	priv, err := recoverykey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeRecovery{result: backup.PairingResult{APIToken: "kyrec_live_t", Key: backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}}}
+	prev := newRecoveryClient
+	newRecoveryClient = func() recoveryClient { return fake }
+	t.Cleanup(func() { newRecoveryClient = prev })
+
 	srv, dbStore, _, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	// Create admin user
 	adminPass := "AdminPassword123!"
 	passHash, _ := auth.HashPassword(adminPass)
 	adminUser := &store.User{
-		ID:           uuid.New().String(),
-		Username:     "admin_backup_test",
-		DisplayName:  "Admin Backup",
-		Email:        "admin@backup.test",
-		PasswordHash: passHash,
-		Role:         "admin",
-		Status:       "active",
+		ID: uuid.New().String(), Username: "admin_backup_test", DisplayName: "Admin Backup", Email: "admin@backup.test",
+		PasswordHash: passHash, Role: "admin", Status: "active",
 	}
 	if err := dbStore.CreateUser(adminUser); err != nil {
 		t.Fatalf("CreateUser failed: %v", err)
 	}
-
 	adminSessionToken, _ := crypto.GenerateRandomHex(32)
 	_ = dbStore.CreateSession(&store.Session{
-		ID:               uuid.New().String(),
-		UserID:           adminUser.ID,
-		SessionTokenHash: crypto.HashSHA256(adminSessionToken),
-		IPAddress:        "127.0.0.1",
-		UserAgent:        "Go-Test",
-		ExpiresAt:        time.Now().Add(24 * time.Hour),
+		ID: uuid.New().String(), UserID: adminUser.ID, SessionTokenHash: crypto.HashSHA256(adminSessionToken),
+		IPAddress: "127.0.0.1", UserAgent: "Go-Test", ExpiresAt: time.Now().Add(24 * time.Hour),
 	})
-
 	csrfToken := srv.middleware.IssueCSRFToken(adminSessionToken)
 	adminCookie := &http.Cookie{Name: "kysignon_session", Value: adminSessionToken}
 	csrfCookie := &http.Cookie{Name: "kysignon_csrf", Value: csrfToken}
-
-	// Every secret-bearing backup route consumes a single-use step-up grant, so each request
-	// below mints its own the way the UI prompts for one per action.
 	stepUp := func() string { return mintStepUp(t, srv, adminSessionToken) }
 
-	t.Run("Status endpoint", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/admin/backup/status", nil)
+	do := func(method, path string, body []byte, withStepUp bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
 		req.AddCookie(adminCookie)
-		w := httptest.NewRecorder()
-
-		srv.httpServer.Handler.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+		req.AddCookie(csrfCookie)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
 		}
+		if withStepUp {
+			req.Header.Set(StepUpHeader, stepUp())
+		}
+		w := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(w, req)
+		return w
+	}
+	auditHas := func(action, outcome string) bool {
+		events, _, err := dbStore.ListAuditEvents(100, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range events {
+			if e.Action == action && e.Outcome == outcome && e.ActorID == adminUser.ID {
+				return true
+			}
+		}
+		return false
+	}
 
+	t.Run("status before pairing", func(t *testing.T) {
+		w := do("GET", "/api/admin/backup/status", nil, false)
+		if w.Code != http.StatusOK {
+			t.Fatalf("got %d: %s", w.Code, w.Body.String())
+		}
 		var resp map[string]any
 		_ = json.NewDecoder(w.Body).Decode(&resp)
-		if resp["app_name"] != "KySignOn" {
-			t.Errorf("expected app_name KySignOn, got %v", resp["app_name"])
+		if resp["app_name"] != "KySignOn" || resp["paired"] != false {
+			t.Errorf("status %v", resp)
 		}
 	})
 
-	t.Run("Restore drill endpoint", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/admin/backup/drill", nil)
-		req.AddCookie(adminCookie)
-		req.AddCookie(csrfCookie)
-		req.Header.Set("X-CSRF-Token", csrfToken)
-		w := httptest.NewRecorder()
-
-		srv.httpServer.Handler.ServeHTTP(w, req)
+	t.Run("drill runs unpaired and says so", func(t *testing.T) {
+		w := do("POST", "/api/admin/backup/drill", nil, false)
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+			t.Fatalf("got %d: %s", w.Code, w.Body.String())
 		}
-
-		var drillResult backup.DrillResult
-		if err := json.NewDecoder(w.Body).Decode(&drillResult); err != nil {
-			t.Fatalf("failed to decode drill result: %v", err)
-		}
-		if !drillResult.Passed {
-			t.Errorf("expected drill to pass, got error: %s", drillResult.ErrorMessage)
+		var result backup.DrillResult
+		_ = json.NewDecoder(w.Body).Decode(&result)
+		if result.Passed {
+			t.Error("unpaired drill passed")
 		}
 	})
 
-	t.Run("Recovery kit separates the capsule from each shard", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/api/admin/backup/recovery-kit", nil)
-		req.AddCookie(adminCookie)
-		req.AddCookie(csrfCookie)
-		req.Header.Set("X-CSRF-Token", csrfToken)
-		req.Header.Set(StepUpHeader, stepUp())
-		w := httptest.NewRecorder()
-		srv.httpServer.Handler.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	t.Run("export and deposit refuse while unpaired", func(t *testing.T) {
+		if w := do("GET", "/api/admin/backup/export-capsule", nil, true); w.Code != http.StatusPreconditionFailed {
+			t.Errorf("export: got %d: %s", w.Code, w.Body.String())
 		}
-
-		var kit struct {
-			KitID       string `json:"kit_id"`
-			Threshold   int    `json:"threshold"`
-			TotalShares int    `json:"total_shares"`
-			CapsuleSize int    `json:"capsule_size"`
+		if w := do("POST", "/api/admin/backup/deposit", nil, true); w.Code != http.StatusPreconditionFailed {
+			t.Errorf("deposit: got %d: %s", w.Code, w.Body.String())
 		}
-		if err := json.NewDecoder(w.Body).Decode(&kit); err != nil {
-			t.Fatalf("failed to decode kit: %v", err)
-		}
-		if kit.KitID == "" || kit.CapsuleSize == 0 {
-			t.Fatalf("kit response carries no capsule: %+v", kit)
-		}
-
-		// The capsule download must contain real ciphertext. A kit whose container is
-		// absent is the failure the whole feature was built to avoid.
-		capReq := httptest.NewRequest("GET", "/api/admin/backup/recovery-kit/"+kit.KitID+"/capsule", nil)
-		capReq.AddCookie(adminCookie)
-		capReq.Header.Set(StepUpHeader, stepUp())
-		capW := httptest.NewRecorder()
-		srv.httpServer.Handler.ServeHTTP(capW, capReq)
-		if capW.Code != http.StatusOK {
-			t.Fatalf("capsule download failed: %d %s", capW.Code, capW.Body.String())
-		}
-		parsed, err := backup.ParseCapsule(capW.Body.Bytes())
-		if err != nil {
-			t.Fatalf("downloaded capsule is not readable: %v", err)
-		}
-		if len(parsed.Ciphertext) == 0 {
-			t.Fatal("downloaded capsule has no ciphertext")
-		}
-		if len(parsed.Shares) != 0 {
-			t.Fatalf("the capsule download also carried %d key shards", len(parsed.Shares))
-		}
-
-		// Each shard is its own download, bound to the custodian who collected it. A repeat
-		// fetch by that same holder must succeed: a failed response — audit write, full
-		// disk, dropped connection — cannot be allowed to destroy the only copy of a
-		// recovery shard.
-		var cards []string
-		for i := 1; i <= kit.TotalShares; i++ {
-			shardReq := httptest.NewRequest("GET", fmt.Sprintf("/api/admin/backup/recovery-kit/%s/shard/%d", kit.KitID, i), nil)
-			shardReq.AddCookie(adminCookie)
-			shardReq.Header.Set(StepUpHeader, stepUp())
-			shardW := httptest.NewRecorder()
-			srv.httpServer.Handler.ServeHTTP(shardW, shardReq)
-			if shardW.Code != http.StatusOK {
-				t.Fatalf("shard %d download failed: %d %s", i, shardW.Code, shardW.Body.String())
-			}
-			cards = append(cards, shardW.Body.String())
-
-			replay := httptest.NewRequest("GET", fmt.Sprintf("/api/admin/backup/recovery-kit/%s/shard/%d", kit.KitID, i), nil)
-			replay.AddCookie(adminCookie)
-			replay.Header.Set(StepUpHeader, stepUp())
-			replayW := httptest.NewRecorder()
-			srv.httpServer.Handler.ServeHTTP(replayW, replay)
-			if replayW.Code != http.StatusOK {
-				t.Errorf("the holder of shard %d could not retry a failed download: %d %s", i, replayW.Code, replayW.Body.String())
-			}
-			if replayW.Body.String() != shardW.Body.String() {
-				t.Errorf("the retry of shard %d returned different material", i)
-			}
-		}
-
-		// No single artifact may contain a quorum.
-		for i, card := range cards {
-			shard := shardHexFromCard(t, card)
-			for j, other := range cards {
-				if i == j {
-					continue
-				}
-				if strings.Contains(other, shard) {
-					t.Fatalf("custodian document %d also contains shard %d", j+1, i+1)
-				}
-			}
-			if strings.Contains(capW.Body.String(), shard) {
-				t.Fatalf("the capsule download contains shard %d", i+1)
-			}
+		if fake.got != nil {
+			t.Error("bytes were sent while unpaired")
 		}
 	})
 
-	t.Run("Pairing refuses internal and non-https recovery URLs", func(t *testing.T) {
-		// The recovery URL is admin-supplied, so it is a request forgery primitive unless
-		// it is constrained. None of these may produce an outbound request.
-		for _, target := range []string{
-			"http://169.254.169.254/latest/meta-data/",
-			"http://127.0.0.1:9999",
-			"https://10.89.0.2/api",
-			"file:///etc/passwd",
-			"https://user:pass@recovery.example.test",
-			"https://recovery.example.test#fragment",
-			"not a url",
-		} {
+	t.Run("pairing refuses internal and non-https recovery URLs", func(t *testing.T) {
+		for _, target := range []string{"http://recovery.example.test", "https://127.0.0.1:8095", "https://10.0.0.5", "https://user:pw@recovery.example.test", "https://recovery.example.test/#frag", "https://recovery.example.test/?a=b"} {
 			body, _ := json.Marshal(map[string]string{"recovery_url": target, "pairing_code": "123456"})
-			req := httptest.NewRequest("POST", "/api/admin/backup/pair-remote", bytes.NewReader(body))
-			req.AddCookie(adminCookie)
-			req.AddCookie(csrfCookie)
-			req.Header.Set("X-CSRF-Token", csrfToken)
-			req.Header.Set(StepUpHeader, stepUp())
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-			srv.httpServer.Handler.ServeHTTP(w, req)
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("recovery URL %q was not rejected (status %d)", target, w.Code)
+			if w := do("POST", "/api/admin/backup/pair-remote", body, true); w.Code != http.StatusBadRequest {
+				t.Errorf("%s: got %d: %s", target, w.Code, w.Body.String())
 			}
-			if stored, _ := dbStore.GetSetting("kyrecovery_url"); stored != "" {
-				t.Fatalf("recovery URL %q was persisted despite being rejected", target)
+		}
+		if auditHas("admin.backup_remote_pair", "success") {
+			t.Error("a refused URL was audited as a pairing")
+		}
+	})
+
+	t.Run("pairing pins the key and stores the sealed token", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]string{"recovery_url": "https://recovery.example.test", "pairing_code": "123456"})
+		w := do("POST", "/api/admin/backup/pair-remote", body, true)
+		if w.Code != http.StatusOK {
+			t.Fatalf("got %d: %s", w.Code, w.Body.String())
+		}
+		var resp map[string]any
+		_ = json.NewDecoder(w.Body).Decode(&resp)
+		if resp["recovery_key_id"] != priv.Public().ID() {
+			t.Errorf("pair response %v", resp)
+		}
+		if !auditHas("admin.backup_remote_pair", "success") {
+			t.Error("pairing not audited")
+		}
+		if v, _ := dbStore.GetSetting("kyrecovery_token_enc"); v == "" || strings.Contains(v, "kyrec_live_t") {
+			t.Errorf("token stored as %q", v)
+		}
+		// Re-pairing to a different key must not silently re-point the instance.
+		other, _ := recoverykey.Generate()
+		fake.result = backup.PairingResult{APIToken: "tok2", Key: backup.RecoveryKey{Public: other.Public(), Threshold: 2, TotalShares: 3}}
+		if w := do("POST", "/api/admin/backup/pair-remote", body, true); w.Code != http.StatusConflict {
+			t.Errorf("re-pair: got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("deposit seals to the pinned key, records the receipt, audits", func(t *testing.T) {
+		w := do("POST", "/api/admin/backup/deposit", nil, true)
+		if w.Code != http.StatusOK {
+			t.Fatalf("got %d: %s", w.Code, w.Body.String())
+		}
+		var rcpt backup.Receipt
+		_ = json.NewDecoder(w.Body).Decode(&rcpt)
+		if _, files, err := capsule.Open(fake.got, priv, t.TempDir()); err != nil || len(files) < 5 {
+			t.Fatalf("what the store received does not open with the suite key: %v", err)
+		}
+		if last, ok, _ := backup.LastDeposit(dbStore); !ok || last.CapsuleID != rcpt.CapsuleID {
+			t.Errorf("last deposit %+v %v", last, ok)
+		}
+		if !auditHas("admin.backup_deposit", "success") {
+			t.Error("deposit not audited")
+		}
+		fake.deposit = errors.New(backup.ErrRemote.Error() + ": deposit rejected (429)")
+		fake.deposit = errors.Join(backup.ErrRemote, fake.deposit)
+		if w := do("POST", "/api/admin/backup/deposit", nil, true); w.Code != http.StatusBadGateway {
+			t.Errorf("refused deposit: got %d: %s", w.Code, w.Body.String())
+		}
+		if again, _, _ := backup.LastDeposit(dbStore); again.CapsuleID != rcpt.CapsuleID {
+			t.Error("a refused deposit replaced the last receipt")
+		}
+		fake.deposit = nil
+	})
+
+	t.Run("export is a sealed capsule and is audited", func(t *testing.T) {
+		w := do("GET", "/api/admin/backup/export-capsule", nil, true)
+		if w.Code != http.StatusOK {
+			t.Fatalf("got %d: %s", w.Code, w.Body.String())
+		}
+		if _, _, err := capsule.Open(w.Body.Bytes(), priv, t.TempDir()); err != nil {
+			t.Fatalf("export does not open with the suite key: %v", err)
+		}
+		if w.Header().Get("X-Recovery-Key-ID") != priv.Public().ID() {
+			t.Errorf("header %q", w.Header().Get("X-Recovery-Key-ID"))
+		}
+		if !auditHas("admin.backup_capsule_export", "success") {
+			t.Error("export not audited")
+		}
+	})
+
+	t.Run("status after pairing", func(t *testing.T) {
+		w := do("GET", "/api/admin/backup/status", nil, false)
+		var resp map[string]any
+		_ = json.NewDecoder(w.Body).Decode(&resp)
+		if resp["paired"] != true || resp["recovery_key_id"] != priv.Public().ID() || resp["last_deposit"] == nil {
+			t.Errorf("status %v", resp)
+		}
+	})
+
+	t.Run("step-up is required on the secret-bearing routes", func(t *testing.T) {
+		for _, tc := range []struct{ method, path string }{{"GET", "/api/admin/backup/export-capsule"}, {"POST", "/api/admin/backup/deposit"}, {"POST", "/api/admin/backup/pair-remote"}} {
+			if w := do(tc.method, tc.path, []byte(`{}`), false); w.Code != http.StatusForbidden && w.Code != http.StatusUnauthorized {
+				t.Errorf("%s %s without step-up: got %d", tc.method, tc.path, w.Code)
 			}
 		}
 	})
-}
-
-// shardHexFromCard reads the shard off a custodian document the way a custodian would.
-func shardHexFromCard(t *testing.T, card string) string {
-	t.Helper()
-	start := strings.Index(card, "<code>")
-	if start < 0 {
-		t.Fatal("custodian card contains no shard")
-	}
-	start += len("<code>")
-	end := strings.Index(card[start:], "</code>")
-	if end < 0 {
-		t.Fatal("custodian card shard is unterminated")
-	}
-	shard := strings.TrimSpace(card[start : start+end])
-	if len(shard) < 32 {
-		t.Fatalf("custodian card shard %q looks too short to be a key share", shard)
-	}
-	return shard
 }

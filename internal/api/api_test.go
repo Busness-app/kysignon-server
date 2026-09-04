@@ -54,6 +54,7 @@ func setupTestServer(t *testing.T) (*Server, *store.Store, *sync.Engine, *mfa.En
 		RSAKeyPath:    keyPath,
 		EncryptionKey: encKey,
 		SecretKey:     encKey,
+		AppName:       config.DefaultAppName,
 	}
 
 	auditLogger := audit.NewLogger(dbStore)
@@ -450,6 +451,7 @@ func setupTestServerWith(t *testing.T, opts ...func(*config.Config)) (*Server, *
 		RSAKeyPath:    keyPath,
 		EncryptionKey: encKey,
 		SecretKey:     encKey,
+		AppName:       config.DefaultAppName,
 	}
 	for _, opt := range opts {
 		opt(cfg)

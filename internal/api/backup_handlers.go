@@ -1,12 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"net/http"
-	"strconv"
+	"time"
 
+	"github.com/Busness-app/ky-primitives/capsule"
 	"github.com/Busness-app/kysignon-server/internal/audit"
 	"github.com/Busness-app/kysignon-server/internal/backup"
 	"github.com/Busness-app/kysignon-server/internal/config"
@@ -16,23 +20,36 @@ import (
 // appVersion is reported in capsule manifests and status responses.
 const appVersion = "1.0.0"
 
-type BackupHandler struct {
-	cfg            *config.Config
-	store          *store.Store
-	audit          *audit.Logger
-	middleware     *MiddlewareManager
-	recoveryClient *backup.KyRecoveryClient
-	kits           *backup.KitStore
+// depositWriteBudget is how long the admin's connection may stay open for the receipt: the
+// upload budget plus room for sealing. The listener's write timeout is sized for JSON replies.
+const depositWriteBudget = 16 * time.Minute
+
+// recoveryClient is the KyRecovery client as the handlers use it, narrowed so tests can stand
+// in a fake without reaching the network.
+type recoveryClient interface {
+	ClaimPairing(ctx context.Context, serverURL, pairingCode, serviceName, appName string) (backup.PairingResult, error)
+	backup.Depositor
 }
+
+type BackupHandler struct {
+	cfg        *config.Config
+	store      *store.Store
+	audit      *audit.Logger
+	middleware *MiddlewareManager
+	recovery   recoveryClient
+}
+
+// newRecoveryClient builds the KyRecovery client; tests swap in a fake, since the real one
+// refuses loopback and plain HTTP by design.
+var newRecoveryClient = func() recoveryClient { return backup.NewKyRecoveryClient() }
 
 func NewBackupHandler(cfg *config.Config, s *store.Store, audit *audit.Logger, mm *MiddlewareManager) *BackupHandler {
 	return &BackupHandler{
-		cfg:            cfg,
-		store:          s,
-		audit:          audit,
-		middleware:     mm,
-		recoveryClient: backup.NewKyRecoveryClient(),
-		kits:           backup.NewKitStore(),
+		cfg:        cfg,
+		store:      s,
+		audit:      audit,
+		middleware: mm,
+		recovery:   newRecoveryClient(),
 	}
 }
 
@@ -43,12 +60,15 @@ func (h *BackupHandler) actor(r *http.Request) (string, string) {
 	return "", ""
 }
 
+func (h *BackupHandler) record(r *http.Request, action, actorID, actorName, targetID, outcome string, details map[string]any) error {
+	return h.audit.Record(action, actorID, actorName, targetID, "backup", h.middleware.ClientIP(r), r.UserAgent(), outcome, details)
+}
+
 // recordCritical writes an audit event for an operation that must not proceed unrecorded.
-// A secret leaving this server with no durable record of who took it is not an export, it is
+// A capsule leaving this server with no durable record of who took it is not an export, it is
 // an unattributed disclosure, so the caller aborts when this returns false.
-func (h *BackupHandler) recordCritical(w http.ResponseWriter, action, actorID, actorName, targetID string, r *http.Request, outcome string, details map[string]any) bool {
-	if err := h.audit.Record(action, actorID, actorName, targetID, "backup",
-		h.middleware.ClientIP(r), r.UserAgent(), outcome, details); err != nil {
+func (h *BackupHandler) recordCritical(w http.ResponseWriter, r *http.Request, action, actorID, actorName, targetID, outcome string, details map[string]any) bool {
+	if err := h.record(r, action, actorID, actorName, targetID, outcome, details); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"error": "audit_unavailable",
 			"error_description": "The audit trail could not be written, so this operation was refused. " +
@@ -65,218 +85,86 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// buildCapsule collects a consistent snapshot and encapsulates it.
-func (h *BackupHandler) buildCapsule() (*backup.Capsule, []byte, error) {
-	payload, err := backup.BuildLocalPayload(h.cfg, h.store, appVersion)
-	if err != nil {
-		return nil, nil, err
-	}
-	files, err := backup.AsBackupFiles(payload)
-	if err != nil {
-		return nil, nil, err
-	}
-	return backup.CreateCapsule("KySignOn", appVersion, files,
-		payload.Dependencies, payload.VerificationRecipe, payload.Threshold, payload.TotalShares)
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// RunDrill executes an automated live disaster recovery restore drill inside a temporary isolated sandbox.
+// RunDrill seals the live payload to a throwaway key, opens it in a sandbox and runs the
+// verification recipe. It reports, not proves, whether the suite key is pinned.
 func (h *BackupHandler) RunDrill(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
-
 	adminID, adminUsername := h.actor(r)
-
-	capsule, key, err := h.buildCapsule()
+	payload, err := backup.CollectSealable(h.cfg, h.store, appVersion)
 	if err != nil {
-		h.audit.Record("admin.backup_drill_run", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
-			"error": err.Error(),
-		})
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Failed to build backup capsule: " + err.Error()})
+		_ = h.record(r, "admin.backup_drill_run", adminID, adminUsername, "", "failure", map[string]any{"error": backup.AuditSafe(err.Error())})
+		writeError(w, http.StatusInternalServerError, "Failed to collect backup payload: "+err.Error())
 		return
 	}
-
-	drillResult, err := backup.RunRestoreDrill(r.Context(), capsule, key)
-	if err != nil {
-		h.audit.Record("admin.backup_drill_run", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
-			"error": err.Error(),
-		})
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Failed to execute restore drill: " + err.Error()})
+	pinned, err := backup.LoadRecoveryKey(h.cfg.DataDir, h.store)
+	if err != nil && !errors.Is(err, backup.ErrNotPaired) {
+		writeError(w, http.StatusInternalServerError, "Failed to load recovery key: "+err.Error())
 		return
 	}
-
+	result, err := backup.RunRestoreDrill(r.Context(), payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, pinned)
+	if err != nil {
+		_ = h.record(r, "admin.backup_drill_run", adminID, adminUsername, "", "failure", map[string]any{"error": backup.AuditSafe(err.Error())})
+		writeError(w, http.StatusInternalServerError, "Failed to execute restore drill: "+err.Error())
+		return
+	}
 	outcome := "success"
-	if !drillResult.Passed {
+	if !result.Passed {
 		outcome = "failure"
 	}
-	h.audit.Record("admin.backup_drill_run", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), outcome, map[string]any{
-		"passed":      drillResult.Passed,
-		"duration_ms": drillResult.DurationMS,
-	})
-
-	writeJSON(w, http.StatusOK, drillResult)
+	_ = h.record(r, "admin.backup_drill_run", adminID, adminUsername, "", outcome, map[string]any{"passed": result.Passed, "duration_ms": result.DurationMS})
+	writeJSON(w, http.StatusOK, result)
 }
 
-// CreateRecoveryKit builds the capsule and registers its artifacts for separate collection.
-//
-// It deliberately returns no secret material. The encrypted container and each custodian
-// shard are fetched by their own authenticated requests, so no single response or file ever
-// contains a reconstruction quorum.
-func (h *BackupHandler) CreateRecoveryKit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
+// ExportCapsule hands the operator the capsule sealed to the suite recovery key. Only the
+// custodians' shares open it, so the download is safe to store anywhere; kyrecovery is where
+// it belongs. The export is refused rather than served unrecorded.
+func (h *BackupHandler) ExportCapsule(w http.ResponseWriter, r *http.Request) {
 	adminID, adminUsername := h.actor(r)
-
-	capsule, _, err := h.buildCapsule()
+	key, err := backup.LoadRecoveryKey(h.cfg.DataDir, h.store)
+	if errors.Is(err, backup.ErrNotPaired) {
+		writeError(w, http.StatusPreconditionFailed, "Not paired with KyRecovery; no recovery key to seal to")
+		return
+	}
+	if errors.Is(err, backup.ErrRecoveryKeyMismatch) {
+		writeError(w, http.StatusConflict, "Recovery key file does not match the pinned key ID; refusing to seal")
+		return
+	}
 	if err != nil {
-		h.audit.Record("admin.backup_recovery_kit_create", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
-			"error": err.Error(),
-		})
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Failed to build recovery kit: " + err.Error()})
+		writeError(w, http.StatusInternalServerError, "Failed to load recovery key")
 		return
 	}
-
-	kit, err := h.kits.Create(capsule)
+	payload, err := backup.CollectSealable(h.cfg, h.store, appVersion)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, "Failed to collect backup payload: "+err.Error())
 		return
 	}
-
-	admins, err := h.store.CountAdmins()
+	raw, m, err := backup.Seal(payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, key)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Failed to read the administrator directory"})
-		return
-	}
-
-	if !h.recordCritical(w, "admin.backup_recovery_kit_create", adminID, adminUsername, kit.Manifest.CapsuleID, r, "success", map[string]any{
-		"capsule_id":        kit.Manifest.CapsuleID,
-		"kit_id":            kit.ID,
-		"active_admins":     admins,
-		"max_per_custodian": kit.MaxPerCustodian(),
-	}) {
-		h.kits.Discard(kit.ID)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"kit_id":            kit.ID,
-		"capsule_id":        kit.Manifest.CapsuleID,
-		"payload_hash":      kit.Manifest.PayloadHash,
-		"threshold":         kit.Manifest.Threshold,
-		"total_shares":      kit.Manifest.TotalShares,
-		"capsule_size":      len(kit.Capsule),
-		"expires_at":        kit.ExpiresAt,
-		"shards":            kit.Shards(adminID),
-		"max_per_custodian": kit.MaxPerCustodian(),
-		// Surfaced so the UI can say plainly which shards this administrator will be refused
-		// and why, instead of offering buttons that fail.
-		"sole_custodian": admins <= 1,
-	})
-}
-
-// DownloadCapsule serves the encrypted .kycap container. This is the artifact the previous
-// "self-contained kit" never included, which made every exported key shard useless.
-func (h *BackupHandler) DownloadCapsule(w http.ResponseWriter, r *http.Request) {
-	adminID, adminUsername := h.actor(r)
-	kit, err := h.kits.Get(r.PathValue("id"))
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
-		return
-	}
-
-	if !h.recordCritical(w, "admin.backup_capsule_download", adminID, adminUsername, kit.Manifest.CapsuleID, r, "success", map[string]any{
-		"capsule_id": kit.Manifest.CapsuleID,
-	}) {
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, kit.Manifest.CapsuleID+".kycap"))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(kit.Capsule)
-}
-
-// DownloadShard serves one custodian shard to the custodian it belongs to.
-//
-// A failed response must never cost the operator the shard, so the fetch is idempotent: the
-// holder may retry until the kit expires, and no other principal is ever served it. That is
-// what makes it safe to refuse the request when the audit write fails below — refusing
-// destroys nothing.
-func (h *BackupHandler) DownloadShard(w http.ResponseWriter, r *http.Request) {
-	adminID, adminUsername := h.actor(r)
-
-	index, err := strconv.Atoi(r.PathValue("index"))
-	if err != nil || index <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "shard index must be a positive integer"})
-		return
-	}
-	kitID := r.PathValue("id")
-	kit, err := h.kits.Get(kitID)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
-		return
-	}
-	// One administrator clicking three times is not three custodians. A principal is capped
-	// at threshold-1 shards so no single session can ever assemble a quorum, except where the
-	// deployment genuinely has one administrator and the alternative is no recovery kit at
-	// all; that case is allowed and recorded as such.
-	admins, err := h.store.CountAdmins()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Failed to read the administrator directory"})
-		return
-	}
-	soleCustodian := admins <= 1
-
-	share, err := h.kits.TakeShard(kitID, index, adminID, soleCustodian)
-	if err != nil {
-		status := http.StatusNotFound
-		if errors.Is(err, backup.ErrCustodyQuorum) || errors.Is(err, backup.ErrNoCustodian) || errors.Is(err, backup.ErrShardHeld) {
-			status = http.StatusForbidden
+		log.Printf("[BACKUP] export capsule: seal failed: %s", backup.AuditSafe(err.Error()))
+		if errors.Is(err, capsule.ErrCapsuleTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, backup.TooLargeMessage)
+			return
 		}
-		h.audit.Record("admin.backup_shard_download", adminID, adminUsername, kit.Manifest.CapsuleID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{
-			"shard_index": index,
-			"error":       err.Error(),
-		})
-		writeJSON(w, status, map[string]any{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, "Failed to seal capsule")
 		return
 	}
-
-	if !h.recordCritical(w, "admin.backup_shard_download", adminID, adminUsername, kit.Manifest.CapsuleID, r, "success", map[string]any{
-		"capsule_id":     kit.Manifest.CapsuleID,
-		"shard_index":    index,
-		"sole_custodian": soleCustodian,
+	if !h.recordCritical(w, r, "admin.backup_capsule_export", adminID, adminUsername, m.CapsuleID, "success", map[string]any{
+		"capsule_id": m.CapsuleID, "recovery_key_id": m.RecoveryKeyID, "size_bytes": len(raw),
 	}) {
 		return
 	}
-	if soleCustodian {
-		// Deliberately its own event. A deployment where one principal holds the whole quorum
-		// has no custody separation, and that fact should be searchable in the trail rather
-		// than buried in a detail field.
-		h.audit.Record("admin.backup_single_custodian_quorum", adminID, adminUsername, kit.Manifest.CapsuleID, "backup",
-			h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
-				"shard_index": index,
-				"reason":      "only one active administrator exists; add a second to restore 2-of-3 custody separation",
-			})
-	}
-
-	html := backup.GenerateCustodianCardHTML(kit.Manifest, share, "KySignOn", h.cfg.IssuerURL)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`,
-		fmt.Sprintf("kysignon-custodian-shard-%d.html", index)))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.kycap"`, backup.FilenameSafe(m.CapsuleID)))
+	w.Header().Set("X-Recovery-Key-ID", m.RecoveryKeyID)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(html))
-}
-
-// DiscardRecoveryKit zeroizes any shards the operator did not collect.
-func (h *BackupHandler) DiscardRecoveryKit(w http.ResponseWriter, r *http.Request) {
-	adminID, adminUsername := h.actor(r)
-	kitID := r.PathValue("id")
-	h.kits.Discard(kitID)
-	h.audit.Record("admin.backup_recovery_kit_discard", adminID, adminUsername, kitID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
-	writeJSON(w, http.StatusOK, map[string]any{"discarded": true})
+	_, _ = w.Write(raw)
 }
 
 type RemotePairRequest struct {
@@ -284,135 +172,137 @@ type RemotePairRequest struct {
 	PairingCode string `json:"pairing_code"`
 }
 
-// PairRemote pairs KySignOn with a remote KyRecovery instance via ephemeral 6-digit PIN.
+// PairRemote claims a 6-digit PIN with KyRecovery, pins the suite recovery public key it
+// hands back, and stores the URL and the sealed bearer token.
 func (h *BackupHandler) PairRemote(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
-
-	admin := GetUserFromContext(r.Context())
-	var adminID, adminUsername string
-	if admin != nil {
-		adminID = admin.ID
-		adminUsername = admin.Username
-	}
-
+	adminID, adminUsername := h.actor(r)
 	var req RemotePairRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON request body"})
+		writeError(w, http.StatusBadRequest, "Invalid JSON request body")
 		return
 	}
-
 	if req.RecoveryURL == "" || req.PairingCode == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Both recovery_url and pairing_code are required"})
+		writeError(w, http.StatusBadRequest, "Both recovery_url and pairing_code are required")
 		return
 	}
-
 	// Validated here as well as in the client so a bad URL is rejected before it is stored
 	// or audited as a pairing attempt.
 	if err := backup.ValidateRecoveryURL(req.RecoveryURL); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	target := backup.AuditSafe(req.RecoveryURL)
+	fail := func(status int, msg string) {
+		_ = h.record(r, "admin.backup_remote_pair", adminID, adminUsername, target, "failure", map[string]any{"recovery_url": target, "error": backup.AuditSafe(msg)})
+		writeError(w, status, msg)
+	}
 
-	token, err := h.recoveryClient.ClaimPairing(r.Context(), req.RecoveryURL, req.PairingCode, "KySignOn")
+	// The service name sent here is what kyrecovery pins for the token and what every
+	// capsule's manifest is checked against, so it is the same AppName the collector seals under.
+	result, err := h.recovery.ClaimPairing(r.Context(), req.RecoveryURL, req.PairingCode, h.cfg.AppName, h.cfg.AppName)
 	if err != nil {
-		h.audit.Record("admin.backup_remote_pair", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
-			"recovery_url": req.RecoveryURL,
-			"error":        err.Error(),
+		fail(http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := backup.StoreRecoveryKey(h.cfg.DataDir, h.store, result.Key); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			fail(http.StatusConflict, "Already paired to a different recovery key")
+			return
+		}
+		fail(http.StatusInternalServerError, "Failed to save recovery key")
+		return
+	}
+	// The pin is now on disk whatever happens next, so it is recorded whatever happens next:
+	// a write-once pin that exists nowhere in the audit trail is the gap this closes.
+	if err := backup.StorePairing(h.store, h.cfg.EncryptionKey, req.RecoveryURL, result.APIToken); err != nil {
+		_ = h.record(r, "admin.backup_remote_pair", adminID, adminUsername, target, "failure", map[string]any{
+			"recovery_url": target, "recovery_key_id": result.Key.Public.ID(), "error": "key pinned but the pairing was not stored: " + backup.AuditSafe(err.Error()),
 		})
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, "Failed to persist recovery pairing")
 		return
 	}
-
-	// A pairing that cannot be persisted is not a pairing. Reporting success here would
-	// leave the admin believing KyRecovery is configured when the next push has no token.
-	if err := backup.SaveRecoveryURL(h.store, req.RecoveryURL); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to persist recovery URL: " + err.Error()})
-		return
-	}
-	// Encrypted under a key derived for this setting alone. This is the standing credential
-	// to the service holding every historical identity backup; a single database disclosure
-	// must not hand it over.
-	if err := backup.SaveRecoveryToken(h.store, h.cfg.EncryptionKey, token); err != nil {
-		backup.ClearRecoveryPairing(h.store)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to persist recovery token: " + err.Error()})
-		return
-	}
-
-	h.audit.Record("admin.backup_remote_pair", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
-		"recovery_url": req.RecoveryURL,
+	_ = h.record(r, "admin.backup_remote_pair", adminID, adminUsername, target, "success", map[string]any{
+		"recovery_url": target, "recovery_key_id": result.Key.Public.ID(), "threshold": result.Key.Threshold, "total_shares": result.Key.TotalShares,
 	})
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"paired":       true,
-		"recovery_url": req.RecoveryURL,
-	})
-}
-
-// PushBackup dispatches a backup capsule to the configured KyRecovery server.
-func (h *BackupHandler) PushBackup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method_not_allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	admin := GetUserFromContext(r.Context())
-	var adminID, adminUsername string
-	if admin != nil {
-		adminID = admin.ID
-		adminUsername = admin.Username
-	}
-
-	recURL, _ := backup.LoadRecoveryURL(h.store)
-	recToken, err := backup.LoadRecoveryToken(h.store, h.cfg.EncryptionKey)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if recURL == "" || recToken == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "KyRecovery is not paired"})
-		return
-	}
-
-	payload, err := backup.BuildLocalPayload(h.cfg, h.store, appVersion)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to collect backup payload: " + err.Error()})
-		return
-	}
-
-	resp, err := h.recoveryClient.PushBackup(r.Context(), recURL, recToken, *payload)
-	if err != nil {
-		h.audit.Record("admin.backup_remote_push", adminID, adminUsername, "", "backup", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
-			"recovery_url": recURL,
-			"error":        err.Error(),
-		})
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-
-	h.audit.Record("admin.backup_remote_push", adminID, adminUsername, resp.CapsuleID, "backup", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
-		"capsule_id": resp.CapsuleID,
-		"size_bytes": resp.SizeBytes,
-	})
-
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// Status returns current disaster recovery readiness and pairing status.
-func (h *BackupHandler) Status(w http.ResponseWriter, r *http.Request) {
-	recURL, _ := backup.LoadRecoveryURL(h.store)
-
-	// Pairing status must never decrypt or echo the credential; whether one exists is all
-	// this endpoint needs to know.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"paired":       recURL != "" && backup.HasRecoveryToken(h.store),
-		"recovery_url": recURL,
-		"app_name":     "KySignOn",
-		"app_version":  appVersion,
+		"paired":          true,
+		"recovery_url":    req.RecoveryURL,
+		"recovery_key_id": result.Key.Public.ID(),
+		"threshold":       result.Key.Threshold,
+		"total_shares":    result.Key.TotalShares,
 	})
+}
+
+// Deposit seals a capsule and deposits it with KyRecovery now, outside the schedule. The
+// deposit runs on a context that outlives the request: once bytes are on their way, a closed
+// tab must not leave KyRecovery holding a capsule this instance has no receipt for.
+func (h *BackupHandler) Deposit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(depositWriteBudget))
+	adminID, adminUsername := h.actor(r)
+	ctx := context.WithoutCancel(r.Context())
+	rcpt, m, err := backup.DepositBackup(ctx, h.cfg, h.store, h.store, h.recovery, appVersion)
+	action, outcome, details := backup.Outcome(rcpt, m, err)
+	_ = h.record(r, action, adminID, adminUsername, rcpt.CapsuleID, outcome, details)
+	if errors.Is(err, backup.ErrReceiptUnrecorded) {
+		log.Printf("[BACKUP] deposit %s: receipt not recorded: %s", rcpt.CapsuleID, backup.AuditSafe(err.Error()))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Capsule %s was deposited but the receipt could not be recorded locally", rcpt.CapsuleID))
+		return
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, backup.ErrKeyPinMissing):
+			writeError(w, http.StatusPreconditionFailed, "Paired with KyRecovery but the recovery public key is missing or does not match the pin; restore recovery.pub or re-pair")
+		case errors.Is(err, backup.ErrNotPaired):
+			writeError(w, http.StatusPreconditionFailed, "Not paired with KyRecovery")
+		case errors.Is(err, backup.ErrRecoveryKeyMismatch):
+			writeError(w, http.StatusConflict, "Recovery key file does not match the pinned key ID; refusing to seal")
+		case errors.Is(err, backup.ErrDepositInProgress):
+			writeError(w, http.StatusConflict, "A deposit is already in progress")
+		case errors.Is(err, capsule.ErrCapsuleTooLarge):
+			writeError(w, http.StatusRequestEntityTooLarge, backup.TooLargeMessage)
+		case errors.Is(err, backup.ErrRemote):
+			log.Printf("[BACKUP] deposit failed: %s", backup.AuditSafe(err.Error()))
+			writeError(w, http.StatusBadGateway, "KyRecovery did not accept the deposit")
+		default:
+			log.Printf("[BACKUP] deposit failed (local): %s", backup.AuditSafe(err.Error()))
+			writeError(w, http.StatusInternalServerError, "Deposit failed before reaching KyRecovery")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, rcpt)
+}
+
+// Status reports pairing and the last receipt. It never decrypts or echoes the credential.
+func (h *BackupHandler) Status(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{
+		"paired":      false,
+		"app_name":    h.cfg.AppName,
+		"app_version": appVersion,
+	}
+	if u, err := h.store.GetSetting("kyrecovery_url"); err == nil {
+		out["recovery_url"] = u
+	}
+	if key, err := backup.LoadRecoveryKey(h.cfg.DataDir, h.store); err == nil {
+		out["paired"] = backup.HasPairing(h.store)
+		out["recovery_key_id"] = key.Public.ID()
+		out["threshold"] = key.Threshold
+		out["total_shares"] = key.TotalShares
+	} else if errors.Is(err, backup.ErrRecoveryKeyMismatch) {
+		out["recovery_key_error"] = "recovery.pub does not match the pinned key ID"
+	}
+	if last, ok, err := backup.LastDeposit(h.store); err == nil && ok {
+		out["last_deposit"] = last
+	}
+	if h.cfg.BackupDepositInterval > 0 {
+		out["deposit_interval_sec"] = int64(h.cfg.BackupDepositInterval / time.Second)
+	}
+	writeJSON(w, http.StatusOK, out)
 }

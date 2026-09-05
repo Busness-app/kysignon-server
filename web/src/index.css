@@ -782,6 +782,23 @@ button {
   z-index: 1100;
 }
 
+/* Keep verification controls reachable when a mobile keyboard shortens the viewport. */
+.step-up-backdrop form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.step-up-backdrop .modal-body {
+  min-height: 0;
+}
+
+.step-up-backdrop .modal-footer {
+  flex-shrink: 0;
+  margin-top: 0;
+  padding: 1rem 1.5rem;
+}
+
 .modal-card {
   background: var(--panel);
   border: 1px solid var(--panel-border);

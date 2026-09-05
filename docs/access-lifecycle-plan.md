@@ -3,9 +3,9 @@
 
 # KySignOn access and identity lifecycle implementation plan
 
-Date: 2026-09-05. Status: implementation started. PR 01 is implemented on
-`feat/authentication-evidence`; CI and review determine readiness to merge. PRs 02–23
-and D1–D4 remain planned.
+Date: 2026-09-05. Status: implementation started. PR 01 merged as GitHub PR #24.
+PR 02 is implemented on `feat/complete-step-up`; CI and review determine readiness
+to merge. PRs 03–23 and D1–D4 remain planned.
 PR numbers below are sequence labels, not GitHub PR numbers.
 
 ## Outcome and scope

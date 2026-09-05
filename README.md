@@ -266,10 +266,20 @@ on `localhost`, so a deployment reached by IP or by a name without TLS cannot en
 
 **Enrolling or removing a passkey spends a step-up grant**, like every other change to an
 account's factors. Resetting a user's MFA deletes their passkeys along with their TOTP
-secret and recovery codes. Step-up itself only demands a second factor when TOTP is
-enrolled, so for an account whose only second factor is a passkey, a step-up grant
-currently costs the password alone — enrol a passkey alongside TOTP or a push device
-rather than as an account's sole factor.
+secret and recovery codes. Step-up requires your password plus an enrolled TOTP, push,
+or passkey factor whenever any factor is enrolled. Recovery codes authorize only
+enrolling a replacement TOTP or passkey; the recovery grant cannot directly authorize
+administrative actions, factor deletion, or the standalone recovery-code regeneration
+endpoint. TOTP enrollment itself reissues recovery codes and signs out other sessions.
+A newly enrolled factor can authorize subsequent step-up operations.
+
+Grants last at most five minutes, are single-use, and bind to the current session and
+the exact HTTP method and target path. Enrollment preparation shares the grant with
+its final enrollment request. Push and passkey step-up challenges are separate from
+login challenges. Challenge issuance has a distinct `auth.step_up_challenge` audit event;
+locked-account and missing-factor denials remain visible in `auth.step_up` events.
+Dismissing the shared prompt aborts the action and cancels any pending challenge or late grant; it does not refresh the session's OIDC authentication evidence.
+Upgrading invalidates old, unscoped step-up grants, so an open confirmation must restart.
 
 **Destructive admin operations require step-up re-authentication.** Creating or editing an
 account, resetting someone's MFA, deleting a user, registering or deleting an OAuth client,

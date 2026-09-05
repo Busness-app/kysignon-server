@@ -159,7 +159,7 @@ func TestDeletingClientDropsItsUploadedIcon(t *testing.T) {
 		t.Fatalf("launcher edit returned %d: %s", rr.Code, rr.Body.String())
 	}
 
-	grant := adminRequestNoStepUp(t, srv, "POST", "/api/auth/step-up", cookie, `{"password":"correct-horse-battery"}`)
+	grant := adminRequestNoStepUp(t, srv, "POST", "/api/auth/step-up", cookie, `{"password":"correct-horse-battery","operation":"DELETE /api/admin/clients/kynotes"}`)
 	var stepUp struct {
 		Token string `json:"stepUpToken"`
 	}

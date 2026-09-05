@@ -144,7 +144,10 @@ func (s *Server) routes() *http.ServeMux {
 	authM := s.middleware.RequireAuth
 	mux.Handle("POST /api/auth/logout", authM(http.HandlerFunc(authH.Logout)))
 	mux.Handle("GET /api/auth/me", authM(http.HandlerFunc(authH.Me)))
-	mux.Handle("POST /api/auth/step-up", authM(s.middleware.RateLimit("step_up", 10, 0.2)(http.HandlerFunc(authH.RequestStepUp))))
+	mux.Handle("POST /api/auth/step-up", authM(s.middleware.RateLimit("step_up", 10, 0.2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { authH.RequestStepUp(w, r, webauthnH) }))))
+	mux.Handle("GET /api/auth/step-up/methods", authM(http.HandlerFunc(authH.StepUpMethods)))
+	mux.Handle("POST /api/auth/step-up/finish", authM(s.middleware.RateLimit("step_up_finish", 120, 2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { authH.FinishStepUp(w, r, webauthnH) }))))
+	mux.Handle("POST /api/auth/step-up/cancel", authM(http.HandlerFunc(authH.CancelStepUp)))
 
 	mux.Handle("POST /api/user/devices/pairing-token", authM(http.HandlerFunc(devH.GenerateDevicePairingToken)))
 	mux.Handle("GET /api/user/devices", authM(http.HandlerFunc(devH.ListUserDevices)))
@@ -177,10 +180,8 @@ func (s *Server) routes() *http.ServeMux {
 	//
 	// "Is this session an admin" is the wrong question for creating an administrator,
 	// resetting someone else's MFA, rotating a client secret, or exporting recovery material:
-	// a stolen cookie answers it. The grant costs the password plus, for accounts with TOTP
-	// enrolled, an existing factor a session thief does not have; passkey-only accounts
-	// currently get the grant from the password alone (see stepup.go). It is single-use, so
-	// one re-authentication buys exactly one change.
+	// a stolen cookie answers it. The grant costs the password plus an enrolled factor,
+	// binds to this session and operation, and authorizes exactly one change.
 	adminStepUpM := func(h http.Handler) http.Handler {
 		return adminM(s.requireStepUp(h))
 	}

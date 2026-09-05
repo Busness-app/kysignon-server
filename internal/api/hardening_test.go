@@ -73,7 +73,7 @@ func TestStepUpGrantIsSingleUseAcrossAdminOperations(t *testing.T) {
 
 	admin := newUser(t, db, "admin")
 	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
-	grant := mintStepUp(t, srv, cookie)
+	grant := mintStepUp(t, srv, cookie, "POST /api/admin/clients")
 
 	first := adminRequestWithStepUp(t, srv, "POST", "/api/admin/clients", cookie,
 		`{"clientId":"app-one","clientName":"One","redirectUris":["https://one.test/cb"]}`, grant)

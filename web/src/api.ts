@@ -65,15 +65,16 @@ export async function apiRequest(path: string, options: ApiOptions = {}): Promis
 
   let res = await send(false);
 
-  if (res.status === 401 && !path.startsWith('/api/auth/login')) {
-    window.dispatchEvent(new CustomEvent('kysignon:unauthorized'));
-  }
-
   let data = parseBody(await res.text());
 
   if (isMutating && res.status === 403 && isRecord(data) && data.error === 'invalid_csrf') {
     res = await send(true);
     data = parseBody(await res.text());
+  }
+
+  if (res.status === 401 && !path.startsWith('/api/auth/login') &&
+      !(path.startsWith('/api/auth/step-up') && isRecord(data) && data.error === 'invalid_credentials')) {
+    window.dispatchEvent(new CustomEvent('kysignon:unauthorized'));
   }
 
   if (!res.ok) {

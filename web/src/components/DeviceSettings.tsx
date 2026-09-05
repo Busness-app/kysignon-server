@@ -7,12 +7,12 @@ import {
   parsePairingToken,
   parsePasskeys,
   parseRecoveryCodes,
-  parseStepUpGrant,
   parseSuccess,
   parseTOTPSetup,
 } from '../parsers';
 import { createPasskey, isPasskeySupported } from '../webauthn';
 import QRCode from 'qrcode';
+import { useStepUp, isCancelled } from './StepUpPrompt';
 import {
   Smartphone,
   ScanFace,
@@ -23,7 +23,6 @@ import {
   Copy,
   Check,
   Plus,
-  Lock,
 } from 'lucide-react';
 
 /** Which account-security change the step-up prompt is currently gating. */
@@ -43,7 +42,6 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
   const [passkeyName, setPasskeyName] = useState('');
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
   const [passkeyBusy, setPasskeyBusy] = useState(false);
-  const [pendingPasskeyId, setPendingPasskeyId] = useState<string | null>(null);
 
   // Device Pairing State
   const [showPairModal, setShowPairModal] = useState(false);
@@ -65,15 +63,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
 
-  // Step-up re-authentication. Replacing a factor or reissuing recovery codes needs proof
-  // that this is the account holder, not just a live session.
-  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
-  const [stepUpPassword, setStepUpPassword] = useState('');
-  const [stepUpCode, setStepUpCode] = useState('');
-  const [stepUpError, setStepUpError] = useState<string | null>(null);
-  const [stepUpBusy, setStepUpBusy] = useState(false);
-
-  const hasExistingMFA = (user.mfaMethods?.length ?? 0) > 0;
+  const { requestGrant, stepUpPrompt } = useStepUp();
 
   const fetchDevices = async () => {
     try {
@@ -169,44 +159,27 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
     }
   };
 
-  // Both account-security changes go through the same prompt; nothing starts until the
-  // account holder has re-proved who they are.
-  const requestStepUp = (action: PendingAction) => {
-    setPendingAction(action);
-    setStepUpPassword('');
-    setStepUpCode('');
-    setStepUpError(null);
-  };
-
-  const submitStepUp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!pendingAction || !stepUpPassword) return;
-    setStepUpBusy(true);
-    setStepUpError(null);
+  const requestStepUp = async (action: PendingAction, passkeyId?: string) => {
+    const operations = {
+      totp: 'POST /api/user/mfa/totp/enable',
+      'recovery-codes': 'POST /api/user/recovery-codes',
+      'passkey-enroll': 'POST /api/user/passkeys/register/finish',
+      'passkey-delete': `DELETE /api/user/passkeys/${passkeyId}`,
+    };
+    const reasons = {
+      totp: 'Re-enter your credentials to set up or replace your authenticator.',
+      'recovery-codes': 'New recovery codes invalidate the ones you already stored.',
+      'passkey-enroll': 'Adding a passkey creates a new sign-in credential for this account.',
+      'passkey-delete': 'Removing a passkey revokes that credential immediately.',
+    };
     try {
-      const grant = await apiJson('/api/auth/step-up', parseStepUpGrant, {
-        method: 'POST',
-        body: JSON.stringify({ password: stepUpPassword, code: stepUpCode }),
-      });
-      const action = pendingAction;
-      const passkeyId = pendingPasskeyId;
-      setPendingAction(null);
-      setPendingPasskeyId(null);
-      setStepUpPassword('');
-      setStepUpCode('');
-      if (action === 'totp') {
-        await startTOTPSetup(grant.stepUpToken);
-      } else if (action === 'recovery-codes') {
-        await generateRecoveryCodes(grant.stepUpToken);
-      } else if (action === 'passkey-enroll') {
-        await enrollPasskey(grant.stepUpToken);
-      } else if (action === 'passkey-delete' && passkeyId) {
-        await deletePasskey(grant.stepUpToken, passkeyId);
-      }
+      const grant = await requestGrant(reasons[action], operations[action]);
+      if (action === 'totp') await startTOTPSetup(grant);
+      else if (action === 'recovery-codes') await generateRecoveryCodes(grant);
+      else if (action === 'passkey-enroll') await enrollPasskey(grant);
+      else if (passkeyId) await deletePasskey(grant, passkeyId);
     } catch (err) {
-      setStepUpError(errorMessage(err, 'Re-authentication failed'));
-    } finally {
-      setStepUpBusy(false);
+      if (!isCancelled(err)) alert(errorMessage(err, 'Re-authentication failed'));
     }
   };
 
@@ -319,8 +292,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
       onUserUpdate();
     } catch (err) {
       if (isStepUpRequired(err)) {
-        setPendingPasskeyId(id);
-        requestStepUp('passkey-delete');
+        requestStepUp('passkey-delete', id);
         return;
       }
       setPasskeyError(errorMessage(err, 'Failed to remove passkey'));
@@ -329,8 +301,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
 
   const handleRemovePasskey = (id: string) => {
     if (!confirm('Remove this passkey? You will no longer be able to sign in with it.')) return;
-    setPendingPasskeyId(id);
-    requestStepUp('passkey-delete');
+    requestStepUp('passkey-delete', id);
   };
 
   const handleDeleteDevice = async (deviceId: string) => {
@@ -515,73 +486,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
       </div>
 
       {/* Device Pairing Modal (90s Ephemeral Key / QR) */}
-      {pendingAction && (
-        <div className="modal-backdrop">
-          <div className="modal-card">
-            <div className="modal-header">
-              <h3>Confirm It's You</h3>
-              <button className="close-btn" onClick={() => setPendingAction(null)}>
-                ×
-              </button>
-            </div>
-            <form onSubmit={submitStepUp}>
-              <div className="modal-body">
-                <p className="modal-desc">
-                  {pendingAction === 'totp' &&
-                    'Replacing your authenticator changes how this account is protected, so re-enter your credentials first.'}
-                  {pendingAction === 'recovery-codes' &&
-                    'New recovery codes invalidate the ones you already stored, so re-enter your credentials first.'}
-                  {pendingAction === 'passkey-enroll' &&
-                    'Adding a passkey creates a new sign-in credential for this account, so re-enter your credentials first.'}
-                  {pendingAction === 'passkey-delete' &&
-                    'Removing a passkey revokes that credential immediately, so re-enter your credentials first.'}
-                </p>
-
-                <label className="field-label" htmlFor="stepup-password">Password</label>
-                <input
-                  id="stepup-password"
-                  type="password"
-                  className="text-input"
-                  autoComplete="current-password"
-                  autoFocus
-                  value={stepUpPassword}
-                  onChange={(e) => setStepUpPassword(e.target.value)}
-                  required
-                />
-
-                {hasExistingMFA && (
-                  <>
-                    <label className="field-label" htmlFor="stepup-code" style={{ marginTop: '0.75rem' }}>
-                      Current authenticator code (or a recovery code)
-                    </label>
-                    <input
-                      id="stepup-code"
-                      type="text"
-                      className="text-input"
-                      inputMode="text"
-                      autoComplete="one-time-code"
-                      placeholder="123456"
-                      value={stepUpCode}
-                      onChange={(e) => setStepUpCode(e.target.value)}
-                    />
-                  </>
-                )}
-
-                {stepUpError && <div className="form-error">{stepUpError}</div>}
-              </div>
-              <div className="modal-footer">
-                <button type="button" className="secondary-btn" onClick={() => setPendingAction(null)}>
-                  Cancel
-                </button>
-                <button type="submit" className="primary-btn" disabled={stepUpBusy || !stepUpPassword}>
-                  <Lock size={16} />
-                  <span>{stepUpBusy ? 'Verifying...' : 'Continue'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {stepUpPrompt}
 
       {showPairModal && (
         <div className="modal-backdrop">

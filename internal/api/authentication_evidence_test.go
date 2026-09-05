@@ -119,18 +119,7 @@ func TestTOTPAndRecoveryLoginEvidence(t *testing.T) {
 				}
 				proof = codes[0]
 			} else {
-				// Generate an independent RFC 6238 authenticator response for the HTTP flow.
-				key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var counter [8]byte
-				binary.BigEndian.PutUint64(counter[:], uint64(time.Now().Unix()/30))
-				mac := hmac.New(sha1.New, key)
-				mac.Write(counter[:])
-				digest := mac.Sum(nil)
-				offset := digest[len(digest)-1] & 15
-				proof = fmt.Sprintf("%06d", (binary.BigEndian.Uint32(digest[offset:offset+4])&0x7fffffff)%1000000)
+				proof = testTOTPCode(t, secret)
 			}
 			raw := passwordLogin(t, f.srv, f.user.Username, f.pass)
 			token, err := f.srv.mfaEngine.ValidateMFAToken(raw)
@@ -144,4 +133,20 @@ func TestTOTPAndRecoveryLoginEvidence(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testTOTPCode(t *testing.T, secret string) string {
+	t.Helper()
+	// Generate an independent RFC 6238 authenticator response for the HTTP flow.
+	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var counter [8]byte
+	binary.BigEndian.PutUint64(counter[:], uint64(time.Now().Unix()/30))
+	mac := hmac.New(sha1.New, key)
+	mac.Write(counter[:])
+	digest := mac.Sum(nil)
+	offset := digest[len(digest)-1] & 15
+	return fmt.Sprintf("%06d", (binary.BigEndian.Uint32(digest[offset:offset+4])&0x7fffffff)%1000000)
 }

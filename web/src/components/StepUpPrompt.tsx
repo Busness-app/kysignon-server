@@ -6,6 +6,7 @@ import { cancelStepUp, methodLabels, parseStepUpMethods, verifyStepUp, type Step
 interface Pending {
   reason: string;
   operation: string;
+  returnFocus: Element | null;
   resolve: (grant: string) => void;
   reject: (reason: Error) => void;
 }
@@ -39,6 +40,7 @@ export function useStepUp() {
   useEffect(() => dismiss, [dismiss]);
 
   const requestGrant = useCallback((reason: string, operation: string): Promise<string> => {
+    const returnFocus = pending.current?.returnFocus ?? document.activeElement;
     dismiss();
     setPassword('');
     setCode('');
@@ -48,7 +50,7 @@ export function useStepUp() {
     setMethods(null);
     setMethod('');
     return new Promise<string>((resolve, reject) => {
-      const next = { reason, operation, resolve, reject };
+      const next = { reason, operation, returnFocus, resolve, reject };
       pending.current = next;
       setPrompt(next);
       void apiJson('/api/auth/step-up/methods?operation=' + encodeURIComponent(operation), parseStepUpMethods)
@@ -65,7 +67,7 @@ export function useStepUp() {
 
   useEffect(() => {
     if (!prompt) return;
-    const previousFocus = document.activeElement;
+    const previousFocus = prompt.returnFocus;
     dialog.current?.showModal();
     dialog.current?.querySelector('input')?.focus();
     return () => {
@@ -111,6 +113,7 @@ export function useStepUp() {
   const stepUpPrompt = prompt ? (
     <dialog ref={dialog} className="modal-backdrop step-up-backdrop"
       aria-labelledby="step-up-title" onCancel={e => { e.preventDefault(); cancel(); }}
+      onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); cancel(); } }}
       style={{ width: '100vw', maxWidth: 'none', height: '100%', maxHeight: 'none', margin: 0, border: 0, color: 'inherit' }}>
       <div className="modal-card">
         <div className="modal-header">

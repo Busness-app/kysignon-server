@@ -594,7 +594,7 @@ func TestDisablingUserRevokesOutstandingTokens(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/api/admin/users/"+victim.ID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", csrf)
-	req.Header.Set(StepUpHeader, mintStepUp(t, srv, adminCookie))
+	req.Header.Set(StepUpHeader, mintStepUp(t, srv, adminCookie, "PUT /api/admin/users/"+victim.ID))
 	req.AddCookie(&http.Cookie{Name: "kysignon_session", Value: adminCookie})
 	req.AddCookie(&http.Cookie{Name: "kysignon_csrf", Value: csrf})
 	rr := httptest.NewRecorder()
@@ -694,7 +694,7 @@ func TestIssuedCSRFTokenIsAccepted(t *testing.T) {
 
 // mintStepUp issues a fresh single-use step-up grant for the session behind sessionToken,
 // standing in for the operator re-entering their password and authenticator code.
-func mintStepUp(t *testing.T, srv *Server, sessionToken string) string {
+func mintStepUp(t *testing.T, srv *Server, sessionToken, operation string) string {
 	t.Helper()
 	sess, err := srv.store.GetSessionByTokenHash(crypto.HashSHA256(sessionToken), time.Hour)
 	if err != nil || sess == nil {
@@ -706,8 +706,8 @@ func mintStepUp(t *testing.T, srv *Server, sessionToken string) string {
 	}
 	if err := srv.store.CreateStepUpToken(&store.StepUpToken{
 		ID: uuid.New().String(), UserID: sess.UserID, SessionID: sess.ID,
-		TokenHash: crypto.HashSHA256(raw), ExpiresAt: time.Now().UTC().Add(StepUpTTL),
-	}); err != nil {
+		Operation: stepUpOperation(operation), TokenHash: crypto.HashSHA256(raw), ExpiresAt: time.Now().UTC().Add(StepUpTTL),
+	}, nil); err != nil {
 		t.Fatalf("CreateStepUpToken: %v", err)
 	}
 	return raw
@@ -717,7 +717,7 @@ func mintStepUp(t *testing.T, srv *Server, sessionToken string) string {
 // fresh step-up grant, which is what the destructive admin routes now require.
 func adminRequest(t *testing.T, srv *Server, method, path, cookie, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	return adminRequestWithStepUp(t, srv, method, path, cookie, body, mintStepUp(t, srv, cookie))
+	return adminRequestWithStepUp(t, srv, method, path, cookie, body, mintStepUp(t, srv, cookie, method+" "+path))
 }
 
 // adminRequestNoStepUp is the same call without a grant, for asserting the gate exists.

@@ -126,7 +126,7 @@ func TestPasskeyRegistrationRoundTrip(t *testing.T) {
 
 	a := newTestAuthenticator(t, "Y3JlZC1vbmU")
 
-	rec := f.post(t, "/api/user/passkeys/register/begin", map[string]string{"name": "KyAuth on Pixel"}, f.grant(t))
+	rec := f.post(t, "/api/user/passkeys/register/begin", map[string]string{"name": "KyAuth on Pixel"}, f.grant(t, "POST /api/user/passkeys/register/finish"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("begin returned %d: %s", rec.Code, rec.Body.String())
 	}
@@ -150,7 +150,7 @@ func TestPasskeyRegistrationRoundTrip(t *testing.T) {
 		"clientDataJSON":    b64(cdj),
 		"publicKey":         a.spkiB64(t),
 		"name":              "KyAuth on Pixel",
-	}, f.grant(t))
+	}, f.grant(t, "POST /api/user/passkeys/register/finish"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("finish returned %d: %s", rec.Code, rec.Body.String())
 	}
@@ -170,7 +170,7 @@ func TestPasskeyRegistrationRejectsForeignOrigin(t *testing.T) {
 
 	a := newTestAuthenticator(t, "Y3JlZC1ldmls")
 
-	rec := f.post(t, "/api/user/passkeys/register/begin", map[string]string{"name": "evil"}, f.grant(t))
+	rec := f.post(t, "/api/user/passkeys/register/begin", map[string]string{"name": "evil"}, f.grant(t, "POST /api/user/passkeys/register/finish"))
 	var begun struct {
 		Challenge string `json:"challenge"`
 		RPID      string `json:"rpId"`
@@ -187,7 +187,7 @@ func TestPasskeyRegistrationRejectsForeignOrigin(t *testing.T) {
 		"clientDataJSON":    b64(cdj),
 		"publicKey":         a.spkiB64(t),
 		"name":              "evil",
-	}, f.grant(t))
+	}, f.grant(t, "POST /api/user/passkeys/register/finish"))
 
 	if rec.Code == http.StatusOK {
 		t.Fatal("a ceremony completed at another origin must not enrol a credential")
@@ -450,7 +450,7 @@ func TestListAndDeletePasskeys(t *testing.T) {
 		t.Fatalf("delete without step-up returned %d, want 403: %s", rec.Code, rec.Body.String())
 	}
 
-	rec = f.do(t, http.MethodDelete, "/api/user/passkeys/"+listed[0].ID, f.grant(t))
+	rec = f.do(t, http.MethodDelete, "/api/user/passkeys/"+listed[0].ID, mintStepUp(t, f.srv, f.cookie.Value, "DELETE /api/user/passkeys/"+listed[0].ID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delete returned %d: %s", rec.Code, rec.Body.String())
 	}

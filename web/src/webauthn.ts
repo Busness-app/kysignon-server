@@ -93,8 +93,9 @@ export interface FinishAssertion {
   signature: string;
 }
 
-export async function getPasskeyAssertion(opts: BeginLogin): Promise<FinishAssertion> {
-  const credential = (await navigator.credentials.get({
+export async function getPasskeyAssertion(opts: BeginLogin, signal?: AbortSignal): Promise<FinishAssertion> {
+  const credential = await navigator.credentials.get({
+    signal,
     publicKey: {
       challenge: fromBase64Url(opts.challenge),
       rpId: opts.rpId,
@@ -105,11 +106,12 @@ export async function getPasskeyAssertion(opts: BeginLogin): Promise<FinishAsser
       userVerification: 'preferred',
       timeout: 120_000,
     },
-  })) as PublicKeyCredential | null;
+  });
 
-  if (!credential) throw new Error('Passkey sign-in was cancelled');
+  if (!(credential instanceof PublicKeyCredential)) throw new Error('Passkey sign-in was cancelled');
 
-  const response = credential.response as AuthenticatorAssertionResponse;
+  const response = credential.response;
+  if (!(response instanceof AuthenticatorAssertionResponse)) throw new Error('Invalid passkey assertion');
   return {
     credentialId: toBase64Url(credential.rawId),
     authenticatorData: toBase64Url(response.authenticatorData),

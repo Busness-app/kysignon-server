@@ -332,7 +332,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateLegacyDevicePairingTokens(); err != nil {
 		return err
 	}
-	return s.migrateAuthenticationEvidence()
+	if err := s.migrateAuthenticationEvidence(); err != nil {
+		return err
+	}
+	return s.migrateStepUpChallenges()
 }
 
 // migrateSyncEventLease adds the delivery lease column to pre-existing databases.
@@ -2293,48 +2296,6 @@ func revokeUserAccessTx(tx *sql.Tx, userID string, now time.Time) error {
 // replacing a factor does not leave a co-resident stolen session logged in.
 func (s *Store) DeleteOtherUserSessions(userID, keepSessionID string) error {
 	_, err := s.db.Exec(`DELETE FROM sessions WHERE user_id = ? AND id != ?`, userID, keepSessionID)
-	return err
-}
-
-// CreateStepUpToken records a freshly minted step-up grant.
-func (s *Store) CreateStepUpToken(t *StepUpToken) error {
-	t.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(
-		`INSERT INTO step_up_tokens (id, user_id, session_id, token_hash, expires_at, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		t.ID, t.UserID, t.SessionID, t.TokenHash, t.ExpiresAt, t.CreatedAt)
-	return err
-}
-
-// ConsumeStepUpToken spends a step-up grant bound to this user and session. The
-// compare-and-swap is what makes it single use.
-func (s *Store) ConsumeStepUpToken(tokenHash, userID, sessionID string) (bool, error) {
-	res, err := s.db.Exec(
-		`UPDATE step_up_tokens SET used_at = ?
-		 WHERE token_hash = ? AND user_id = ? AND session_id = ?
-		   AND used_at IS NULL AND expires_at > ?`,
-		time.Now().UTC(), tokenHash, userID, sessionID, time.Now().UTC())
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
-}
-
-// HasValidStepUpToken reports whether an unspent grant exists, for operations that gate on
-// step-up without spending it.
-func (s *Store) HasValidStepUpToken(tokenHash, userID, sessionID string) (bool, error) {
-	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM step_up_tokens
-		 WHERE token_hash = ? AND user_id = ? AND session_id = ?
-		   AND used_at IS NULL AND expires_at > ?`,
-		tokenHash, userID, sessionID, time.Now().UTC()).Scan(&count)
-	return count > 0, err
-}
-
-func (s *Store) DeleteExpiredStepUpTokens() error {
-	_, err := s.db.Exec(`DELETE FROM step_up_tokens WHERE expires_at < ?`, time.Now().UTC())
 	return err
 }
 

@@ -108,7 +108,7 @@ export const AdminBackup: React.FC = () => {
     setRunMessage('');
     setRunError('');
     try {
-      const grant = await requestGrant('Backing up seals the whole directory and its keys to the suite recovery key and sends the capsule to every configured destination.');
+      const grant = await requestGrant('Backing up seals the whole directory and its keys to the suite recovery key and sends the capsule to every configured destination.', 'POST /api/admin/backup/deposit');
       const res = await apiJson('/api/admin/backup/deposit', parseBackupRun, { method: 'POST', stepUpToken: grant });
       const went: string[] = [];
       if (res.localPath) went.push(`written to ${res.localPath}`);
@@ -134,7 +134,7 @@ export const AdminBackup: React.FC = () => {
     setRunError('');
     setRunMessage('');
     try {
-      const grant = await requestGrant('The capsule holds your entire directory and its keys, sealed to the suite recovery key.');
+      const grant = await requestGrant('The capsule holds your entire directory and its keys, sealed to the suite recovery key.', 'GET /api/admin/backup/export-capsule');
       const res = await fetch('/api/admin/backup/export-capsule', {
         credentials: 'same-origin',
         headers: { 'X-KySignOn-StepUp': grant },
@@ -179,7 +179,7 @@ export const AdminBackup: React.FC = () => {
     setScheduleMessage('');
     setScheduleError('');
     try {
-      const grant = await requestGrant(scheduleSec === 0 ? 'Turning the schedule off stops automatic backups until it is turned back on.' : 'Changing the schedule changes how often this server backs itself up.');
+      const grant = await requestGrant(scheduleSec === 0 ? 'Turning the schedule off stops automatic backups until it is turned back on.' : 'Changing the schedule changes how often this server backs itself up.', 'PUT /api/admin/backup/schedule');
       await apiRequest('/api/admin/backup/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -202,7 +202,7 @@ export const AdminBackup: React.FC = () => {
     setPairMessage('');
     setPairError('');
     try {
-      const grant = await requestGrant('Pairing pins the suite recovery key every future backup is sealed to, and stores a standing credential for the service that will hold them.');
+      const grant = await requestGrant('Pairing pins the suite recovery key every future backup is sealed to, and stores a standing credential for the service that will hold them.', 'POST /api/admin/backup/pair-remote');
       await apiRequest('/api/admin/backup/pair-remote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -226,7 +226,7 @@ export const AdminBackup: React.FC = () => {
     setPairMessage('');
     setPairError('');
     try {
-      const grant = await requestGrant('Unpairing stops off-site backups until this server is paired again.');
+      const grant = await requestGrant('Unpairing stops off-site backups until this server is paired again.', 'DELETE /api/admin/backup/pairing');
       await apiRequest('/api/admin/backup/pairing', { method: 'DELETE', stepUpToken: grant });
       setPairMessage('Unpaired. Off-site backups have stopped.');
       await fetchStatus();
@@ -243,7 +243,7 @@ export const AdminBackup: React.FC = () => {
     setPinning(true);
     setPinError('');
     try {
-      const grant = await requestGrant('Pinning the recovery key decides, once, whose custodian cards can open every backup this server makes.');
+      const grant = await requestGrant('Pinning the recovery key decides, once, whose custodian cards can open every backup this server makes.', 'POST /api/admin/backup/pin-key');
       await apiRequest('/api/admin/backup/pin-key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

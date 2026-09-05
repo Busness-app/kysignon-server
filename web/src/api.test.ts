@@ -112,6 +112,15 @@ describe('unauthorized session handling', () => {
     expect((dispatch.mock.calls[0][0] as CustomEvent).type).toBe('kysignon:unauthorized');
   });
 
+  it.each(['/api/auth/step-up', '/api/auth/step-up/finish'])('keeps the session on failed credentials at %s', async path => {
+    stubFetch([{ status: 401, body: { error: 'invalid_credentials' } }]);
+    await expect(apiRequest(path, { method: 'POST', body: '{}' })).rejects.toThrow();
+    expect(window.dispatchEvent).not.toHaveBeenCalled();
+    stubFetch([{ status: 401, body: { error: 'unauthorized' } }]);
+    await expect(apiRequest(path, { method: 'POST', body: '{}' })).rejects.toThrow();
+    expect(window.dispatchEvent).toHaveBeenCalledTimes(1);
+  });
+
   // A rejected password on the login form is not an expired session. Firing the event here
   // would bounce the user mid-login and hide the real error.
   it('stays quiet when login itself returns 401', async () => {

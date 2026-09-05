@@ -45,8 +45,7 @@ export const AdminUsers: React.FC = () => {
     try {
       const grant = await requestGrant(
         `Creating '${username || 'a new account'}' adds a credential to this directory` +
-          (role === 'admin' ? ', with administrator rights.' : '.')
-      );
+          (role === 'admin' ? ', with administrator rights.' : '.'), 'POST /api/admin/users');
       await apiRequest('/api/admin/users', {
         method: 'POST',
         body: JSON.stringify({ username, displayName, email, password, role, status }),
@@ -71,8 +70,7 @@ export const AdminUsers: React.FC = () => {
 
     try {
       const grant = await requestGrant(
-        `Changing '${selectedUser.username}' can alter their password, role, or access.`
-      );
+        `Changing '${selectedUser.username}' can alter their password, role, or access.`, `PUT /api/admin/users/${selectedUser.id}`);
       await apiRequest(`/api/admin/users/${selectedUser.id}`, {
         method: 'PUT',
         body: JSON.stringify({ displayName, email, role, status, password: password || undefined }),
@@ -116,8 +114,7 @@ export const AdminUsers: React.FC = () => {
 
     try {
       const grant = await requestGrant(
-        `Resetting MFA for '${u.username}' removes every factor protecting that account.`
-      );
+        `Resetting MFA for '${u.username}' removes every factor protecting that account.`, `POST /api/admin/users/${u.id}/reset-mfa`);
       await apiRequest(`/api/admin/users/${u.id}/reset-mfa`, { method: 'POST', stepUpToken: grant });
       alert(`MFA reset successfully for ${u.username}`);
       fetchUsers();
@@ -144,7 +141,7 @@ export const AdminUsers: React.FC = () => {
     if (!confirm(`Permanently delete account '${u.username}'? This will also replicate deletion to paired products.`)) return;
 
     try {
-      const grant = await requestGrant(`Deleting '${u.username}' cannot be undone from here.`);
+      const grant = await requestGrant(`Deleting '${u.username}' cannot be undone from here.`, `DELETE /api/admin/users/${u.id}`);
       await apiRequest(`/api/admin/users/${u.id}`, { method: 'DELETE', stepUpToken: grant });
       fetchUsers();
     } catch (err) {

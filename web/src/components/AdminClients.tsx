@@ -85,8 +85,7 @@ export const AdminClients: React.FC = () => {
 
     try {
       const grant = await requestGrant(
-        `Registering '${clientName}' issues a client secret that can request tokens for your users.`
-      );
+        `Registering '${clientName}' issues a client secret that can request tokens for your users.`, 'POST /api/admin/clients');
       const data = await apiRequest('/api/admin/clients', {
         method: 'POST',
         stepUpToken: grant,
@@ -131,8 +130,7 @@ export const AdminClients: React.FC = () => {
       return;
     try {
       const grant = await requestGrant(
-        `Rotating '${client.id}' revokes its current secret and every token issued under it.`
-      );
+        `Rotating '${client.id}' revokes its current secret and every token issued under it.`, `PUT /api/admin/clients/${client.id}`);
       const secret = await apiJson(`/api/admin/clients/${client.id}`, parseCreatedClientSecret, {
         method: 'PUT',
         stepUpToken: grant,
@@ -154,8 +152,7 @@ export const AdminClients: React.FC = () => {
     if (!confirm('Are you sure you want to delete this OAuth/OIDC client?')) return;
     try {
       const grant = await requestGrant(
-        `Deleting '${id}' immediately breaks every sign-in that goes through it.`
-      );
+        `Deleting '${id}' immediately breaks every sign-in that goes through it.`, `DELETE /api/admin/clients/${id}`);
       await apiRequest(`/api/admin/clients/${id}`, { method: 'DELETE', stepUpToken: grant });
       fetchClients();
     } catch (err) {

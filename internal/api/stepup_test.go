@@ -81,9 +81,9 @@ func (f *stepUpFixture) post(t *testing.T, path string, body any, stepUp string)
 	return w
 }
 
-func (f *stepUpFixture) grant(t *testing.T) string {
+func (f *stepUpFixture) grant(t *testing.T, operation string) string {
 	t.Helper()
-	w := f.post(t, "/api/auth/step-up", map[string]string{"password": f.pass}, "")
+	w := f.post(t, "/api/auth/step-up", map[string]string{"password": f.pass, "operation": operation}, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("step-up request failed: %d %s", w.Code, w.Body.String())
 	}
@@ -124,7 +124,7 @@ func TestStepUpGrantIsSingleUse(t *testing.T) {
 	f, cleanup := newStepUpFixture(t)
 	defer cleanup()
 
-	token := f.grant(t)
+	token := f.grant(t, "POST /api/user/recovery-codes")
 	if w := f.post(t, "/api/user/recovery-codes", nil, token); w.Code != http.StatusOK {
 		t.Fatalf("first use of the grant failed: %d %s", w.Code, w.Body.String())
 	}
@@ -138,7 +138,7 @@ func TestStepUpRejectsWrongPassword(t *testing.T) {
 	f, cleanup := newStepUpFixture(t)
 	defer cleanup()
 
-	w := f.post(t, "/api/auth/step-up", map[string]string{"password": "not-the-password"}, "")
+	w := f.post(t, "/api/auth/step-up", map[string]string{"password": "not-the-password", "operation": "POST /api/user/recovery-codes"}, "")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for a wrong password, got %d: %s", w.Code, w.Body.String())
 	}
@@ -149,7 +149,7 @@ func TestStepUpGrantIsBoundToItsSession(t *testing.T) {
 	f, cleanup := newStepUpFixture(t)
 	defer cleanup()
 
-	token := f.grant(t)
+	token := f.grant(t, "POST /api/user/recovery-codes")
 
 	otherRaw, _ := crypto.GenerateRandomHex(32)
 	if err := f.store.CreateSession(&store.Session{
@@ -180,11 +180,11 @@ func TestRevokeUserAccessBurnsStepUpGrants(t *testing.T) {
 	f, cleanup := newStepUpFixture(t)
 	defer cleanup()
 
-	token := f.grant(t)
+	token := f.grant(t, "POST /api/user/recovery-codes")
 	if err := f.store.RevokeUserAccess(f.user.ID); err != nil {
 		t.Fatal(err)
 	}
-	spent, err := f.store.ConsumeStepUpToken(crypto.HashSHA256(token), f.user.ID, f.session.ID)
+	spent, err := f.store.ConsumeStepUpToken(crypto.HashSHA256(token), f.user.ID, f.session.ID, "POST /api/user/recovery-codes")
 	if err != nil {
 		t.Fatal(err)
 	}

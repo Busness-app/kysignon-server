@@ -103,8 +103,7 @@ export const AdminSystems: React.FC = () => {
 
     try {
       const grant = await requestGrant(
-        `Connecting '${targetName.trim() || 'this system'}' issues a bearer token with access to the account directory.`
-      );
+        `Connecting '${targetName.trim() || 'this system'}' issues a bearer token with access to the account directory.`, 'POST /api/admin/systems');
       const data = await apiJson('/api/admin/systems', parseCreatedSystem, {
         method: 'POST',
         stepUpToken: grant,
@@ -154,7 +153,7 @@ export const AdminSystems: React.FC = () => {
     if (!confirm(`Disconnect and remove '${s.name}' from KySignOn Suite sync?`)) return;
 
     try {
-      const grant = await requestGrant(`Disconnecting '${s.name}' stops all account replication to it.`);
+      const grant = await requestGrant(`Disconnecting '${s.name}' stops all account replication to it.`, `DELETE /api/admin/systems/${s.id}`);
       await apiRequest(`/api/admin/systems/${s.id}`, { method: 'DELETE', stepUpToken: grant });
       fetchSystems();
     } catch (err) {

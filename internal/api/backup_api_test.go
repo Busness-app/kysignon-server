@@ -82,7 +82,7 @@ func TestAdminBackupEndpoints(t *testing.T) {
 	csrfToken := srv.middleware.IssueCSRFToken(adminSessionToken)
 	adminCookie := &http.Cookie{Name: "kysignon_session", Value: adminSessionToken}
 	csrfCookie := &http.Cookie{Name: "kysignon_csrf", Value: csrfToken}
-	stepUp := func() string { return mintStepUp(t, srv, adminSessionToken) }
+	stepUp := func(method, path string) string { return mintStepUp(t, srv, adminSessionToken, method+" "+path) }
 
 	do := func(method, path string, body []byte, withStepUp bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewReader(body))
@@ -93,7 +93,7 @@ func TestAdminBackupEndpoints(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 		}
 		if withStepUp {
-			req.Header.Set(StepUpHeader, stepUp())
+			req.Header.Set(StepUpHeader, stepUp(method, path))
 		}
 		w := httptest.NewRecorder()
 		srv.httpServer.Handler.ServeHTTP(w, req)

@@ -213,13 +213,15 @@ type AuditEvent struct {
 // StepUpToken is a short-lived, single-use grant proving the live session just re-proved the
 // account's own credentials.
 type StepUpToken struct {
-	ID        string     `json:"id"`
-	UserID    string     `json:"userId"`
-	SessionID string     `json:"sessionId"`
-	TokenHash string     `json:"-"`
-	ExpiresAt time.Time  `json:"expiresAt"`
-	UsedAt    *time.Time `json:"usedAt,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
+	Operation    string     `json:"-"`
+	FactorMethod string     `json:"-"`
+	ID           string     `json:"id"`
+	UserID       string     `json:"userId"`
+	SessionID    string     `json:"sessionId"`
+	TokenHash    string     `json:"-"`
+	ExpiresAt    time.Time  `json:"expiresAt"`
+	UsedAt       *time.Time `json:"usedAt,omitempty"`
+	CreatedAt    time.Time  `json:"createdAt"`
 }
 
 // WebAuthnCredential is one enrolled passkey. The public key is stored SPKI DER,

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -119,9 +120,24 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	allowed, err := h.store.ClientAccessAllowed(user.ID, clientID)
+	if err != nil {
+		redirectError(w, r, redirectURI, state, "server_error", "Could not check application access")
+		return
+	}
+	if !allowed {
+		h.audit.Record("oauth.authorize", user.ID, user.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": "app_access_denied"})
+		redirectError(w, r, redirectURI, state, "access_denied", "You do not have access to this application")
+		return
+	}
 	code, err := h.oauthEngine.CreateAuthorizationCodeWithNonce(
 		clientID, session.ID, redirectURI, grantedScope, codeChallenge, codeChallengeMethod, nonce)
 	if err != nil {
+		if errors.Is(err, store.ErrAppAccessDenied) {
+			h.audit.Record("oauth.authorize", user.ID, user.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": "app_access_denied"})
+			redirectError(w, r, redirectURI, state, "access_denied", "You do not have access to this application")
+			return
+		}
 		redirectError(w, r, redirectURI, state, "server_error", "Could not issue an authorization code")
 		return
 	}

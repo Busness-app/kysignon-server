@@ -185,6 +185,9 @@ func TestClientDeleteRollsBackWhenItsAuditRowCannotBeWritten(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`UPDATE app_registry SET access_mode='all_active_users' WHERE client_id='c1'`); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.CreateSession(&Session{ID: "s1", UserID: "u1", SessionTokenHash: "token", ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}

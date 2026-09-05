@@ -453,7 +453,7 @@ export const AdminClients: React.FC = () => {
                   <span>
                     {secretWasRotated
                       ? 'Secret rotated. The previous secret and every token issued under it are now revoked.'
-                      : 'Client registered successfully!'}
+                      : 'Client registered. Assign access under App connections before users can sign in.'}
                   </span>
                 </div>
 

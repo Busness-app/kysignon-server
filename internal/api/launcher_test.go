@@ -208,6 +208,7 @@ func TestApplicationUpdateEditsCustomCards(t *testing.T) {
 		t.Fatalf("application update returned %d: %s", rr.Code, rr.Body.String())
 	}
 
+	allowTestAppAccess(t, db, app.ID)
 	card := cardByID(launcherCards(t, srv, cookie), app.ID)
 	if card == nil {
 		t.Fatal("edited application is not on the launcher")

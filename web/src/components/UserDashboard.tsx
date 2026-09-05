@@ -8,6 +8,7 @@ import { LAUNCHER_ICONS, launcherIcon } from '../launcherIcons';
 
 interface UserDashboardProps {
   user: User;
+  manage?: boolean;
   onNavigateToDevices: () => void;
 }
 
@@ -35,20 +36,21 @@ const METHOD_LABELS: Record<string, string> = {
   totp: 'Six-digit codes',
 };
 
-export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateToDevices }) => {
+export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateToDevices, manage = false }) => {
+  const [notice, setNotice] = useState<string | null>(null);
   const [apps, setApps] = useState<Application[]>([]);
   const [failedFavicons, setFailedFavicons] = useState<string[]>([]);
   const [draft, setDraft] = useState<CardDraft | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const fetchApps = () =>
-    apiJson('/api/user/applications', parseApplications)
+    apiJson(manage ? '/api/admin/applications' : '/api/user/applications', parseApplications)
       .then(setApps)
       .catch(() => setApps([]));
 
   useEffect(() => {
     fetchApps();
-  }, []);
+  }, [manage]);
 
   // The picker is a scrolling grid; open it on the card's current icon rather than the top.
   useEffect(() => {
@@ -89,6 +91,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
           ? apiRequest(`/api/admin/applications/${encodeURIComponent(draft.id)}`, { method: 'PUT', body })
           : apiRequest('/api/admin/applications', { method: 'POST', body }));
       }
+      if (!draft.id) setNotice('Application created. Assign access under Administration → App connections.');
       setDraft(null);
       setFailedFavicons([]);
       fetchApps();
@@ -169,7 +172,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
   return (
     <div>
       <div className="page-header">
-        <h1 className="page-title">Applications</h1>
+        <h1 className="page-title">{manage ? 'Manage launcher cards' : 'Applications'}</h1>
         {isAdmin && (
           <button className="secondary-btn sm" onClick={() => setDraft({ ...blankDraft })}>
             <Plus size={14} /> Add application
@@ -177,7 +180,8 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
         )}
       </div>
 
-      <div className="identity">
+      {notice && <p className="alert-box success" role="status">{notice}</p>}
+      {!manage && <div className="identity">
         <div>
           <span className="text-muted">Signed in as</span>
           <div className="identity-name">{user.username}</div>
@@ -199,12 +203,11 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({ user, onNavigateTo
             <b>None. Set one up.</b>
           )}
         </button>
-      </div>
+      </div>}
 
       {apps.length === 0 && (
         <p className="app-empty">
-          No applications yet.
-          {isAdmin ? ' Register an OAuth client or add a link.' : ' An administrator has not published any.'}
+          {manage ? 'No launcher cards yet. Add an application link.' : isAdmin ? 'No applications are available to you. Manage assignments under App connections.' : 'No applications are available to you. Ask an administrator for access.'}
         </p>
       )}
 

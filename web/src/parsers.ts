@@ -8,7 +8,7 @@
  */
 import { isRecord } from './api';
 import type {
-  AppRecord,
+  AppRecord, AppAccessPage, AppAccessGroup,
   DirectoryGroup,
   DirectoryPage,
   GroupUser,
@@ -462,18 +462,36 @@ export function parseGroupUserPage(value: unknown): DirectoryPage<GroupUser> {
   });
 }
 
+export function parseAppRecord(value: unknown): AppRecord {
+  const a = obj(value, 'an app record');
+  const revision = directoryCount(a, 'revision');
+  if (revision < 1) return fail('a positive revision');
+  const record = {
+    id: str(a, 'id'), revision,
+    accessMode: oneOf(a, 'accessMode', ['all_active_users', 'assigned_only']),
+    enabled: requiredBool(a, 'enabled'),
+    clientId: str(a, 'clientId'), clientName: str(a, 'clientName'),
+    launcherId: str(a, 'launcherId'), launcherName: str(a, 'launcherName'),
+    systemId: str(a, 'systemId'), systemName: str(a, 'systemName'),
+  };
+  if (!record.id || (!record.clientId && !record.launcherId && !record.systemId)) return fail('an app with a connection');
+  return record;
+}
 export function parseAppRecordPage(value: unknown): DirectoryPage<AppRecord> {
-  return directoryPage(value, 'records', value => {
-    const a = obj(value, 'an app record');
-    const revision = directoryCount(a, 'revision');
-    if (revision < 1) return fail('a positive revision');
-    const record = {
-      id: str(a, 'id'), revision,
-      clientId: str(a, 'clientId'), clientName: str(a, 'clientName'),
-      launcherId: str(a, 'launcherId'), launcherName: str(a, 'launcherName'),
-      systemId: str(a, 'systemId'), systemName: str(a, 'systemName'),
-    };
-    if (!record.id || (!record.clientId && !record.launcherId && !record.systemId)) return fail('an app with a connection');
-    return record;
-  });
+ return directoryPage(value, 'records', parseAppRecord);
+}
+function requiredBool(o: Record<string, unknown>, key: string): boolean {
+ const value = o[key]; return typeof value === 'boolean' ? value : fail(`boolean field "${key}"`);
+}
+export function parseAppAccessPage(value: unknown): AppAccessPage {
+ const o = obj(value, 'an app access page');
+ return { ...directoryPage(value, 'users', item => {
+  const u = obj(item, 'an app access user');
+  return { id: str(u,'id'), username: str(u,'username'), displayName: str(u,'displayName'), status: oneOf(u,'status',['active','disabled']),
+   direct: requiredBool(u,'direct'), groupAssigned: requiredBool(u,'groupAssigned'), effective: requiredBool(u,'effective'), preview: requiredBool(u,'preview'),
+   reason: oneOf(u,'reason',['user_disabled','app_disabled','client_disabled','all_active_users','direct_assignment','group_assignment','not_assigned']) };
+ }), app: parseAppRecord(o.app), losingAccess: directoryCount(o,'losingAccess') };
+}
+export function parseAppAccessGroups(value: unknown): DirectoryPage<AppAccessGroup> {
+ return directoryPage(value,'groups',item => { const g=obj(item,'an assigned group'); return {id:str(g,'id'),name:str(g,'name'),assigned:requiredBool(g,'assigned')}; });
 }

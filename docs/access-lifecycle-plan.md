@@ -1,12 +1,13 @@
 **Repo:** kysignon-server
-**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/app-identity)
+**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/app-assignments)
 
 # KySignOn access and identity lifecycle implementation plan
 
 Date: 2026-09-05. Status: implementation started. PR 01 merged as GitHub PR #24;
 PR 02 merged as GitHub PR #25; PR 03 merged as GitHub PR #26. PR 04 is split into
-04a (application identity and explicit linking, implemented on `feat/app-identity`) and
-04b (assignments and enforcement, planned). CI and review determine 04a readiness.
+04a (application identity and explicit linking, merged as GitHub PR #27) and
+04b (assignments and enforcement, implemented on `feat/app-assignments`). CI and review
+determine 04b readiness.
 PRs 05–23 and D1–D4 remain planned.
 PR numbers below are sequence labels, not GitHub PR numbers.
 

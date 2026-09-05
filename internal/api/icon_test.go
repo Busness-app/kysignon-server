@@ -77,6 +77,7 @@ func TestUploadedIconLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	allowTestAppAccess(t, db, app.Application.ID)
 	card := cardByID(launcherCards(t, srv, cookie), app.Application.ID)
 	if card == nil || card.IconName != iconName {
 		t.Fatalf("launcher card = %+v, want iconName %s", card, iconName)

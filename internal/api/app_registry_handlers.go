@@ -11,7 +11,7 @@ import (
 func writeAppRegistryError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrAppLinkConflict):
-		http.Error(w, `{"error":"link_conflict","error_description":"Connections overlap or have changed. Refresh and select them again."}`, http.StatusConflict)
+		http.Error(w, `{"error":"link_conflict","error_description":"Connections overlap, access settings differ, assignments exist, or the selection is stale. Remove assignments and match access settings before linking; refresh before trying again."}`, http.StatusConflict)
 	case errors.Is(err, store.ErrAppRecordMissing):
 		http.Error(w, `{"error":"not_found","error_description":"Application record no longer exists"}`, http.StatusNotFound)
 	default:

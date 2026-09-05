@@ -23,6 +23,7 @@ func testClient(t *testing.T, db *store.Store, id, ctype string, uris, scopes []
 	if err := db.CreateOAuthClient(c); err != nil {
 		t.Fatalf("CreateOAuthClient: %v", err)
 	}
+	allowTestAppAccess(t, db, id)
 	return c
 }
 

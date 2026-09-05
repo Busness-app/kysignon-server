@@ -164,13 +164,14 @@ type AuthorizationCode struct {
 
 // IssuedToken records an access token so it can be revoked before it expires.
 type IssuedToken struct {
-	SessionID string     `json:"-"`
-	JTI       string     `json:"jti"`
-	UserID    string     `json:"userId"`
-	ClientID  string     `json:"clientId"`
-	ExpiresAt time.Time  `json:"expiresAt"`
-	RevokedAt *time.Time `json:"revokedAt,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
+	AuthorizationCodeID string     `json:"-"` // Checked at registration, not stored.
+	SessionID           string     `json:"-"`
+	JTI                 string     `json:"jti"`
+	UserID              string     `json:"userId"`
+	ClientID            string     `json:"clientId"`
+	ExpiresAt           time.Time  `json:"expiresAt"`
+	RevokedAt           *time.Time `json:"revokedAt,omitempty"`
+	CreatedAt           time.Time  `json:"createdAt"`
 }
 
 type Application struct {

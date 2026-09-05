@@ -370,6 +370,11 @@ var ssoLoginPaths = map[string]string{
 
 // ListApplications returns dashboard application links, aggregating custom applications and registered OAuth clients.
 func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request) {
+	allowed, err := h.store.LauncherAppAccess(GetUserFromContext(r.Context()).ID)
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
+		return
+	}
 	customApps, err := h.store.ListApplications()
 	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
@@ -383,7 +388,7 @@ func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request)
 
 	appMap := make(map[string]store.Application)
 	for _, app := range customApps {
-		if app.Enabled {
+		if app.Enabled && allowed["custom:"+app.ID] {
 			app.Source = "custom"
 			appMap[app.ID] = app
 		}
@@ -394,7 +399,7 @@ func (h *DeviceHandler) ListApplications(w http.ResponseWriter, r *http.Request)
 	// than a generated one, because "OAuth 2.0 / OIDC SSO App (confidential)" restates the
 	// page title and tells the user nothing about the app.
 	for _, client := range oauthClients {
-		if !client.Enabled {
+		if !client.Enabled || !allowed["client:"+client.ID] {
 			continue
 		}
 		if _, exists := appMap[client.ID]; exists {

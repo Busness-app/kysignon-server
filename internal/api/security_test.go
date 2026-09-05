@@ -62,6 +62,7 @@ func newClient(t *testing.T, db *store.Store, id string, uris, scopes []string) 
 	}); err != nil {
 		t.Fatalf("CreateOAuthClient: %v", err)
 	}
+	allowTestAppAccess(t, db, id)
 }
 
 // An expired session must not authorise anything, including SSO. Relying on a background
@@ -843,6 +844,7 @@ func TestClientSecretCanBeRotated(t *testing.T) {
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
+	allowTestAppAccess(t, db, "kydns")
 	code, err := oe.CreateAuthorizationCode("kydns", oauthSession(t, db, user.ID), "https://dns.urlxl.com/callback", "openid", challenge, "S256")
 	if err != nil {
 		t.Fatal(err)

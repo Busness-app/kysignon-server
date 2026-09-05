@@ -275,6 +275,15 @@ func (m *MiddlewareManager) RequireAuth(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"unauthorized","error_description":"Authentication required"}`, http.StatusUnauthorized)
 			return
 		}
+		status, err := m.store.SessionEnrollmentStatus(user.ID, sess.ID)
+		if err != nil {
+			stepUpInternalError(w)
+			return
+		}
+		if status.Restricted && !enrollmentRouteAllowed(r.Method, r.URL.Path) {
+			http.Error(w, `{"error":"enrollment_required","error_description":"Complete MFA enrollment and sign in again to continue."}`, 403)
+			return
+		}
 		next.ServeHTTP(w, withIdentity(r, user, sess))
 	})
 }

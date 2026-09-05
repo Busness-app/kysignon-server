@@ -358,7 +358,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateAppAuthentication(); err != nil {
 		return err
 	}
-	return s.migrateAuthorizationInteractions()
+	if err := s.migrateAuthorizationInteractions(); err != nil {
+		return err
+	}
+	return s.migrateEnrollmentPolicy()
 }
 
 // migrateSyncEventLease adds the delivery lease column to pre-existing databases.
@@ -825,6 +828,9 @@ func (s *Store) CreateSessionForInteraction(sess *Session, interactionHash, brow
 	if n != 1 {
 		return ErrAppAccessDenied
 	}
+	if _, err = tx.Exec(`UPDATE sessions SET enrollment_only=NOT (SELECT allowed FROM mfa_session_access WHERE id=?) WHERE id=?`, sess.ID, sess.ID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -1232,6 +1238,10 @@ func (s *Store) RegisterNativeDeviceWithPairingToken(tokenID string, dev *Native
 		return false, nil
 	}
 
+	wasCompliant, err := compliantEnrollmentTx(tx, dev.UserID)
+	if err != nil {
+		return false, err
+	}
 	dev.CreatedAt = now
 	dev.LastSeenAt = &now
 	if dev.Platform == "" {
@@ -1262,6 +1272,9 @@ func (s *Store) RegisterNativeDeviceWithPairingToken(tokenID string, dev *Native
 		return false, err
 	}
 
+	if err = preserveCompliantEnrollmentTx(tx, dev.UserID, wasCompliant); err != nil {
+		return false, err
+	}
 	return true, tx.Commit()
 }
 
@@ -1283,8 +1296,7 @@ func (s *Store) UpsertNativeDevice(dev *NativeDevice) error {
 	if dev.Platform == "" {
 		dev.Platform = "android"
 	}
-	_, err := s.db.Exec(query, dev.ID, dev.UserID, dev.DeviceName, dev.DeviceIdentifier, dev.Platform, dev.PublicKey, dev.PushToken, dev.IsMFAApprover, dev.LastSeenAt, dev.CreatedAt)
-	return err
+	return s.changeEnrollmentDevice(dev.UserID, query, dev.ID, dev.UserID, dev.DeviceName, dev.DeviceIdentifier, dev.Platform, dev.PublicKey, dev.PushToken, dev.IsMFAApprover, dev.LastSeenAt, dev.CreatedAt)
 }
 
 func (s *Store) ListUserNativeDevices(userID string) ([]NativeDevice, error) {
@@ -1369,13 +1381,11 @@ func (s *Store) UpdateNativeDevicePushToken(deviceID, pushToken string, issuedAt
 }
 
 func (s *Store) SetNativeDeviceMFAApprover(deviceID, userID string, isApprover bool) error {
-	_, err := s.db.Exec(`UPDATE native_devices SET is_mfa_approver = ? WHERE id = ? AND user_id = ?`, isApprover, deviceID, userID)
-	return err
+	return s.changeEnrollmentDevice(userID, `UPDATE native_devices SET is_mfa_approver = ? WHERE id = ? AND user_id = ?`, isApprover, deviceID, userID)
 }
 
 func (s *Store) DeleteNativeDevice(deviceID, userID string) error {
-	_, err := s.db.Exec(`DELETE FROM native_devices WHERE id = ? AND user_id = ?`, deviceID, userID)
-	return err
+	return s.changeEnrollmentDevice(userID, `DELETE FROM native_devices WHERE id = ? AND user_id = ?`, deviceID, userID)
 }
 
 func (s *Store) ClearNativeDevicePushToken(deviceID, userID string) error {
@@ -1467,6 +1477,13 @@ func (s *Store) DeleteUserMFAMethods(userID string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE users SET id=id WHERE id=?`, userID); err != nil {
+		return err
+	}
+	wasCompliant, err := compliantEnrollmentTx(tx, userID)
+	if err != nil {
+		return err
+	}
 
 	if _, err := tx.Exec(`DELETE FROM mfa_methods WHERE user_id = ?`, userID); err != nil {
 		return err
@@ -1481,6 +1498,9 @@ func (s *Store) DeleteUserMFAMethods(userID string) error {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE device_pairing_tokens SET expires_at = ? WHERE user_id = ? AND used_at IS NULL`, time.Now().UTC(), userID); err != nil {
+		return err
+	}
+	if err = preserveCompliantEnrollmentTx(tx, userID, wasCompliant); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1714,6 +1734,13 @@ func (s *Store) DeleteWebAuthnCredential(id, userID string, audit *AuditEvent) (
 		return false, err
 	}
 	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE users SET id=id WHERE id=?`, userID); err != nil {
+		return false, err
+	}
+	wasCompliant, err := compliantEnrollmentTx(tx, userID)
+	if err != nil {
+		return false, err
+	}
 
 	res, err := tx.Exec(`DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?`, id, userID)
 	if err != nil {
@@ -1727,6 +1754,9 @@ func (s *Store) DeleteWebAuthnCredential(id, userID string, audit *AuditEvent) (
 		return false, nil
 	}
 	if err := recordAuditTx(tx, audit); err != nil {
+		return false, err
+	}
+	if err = preserveCompliantEnrollmentTx(tx, userID, wasCompliant); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
@@ -1949,7 +1979,7 @@ func (s *Store) CreateAuthorizationCode(code *AuthorizationCode) error {
 	}
 	query := `INSERT INTO authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, created_at, session_id, primary_authenticated_at, factor_authenticated_at, factor_method, authentication_expires_at, auth_app_id, auth_policy_revision) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS
  (SELECT 1 FROM effective_app_access e JOIN app_registry a ON a.id=e.app_id JOIN oauth_clients c ON c.id=a.client_id
- JOIN sessions sess ON sess.user_id=e.user_id WHERE c.id=? AND c.enabled AND e.user_id=? AND sess.id=? AND sess.expires_at>?)`
+ JOIN sessions sess ON sess.user_id=e.user_id WHERE c.id=? AND c.enabled AND e.user_id=? AND sess.id=? AND sess.expires_at>? AND EXISTS(SELECT 1 FROM mfa_session_access m WHERE m.id=sess.id AND m.allowed))`
 	code.CreatedAt = time.Now().UTC()
 	result, err := tx.Exec(query, code.ID, code.CodeHash, code.ClientID, code.UserID, code.RedirectURI, code.Scope, code.CodeChallenge, code.CodeChallengeMethod, code.Nonce, code.ExpiresAt, code.CreatedAt, code.SessionID, code.PrimaryAuthenticatedAt, code.FactorAuthenticatedAt, code.FactorMethod, code.AuthenticationExpiresAt, code.AuthenticationAppID, code.AuthenticationPolicyRevision, code.ClientID, code.UserID, code.SessionID, code.CreatedAt)
 	if err != nil {
@@ -2001,7 +2031,7 @@ func (s *Store) RecordIssuedToken(t *IssuedToken) error {
 	query := `INSERT INTO issued_tokens (jti, user_id, client_id, expires_at, created_at, session_id)
  SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS
  (SELECT 1 FROM sessions JOIN users ON users.id = sessions.user_id
- WHERE sessions.id = ? AND sessions.user_id = ? AND sessions.expires_at > ? AND users.status = 'active') AND EXISTS (SELECT 1 FROM effective_app_access e JOIN app_registry a ON a.id=e.app_id JOIN oauth_clients c ON c.id=a.client_id WHERE e.user_id=? AND c.id=? AND c.enabled) AND (?='' OR EXISTS(SELECT 1 FROM authorization_codes ac JOIN app_registry policy ON policy.client_id=ac.client_id AND policy.id=ac.auth_app_id AND policy.auth_revision=ac.auth_policy_revision WHERE ac.id=? AND ac.session_id=? AND ac.client_id=? AND ac.user_id=? AND ac.used_at IS NOT NULL AND ac.expires_at>? AND (ac.authentication_expires_at IS NULL OR ac.authentication_expires_at>=?)))`
+ WHERE sessions.id = ? AND sessions.user_id = ? AND sessions.expires_at > ? AND users.status = 'active' AND EXISTS(SELECT 1 FROM mfa_session_access m WHERE m.id=sessions.id AND m.allowed)) AND EXISTS (SELECT 1 FROM effective_app_access e JOIN app_registry a ON a.id=e.app_id JOIN oauth_clients c ON c.id=a.client_id WHERE e.user_id=? AND c.id=? AND c.enabled) AND (?='' OR EXISTS(SELECT 1 FROM authorization_codes ac JOIN app_registry policy ON policy.client_id=ac.client_id AND policy.id=ac.auth_app_id AND policy.auth_revision=ac.auth_policy_revision WHERE ac.id=? AND ac.session_id=? AND ac.client_id=? AND ac.user_id=? AND ac.used_at IS NOT NULL AND ac.expires_at>? AND (ac.authentication_expires_at IS NULL OR ac.authentication_expires_at>=?)))`
 	t.CreatedAt = time.Now().UTC()
 	res, err := s.db.Exec(query, t.JTI, t.UserID, t.ClientID, t.ExpiresAt, t.CreatedAt, t.SessionID, t.SessionID, t.UserID, t.CreatedAt, t.UserID, t.ClientID, t.AuthorizationCodeID, t.AuthorizationCodeID, t.SessionID, t.ClientID, t.UserID, t.CreatedAt, t.CreatedAt)
 	if err != nil {
@@ -2024,7 +2054,7 @@ func (s *Store) IsTokenRevoked(jti string) (bool, error) {
 	var revokedAt sql.NullTime
 	err := s.db.QueryRow(
 		`SELECT revoked_at FROM issued_tokens WHERE jti = ? AND expires_at > ?
- AND (session_id IS NULL OR EXISTS (SELECT 1 FROM sessions WHERE sessions.id = issued_tokens.session_id))`,
+ AND (session_id IS NULL OR EXISTS (SELECT 1 FROM mfa_session_access WHERE id = issued_tokens.session_id AND allowed))`,
 		jti, time.Now().UTC()).Scan(&revokedAt)
 	if err == sql.ErrNoRows {
 		return true, nil
@@ -2322,6 +2352,9 @@ func (s *Store) ResetUserMFA(userID string, events []AccountSyncEvent, audit *Au
 		return err
 	}
 	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE enrollment_deadlines SET due_at=0 WHERE user_id=?`, userID); err != nil {
+		return err
+	}
 
 	if _, err := tx.Exec(`DELETE FROM mfa_methods WHERE user_id = ?`, userID); err != nil {
 		return err

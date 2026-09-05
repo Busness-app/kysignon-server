@@ -1,4 +1,9 @@
+export interface EnrollmentStatus { required: boolean; allowedMethods: string[]; deadline: number; enrolled: boolean; restricted: boolean }
+export interface EnrollmentPolicy { scope: 'organization' | 'administrators'; required: boolean; allowedMethods: string[]; graceSeconds: number; revision: number }
+export interface EnrollmentPreview { affected: number; missingFactor: number; restrictedSessions: number; canActivate: boolean }
+
 export interface User {
+  enrollment?: EnrollmentStatus;
   id: string;
   username: string;
   displayName: string;

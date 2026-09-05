@@ -86,6 +86,15 @@ func (h *AuthHandler) RequestStepUp(w http.ResponseWriter, r *http.Request, wh *
 		http.Error(w, `{"error":"invalid_request","error_description":"Password and target operation are required"}`, 400)
 		return
 	}
+	enrollment, err := h.store.SessionEnrollmentStatus(user.ID, sess.ID)
+	if err != nil {
+		stepUpInternalError(w)
+		return
+	}
+	if enrollment.Restricted && !enrollmentOperationAllowed(stepUpOperation(req.Operation)) {
+		http.Error(w, `{"error":"enrollment_required"}`, 403)
+		return
+	}
 	locked, err := h.store.IsAccountLocked(user.ID)
 	if err != nil {
 		stepUpInternalError(w)

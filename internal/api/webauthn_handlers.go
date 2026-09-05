@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -428,6 +429,10 @@ func (h *WebAuthnHandler) DeletePasskey(w http.ResponseWriter, r *http.Request) 
 		h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"credentialRecordId": id})
 	deleted, err := h.store.DeleteWebAuthnCredential(id, user.ID, removed.Row)
 	if err != nil {
+		if errors.Is(err, store.ErrLastCompliantFactor) {
+			enrollmentError(w, err)
+			return
+		}
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}

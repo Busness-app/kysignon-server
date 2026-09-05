@@ -6,6 +6,7 @@ import (
 	"github.com/Busness-app/kysignon-server/internal/oauth"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/Busness-app/kysignon-server/internal/audit"
@@ -180,6 +181,23 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		methodTypes = append(methodTypes, "webauthn")
 	}
 
+	enrollment, err := h.store.SessionEnrollmentStatus(user.ID, "")
+	if err != nil {
+		stepUpInternalError(w)
+		return
+	}
+	if enrollment.Required && enrollment.Enrolled {
+		filtered := []string{}
+		for _, method := range methodTypes {
+			if slices.Contains(enrollment.AllowedMethods, method) {
+				filtered = append(filtered, method)
+			}
+		}
+		if len(filtered) > 0 {
+			methodTypes = filtered
+			hasPush = slices.Contains(filtered, "push")
+		}
+	}
 	if interaction != nil {
 		q, err := url.ParseQuery(interaction.Request)
 		if err != nil {
@@ -204,6 +222,10 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if len(methodTypes) == 0 && (policy.Factor != "password" || requirements.ACR == oauth.MFAACR) {
+			if enrollment.Required && !enrollment.Enrolled && enrollment.Deadline <= time.Now().Unix() {
+				h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: &primaryAt}, interactionHash)
+				return
+			}
 			http.Error(w, `{"error":"factor_enrollment_required","error_description":"This application requires an enrolled authenticator, or a passkey for passkey-only policy. Sign in to your dashboard to enroll, then restart from the application."}`, 403)
 			return
 		}
@@ -283,6 +305,11 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	enrollment, err := h.store.SessionEnrollmentStatus(user.ID, sess.ID)
+	if err != nil {
+		stepUpInternalError(w)
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "kysignon_session",
 		Value:    rawToken,
@@ -311,6 +338,7 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 		RestartAuthorization: restartAuthorization,
 		Success:              true,
 		User: map[string]any{
+			"enrollment":  enrollment,
 			"id":          user.ID,
 			"username":    user.Username,
 			"displayName": user.DisplayName,
@@ -579,6 +607,11 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	enrollment, err := h.store.SessionEnrollmentStatus(user.ID, GetSessionFromContext(r.Context()).ID)
+	if err != nil {
+		stepUpInternalError(w)
+		return
+	}
 	mfaMethods, _ := h.store.ListUserMFAMethods(user.ID)
 	var methodTypes []string
 	for _, m := range mfaMethods {
@@ -587,6 +620,7 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
+		"enrollment":  enrollment,
 		"id":          user.ID,
 		"username":    user.Username,
 		"displayName": user.DisplayName,

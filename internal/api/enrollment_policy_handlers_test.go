@@ -1,0 +1,155 @@
+package api
+
+import (
+	"encoding/json"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Busness-app/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/store"
+)
+
+func enrollmentAPIAdmin(t *testing.T, srv *Server, db *store.Store) string {
+	t.Helper()
+	u := newUser(t, db, "admin")
+	if err := srv.mfaEngine.SaveUserTOTP(u.ID, "JBSWY3DPEHPK3PXP", nil); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	cookie := "enrollment-admin-cookie"
+	if err := db.CreateSession(&store.Session{ID: "enrollment-admin", UserID: u.ID, SessionTokenHash: crypto.HashSHA256(cookie), ExpiresAt: now.Add(time.Hour), AuthenticationEvidence: store.AuthenticationEvidence{PrimaryAuthenticatedAt: &now, FactorAuthenticatedAt: &now, FactorMethod: "totp"}}); err != nil {
+		t.Fatal(err)
+	}
+	return cookie
+}
+func policyJSON(t *testing.T, p store.EnrollmentPolicy) string {
+	t.Helper()
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+func TestEnrollmentPolicyAdminBoundaries(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := enrollmentAPIAdmin(t, srv, db)
+	u := newUser(t, db, "user")
+	cookie := newSession(t, db, u, time.Now().UTC().Add(time.Hour))
+	path := "/api/admin/enrollment-policies"
+	body := policyJSON(t, store.EnrollmentPolicy{Scope: "organization", Required: true, AllowedMethods: []string{"totp", "webauthn"}, GraceSeconds: 3600, Revision: 1})
+	for _, route := range []struct{ method, path string }{{"GET", path}, {"POST", path + "/preview"}, {"PUT", path}} {
+		if r := adminRequestNoStepUp(t, srv, route.method, route.path, cookie, body); r.Code != 403 {
+			t.Fatal("non-admin", r.Code)
+		}
+	}
+	if r := adminRequestNoStepUp(t, srv, "PUT", path, admin, body); r.Code != 403 {
+		t.Fatal("missing step-up", r.Code)
+	}
+	if r := adminRequestNoStepUp(t, srv, "POST", path+"/preview", admin, body); r.Code != 200 || !strings.Contains(r.Body.String(), `"canActivate":true`) {
+		t.Fatal("preview", r.Body.String())
+	}
+	policies, _ := db.ListEnrollmentPolicies()
+	for _, p := range policies {
+		if p.Required {
+			t.Fatal("preview changed policy")
+		}
+	}
+	for _, raw := range []string{`{}`, `{"scope":"group","required":true,"allowedMethods":["totp"],"graceSeconds":0,"revision":1}`, `{"scope":"organization","required":true,"allowedMethods":["recovery"],"graceSeconds":0,"revision":1}`, `{"scope":"organization","required":true,"allowedMethods":["totp"],"graceSeconds":-1,"revision":1}`, body + `{}`} {
+		if r := adminRequestNoStepUp(t, srv, "POST", path+"/preview", admin, raw); r.Code != 400 {
+			t.Fatal("invalid policy accepted", raw, r.Code)
+		}
+	}
+	wrong := mintStepUp(t, srv, admin, "PUT /api/admin/other")
+	if r := adminRequestWithStepUp(t, srv, "PUT", path, admin, body, wrong); r.Code != 403 {
+		t.Fatal("wrong-operation grant", r.Code)
+	}
+	if r := adminRequest(t, srv, "PUT", path, admin, body); r.Code != 200 {
+		t.Fatal(r.Body.String())
+	}
+	if r := adminRequest(t, srv, "PUT", path, admin, body); r.Code != 409 {
+		t.Fatal("stale policy overwrite", r.Code)
+	}
+}
+
+func TestEnrollmentRestrictedHTTPAndTOTPCompletion(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := enrollmentAPIAdmin(t, srv, db)
+	u := newUser(t, db, "user")
+	newClient(t, db, "app", []string{"https://app.example/cb"}, []string{"openid"})
+	body := policyJSON(t, store.EnrollmentPolicy{Scope: "organization", Required: true, AllowedMethods: []string{"totp"}, GraceSeconds: 0, Revision: 1})
+	if r := adminRequest(t, srv, "PUT", "/api/admin/enrollment-policies", admin, body); r.Code != 200 {
+		t.Fatal(r.Body.String())
+	}
+	browser := interactionBrowser(t, srv)
+	r := browser("POST", "/api/auth/login", map[string]string{"username": u.Username, "password": "correct-horse-battery"})
+	if r.Code != 200 {
+		t.Fatal(r.Body.String())
+	}
+	cookie := sessionCookie(r)
+	if cookie == nil {
+		t.Fatal("missing enrollment session")
+	}
+	if !strings.Contains(r.Body.String(), `"restricted":true`) {
+		t.Fatal("login did not expose restriction", r.Body.String())
+	}
+	for _, route := range []struct{ method, path string }{{"GET", "/api/admin/users"}, {"GET", "/api/user/applications"}, {"POST", "/api/user/recovery-codes"}, {"DELETE", "/api/user/passkeys/any"}, {"PUT", "/api/notifications/native/devices/any/mfa"}} {
+		if r := browser(route.method, route.path, nil); r.Code != 403 || !strings.Contains(r.Body.String(), "enrollment_required") {
+			t.Fatal("restricted route escaped", route, r.Code, r.Body.String())
+		}
+	}
+	q := appAuthQuery("app")
+	q.Set("prompt", "none")
+	r = browser("GET", "/oauth/authorize?"+q.Encode(), nil)
+	target, _ := url.Parse(r.Header().Get("Location"))
+	if target.Query().Get("error") != "interaction_required" || target.Query().Get("state") != "original" {
+		t.Fatal("restricted OAuth escaped", target)
+	}
+	// Even a valid password cannot get an unrelated grant from an enrollment session.
+	r = browser("POST", "/api/auth/step-up", map[string]string{"password": "correct-horse-battery", "operation": "PUT /api/admin/enrollment-policies"})
+	if r.Code != 403 {
+		t.Fatal("restricted grant", r.Code, r.Body.String())
+	}
+	// Use the real password-only enrollment step-up and actual TOTP enrollment route.
+	r = browser("POST", "/api/auth/step-up", map[string]string{"password": "correct-horse-battery", "operation": "POST /api/user/mfa/totp/enable"})
+	if r.Code != 200 {
+		t.Fatal("enrollment step-up denied", r.Code, r.Body.String())
+	}
+	var grant struct {
+		StepUpToken string `json:"stepUpToken"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &grant); err != nil {
+		t.Fatal(err)
+	}
+	// The existing step-up response uses stepUpToken.
+	token := grant.StepUpToken
+	if token == "" {
+		t.Fatal("missing grant", r.Body.String())
+	}
+	secret := "JBSWY3DPEHPK3PXP"
+	proof := testTOTPCode(t, secret)
+	enrollmentBody, _ := json.Marshal(map[string]string{"secret": secret, "code": proof})
+	r = adminRequestWithStepUp(t, srv, "POST", "/api/user/mfa/totp/enable", cookie.Value, string(enrollmentBody), token)
+	if r.Code != 200 {
+		t.Fatal("enrollment failed", r.Code, r.Body.String())
+	}
+	if r := browser("GET", "/api/auth/me", nil); r.Code != 200 || !strings.Contains(r.Body.String(), `"restricted":true`) || !strings.Contains(r.Body.String(), `"enrolled":true`) {
+		t.Fatal("enrollment upgraded session", r.Body.String())
+	}
+	// A new password-plus-TOTP login exits the restricted session.
+	r = browser("POST", "/api/auth/login", map[string]string{"username": u.Username, "password": "correct-horse-battery"})
+	var step LoginResponse
+	if err := json.Unmarshal(r.Body.Bytes(), &step); err != nil || !step.MFARequired {
+		t.Fatal(r.Body.String())
+	}
+	r = browser("POST", "/api/auth/mfa/totp/verify", map[string]string{"mfaToken": step.MFAToken, "code": proof})
+	if r.Code != 200 || !strings.Contains(r.Body.String(), `"restricted":false`) {
+		t.Fatal("compliant sign-in failed", r.Code, r.Body.String())
+	}
+	if r := browser("GET", "/api/user/applications", nil); r.Code != 200 {
+		t.Fatal("fresh compliant login denied", r.Code)
+	}
+}

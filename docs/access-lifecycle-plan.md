@@ -1,6 +1,5 @@
 **Repo:** kysignon-server
-**PR:** #30 — https://github.com/Busness-app/kysignon-server/pull/30
-**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/app-auth-policy)
+**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/mfa-enrollment-policy)
 
 # KySignOn access and identity lifecycle implementation plan
 
@@ -10,7 +9,9 @@ PR 02 merged as GitHub PR #25; PR 03 merged as GitHub PR #26. PR 04 is split int
 04b (assignments and enforcement, merged as GitHub PR #28).
 PR05 is split into 05a (OIDC re-authentication requests and bound interactions, merged as GitHub PR #29)
 and 05b (administrator per-app policies, factor freshness and policy revision enforcement,
-implemented as GitHub PR #30 on `feat/app-auth-policy`, in review). PRs 06–23 and D1–D4 remain planned.
+merged as GitHub PR #30). PR06 is split into 06a (organization/admin enrollment policy,
+implemented on `feat/mfa-enrollment-policy`) and 06b (group-specific requirements, planned).
+PRs 07–23 and D1–D4 remain planned.
 PR numbers below are sequence labels, not GitHub PR numbers.
 
 ## Outcome and scope
@@ -223,11 +224,11 @@ Acceptance: KyNotes reuses SSO while KyPasswords prompts; `max_age=0`, malformed
 ages, incompatible prompt combinations, concurrent tabs, cancellation and replay behave
 correctly. A weaker factor never satisfies a passkey policy.
 
-### PR 06 — Required MFA enrollment and grace periods
+### PR 06a — Organization and administrator MFA enrollment
 
 Depends on: 02, 03, 05. Touch: policy storage/UI, login/enrollment routes, recovery rules.
 
-- Add organization and group requirements, administrator policy, allowed factor methods,
+- Add organization requirements, administrator policy, allowed factor methods,
   enrollment deadline and impact preview. Store a stable deadline; subsequent logins
   cannot restart grace. A stricter sensitive-app policy applies even during grace.
 - After deadline, issue only a restricted enrollment session until requirements are met.
@@ -238,6 +239,16 @@ Depends on: 02, 03, 05. Touch: policy storage/UI, login/enrollment routes, recov
 
 Acceptance: grace ends at the exact persisted deadline, factor removal cannot bypass
 policy, restricted sessions cannot reach apps, and policy preview detects admin lockout.
+
+### PR 06b — Group-specific MFA requirements
+
+Depends on: 03, 06a. Reuse the persisted deadline, effective factor, preview and restricted
+session enforcement introduced in 06a. Add per-group policies and combine every applicable
+requirement by factor intersection and earliest deadline. Membership and policy mutations
+must reject empty intersections, preserve tested administrator access, and invalidate
+OAuth grants atomically. Removing and re-adding membership must never restart grace.
+Include group impact controls and membership-change race tests. No group MFA policy is
+implemented by 06a.
 
 Release A gate: demonstrate two users, two groups and two apps with different freshness
 and factor requirements, including direct-URL denial and removal during code exchange.

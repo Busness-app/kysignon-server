@@ -34,6 +34,8 @@ interface DeviceSettingsProps {
 }
 
 export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpdate }) => {
+  const restricted = Boolean(user.enrollment?.restricted);
+  const permitted = (method: string) => !restricted || Boolean(user.enrollment?.allowedMethods.includes(method));
   const [devices, setDevices] = useState<NativeDevice[]>([]);
   const [pairDeviceIdsBefore, setPairDeviceIdsBefore] = useState<Set<string>>(new Set());
 
@@ -333,7 +335,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
           <div className="section-title-wrap">
             <h2>Phones that approve sign-ins</h2>
           </div>
-          <button className="secondary-btn sm" onClick={handleStartDevicePairing}>
+          <button className="secondary-btn sm" disabled={!permitted('push')} onClick={handleStartDevicePairing}>
             <Plus size={14} />
             <span>Pair a phone</span>
           </button>
@@ -363,6 +365,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
                 <button
                   className="icon-danger-btn"
                   onClick={() => handleDeleteDevice(dev.id)}
+                  disabled={restricted}
                   title="Remove Device"
                 >
                   <Trash2 size={16} />
@@ -379,7 +382,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
             <h2>Passkeys</h2>
           </div>
           {isPasskeySupported() ? (
-            <button className="secondary-btn sm" onClick={handleAddPasskey} disabled={passkeyBusy}>
+            <button className="secondary-btn sm" onClick={handleAddPasskey} disabled={passkeyBusy || !permitted('webauthn')}>
               <Plus size={14} />
               <span>Add passkey</span>
             </button>
@@ -451,6 +454,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
                 <button
                   className="icon-danger-btn"
                   onClick={() => handleRemovePasskey(pk.id)}
+                  disabled={restricted}
                   title="Remove Passkey"
                   aria-label={`Remove passkey ${pk.name}`}
                 >
@@ -468,7 +472,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
             <h2>Six-digit codes</h2>
             <p className="section-desc">{user.mfaMethods?.includes('totp') ? 'Configured.' : 'Not configured.'}</p>
           </div>
-          <button className="secondary-btn sm" onClick={() => requestStepUp('totp')}>
+          <button className="secondary-btn sm" disabled={!permitted('totp')} onClick={() => requestStepUp('totp')}>
             <span>{user.mfaMethods?.includes('totp') ? 'Replace' : 'Set up'}</span>
           </button>
         </div>
@@ -479,7 +483,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
           <div className="section-title-wrap">
             <h2>Recovery codes</h2>
           </div>
-          <button className="secondary-btn sm" onClick={() => requestStepUp('recovery-codes')}>
+          <button className="secondary-btn sm" disabled={restricted} onClick={() => requestStepUp('recovery-codes')}>
             <span>Generate new codes</span>
           </button>
         </div>

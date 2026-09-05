@@ -20,6 +20,7 @@ const ACCOUNT: Item[] = [
 
 const ADMIN: Item[] = [
   ['admin-users', 'Users', Users],
+  ['admin-enrollment', 'MFA policies', Shield],
   ['admin-groups', 'Groups', Users],
   ['admin-app-registry', 'App connections', LayoutGrid],
   ['admin-systems', 'Suite sync', RefreshCw],

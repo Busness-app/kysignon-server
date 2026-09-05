@@ -352,3 +352,18 @@ describe('authentication policy boundary', () => {
   }
  });
 });
+
+
+describe('enrollment status boundary', () => {
+  const enrollment = { required: true, allowedMethods: ['totp'], deadline: 1800000000, enrolled: false, restricted: true };
+  it('preserves the server restriction and deadline', () => {
+    expect(parseMe({ ...user, enrollment }).enrollment).toEqual(enrollment);
+  });
+  it.each([
+    { restricted: 'false' }, { restricted: null }, { allowedMethods: [] },
+    { allowedMethods: ['recovery'] }, { allowedMethods: ['totp', 'totp'] },
+    { deadline: -1 }, { deadline: '1800000000' },
+  ])('rejects malformed security state %p', invalid => {
+    expect(() => parseMe({ ...user, enrollment: { ...enrollment, ...invalid } })).toThrow();
+  });
+});

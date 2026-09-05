@@ -92,6 +92,7 @@ func (h *AuthHandler) RequestStepUp(w http.ResponseWriter, r *http.Request, wh *
 		return
 	}
 	if locked {
+		h.audit.Record("auth.step_up", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": "account_locked", "operation": stepUpOperation(req.Operation)})
 		http.Error(w, `{"error":"account_locked"}`, 429)
 		return
 	}
@@ -108,6 +109,7 @@ func (h *AuthHandler) RequestStepUp(w http.ResponseWriter, r *http.Request, wh *
 		return
 	}
 	if len(methods) > 0 && !slices.Contains(methods, req.Method) {
+		h.audit.Record("auth.step_up", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": "mfa_required", "method": req.Method, "operation": req.Operation})
 		http.Error(w, `{"error":"mfa_required","error_description":"Choose an enrolled factor; recovery codes only authorize replacement factor enrollment"}`, 400)
 		return
 	}
@@ -168,10 +170,12 @@ func (h *AuthHandler) RequestStepUp(w http.ResponseWriter, r *http.Request, wh *
 			}
 			response["passkey"] = beginLoginResponse{Challenge: c.Proof, RPID: wh.rpID, AllowCredentials: ids}
 		}
-		if err := h.store.CreateStepUpChallenge(c); err != nil {
+		issued := h.audit.Prepare("auth.step_up_challenge", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"reason": "challenge_issued", "method": req.Method, "operation": req.Operation})
+		if err := h.store.CreateStepUpChallenge(c, issued.Row); err != nil {
 			stepUpInternalError(w)
 			return
 		}
+		issued.Committed()
 		writeStepUpJSON(w, response)
 		return
 	}
@@ -212,6 +216,7 @@ func (h *AuthHandler) FinishStepUp(w http.ResponseWriter, r *http.Request, wh *W
 		return
 	}
 	if locked {
+		h.audit.Record("auth.step_up", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": "account_locked", "method": c.Method, "operation": c.Operation})
 		http.Error(w, `{"error":"account_locked"}`, 429)
 		return
 	}

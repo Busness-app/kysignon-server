@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,7 +18,7 @@ func TestStepUpCompletionIsAtomicAndCancellable(t *testing.T) {
 	}
 	newChallenge := func(id string) *StepUpChallenge {
 		c := &StepUpChallenge{TokenHash: id, UserID: user.ID, SessionID: "session", Operation: "DELETE /api/user/passkeys/key", Method: "webauthn", Proof: "proof", PrimaryAuthenticatedAt: now, ExpiresAt: now.Add(time.Minute)}
-		if err := s.CreateStepUpChallenge(c); err != nil {
+		if err := s.CreateStepUpChallenge(c, nil); err != nil {
 			t.Fatal(err)
 		}
 		return c
@@ -29,8 +30,16 @@ func TestStepUpCompletionIsAtomicAndCancellable(t *testing.T) {
 	if _, err := s.db.Exec(`CREATE TRIGGER fail_step_up_audit BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT, 'audit failed'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.CompleteStepUpChallenge(c, grant(c), &AuditEvent{ID: "event", Action: "auth.step_up"}); err == nil || ok {
-		t.Fatal("grant committed without audit")
+	rejected := *c
+	rejected.TokenHash = "audit-start"
+	if err := s.CreateStepUpChallenge(&rejected, &AuditEvent{ID: "start-event", Action: "auth.step_up_challenge", Outcome: "success", CreatedAt: now}); err == nil || !strings.Contains(err.Error(), "audit failed") {
+		t.Fatalf("expected injected audit failure, got %v", err)
+	}
+	if saved, err := s.GetStepUpChallenge(rejected.TokenHash, rejected.UserID, rejected.SessionID); err != nil || saved != nil {
+		t.Fatal("failed audit left pending challenge")
+	}
+	if ok, err := s.CompleteStepUpChallenge(c, grant(c), &AuditEvent{ID: "event", Action: "auth.step_up", Outcome: "success", CreatedAt: now}); err == nil || !strings.Contains(err.Error(), "audit failed") || ok {
+		t.Fatalf("expected injected audit failure, got %v (completed %v)", err, ok)
 	}
 	if saved, err := s.GetStepUpChallenge(c.TokenHash, c.UserID, c.SessionID); err != nil || saved == nil {
 		t.Fatal("failed audit consumed challenge")

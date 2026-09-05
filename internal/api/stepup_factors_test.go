@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Busness-app/kysignon-server/internal/crypto"
+	"github.com/Busness-app/kysignon-server/internal/store"
 )
 
 type stepUpReply struct {
@@ -174,6 +175,27 @@ func TestRecoveryStepUpOnlyEnrollsReplacementFactor(t *testing.T) {
 	if r := f.post(t, "/api/auth/step-up", request, ""); r.Code != 401 {
 		t.Fatal("recovery code replayed")
 	}
+	// Recovery permits replacement enrollment, including its existing code-rotation side effect.
+	secret, _, err := f.srv.mfaEngine.GenerateTOTPSecret(f.user.Username, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := f.post(t, "/api/user/mfa/totp/enable", map[string]string{"secret": secret, "code": testTOTPCode(t, secret)}, grant.StepUpToken)
+	if r.Code != 200 {
+		t.Fatalf("replacement failed: %d %s", r.Code, r.Body.String())
+	}
+	var enabled struct {
+		RecoveryCodes []string `json:"recoveryCodes"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &enabled); err != nil || len(enabled.RecoveryCodes) != 8 {
+		t.Fatalf("enrollment did not rotate recovery codes: %v", err)
+	}
+	if valid, err := f.srv.mfaEngine.VerifyAndConsumeRecoveryCode(f.user.ID, codes[1]); err != nil || valid {
+		t.Fatalf("old recovery set survived: %v", err)
+	}
+	if valid, err := f.srv.mfaEngine.VerifyAndConsumeRecoveryCode(f.user.ID, enabled.RecoveryCodes[0]); err != nil || !valid {
+		t.Fatalf("new recovery set unusable: %v", err)
+	}
 	// Step-up never changes the login evidence used by OIDC.
 	sess, err := f.store.GetSessionByTokenHash(crypto.HashSHA256(f.cookie.Value), time.Hour)
 	if err != nil || sess == nil || sess.PrimaryAuthenticatedAt != nil || sess.FactorMethod != "" {
@@ -230,5 +252,59 @@ func TestStepUpSupportsExistingClientIDsWithSpaces(t *testing.T) {
 	r := f.do(t, "DELETE", "/api/admin/clients/app%20one", token)
 	if r.Code != 200 {
 		t.Fatalf("existing client cannot be deleted: %d %s", r.Code, r.Body.String())
+	}
+}
+
+func TestStepUpAuditsDeniedAndPending(t *testing.T) {
+	for _, scenario := range []string{"account_locked", "mfa_required", "challenge_issued"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, cleanup := newStepUpFixture(t)
+			defer cleanup()
+			a := newTestAuthenticator(t, "YXVkaXQta2V5")
+			enrolPasskey(t, f.store, f.user.ID, a)
+			if scenario == "account_locked" {
+				for range store.MaxFailedLogins {
+					if _, err := f.store.RecordFailedLogin(f.user.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			request := map[string]string{"password": f.pass, "operation": "POST /api/user/recovery-codes"}
+			expected := 400
+			action, outcome := "auth.step_up", "denied"
+			if scenario == "account_locked" {
+				expected = 429
+			}
+			if scenario == "challenge_issued" {
+				request["method"] = "webauthn"
+				expected = 200
+				action = "auth.step_up_challenge"
+				outcome = "success"
+			}
+			r := f.post(t, "/api/auth/step-up", request, "")
+			if r.Code != expected {
+				t.Fatalf("request: %d %s", r.Code, r.Body.String())
+			}
+			events, _, err := f.store.ListAuditEvents(100, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.Action != action || event.Outcome != outcome || event.ActorID != f.user.ID {
+					continue
+				}
+				var details map[string]string
+				if err := json.Unmarshal([]byte(event.DetailsJSON), &details); err != nil {
+					t.Fatal(err)
+				}
+				if details["reason"] == scenario && details["operation"] == request["operation"] {
+					if scenario == "challenge_issued" && details["method"] != "webauthn" {
+						t.Fatal("missing method")
+					}
+					return
+				}
+			}
+			t.Fatalf("no %s audit for %s", outcome, scenario)
+		})
 	}
 }

@@ -75,11 +75,22 @@ func (s *Store) CreateStepUpToken(t *StepUpToken, audit *AuditEvent) error {
 	return tx.Commit()
 }
 
-func (s *Store) CreateStepUpChallenge(c *StepUpChallenge) error {
-	_, err := s.db.Exec(`INSERT INTO step_up_challenges
+func (s *Store) CreateStepUpChallenge(c *StepUpChallenge, audit *AuditEvent) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO step_up_challenges
  (token_hash,user_id,session_id,operation,method,proof,primary_authenticated_at,expires_at)
  VALUES (?,?,?,?,?,?,?,?)`, c.TokenHash, c.UserID, c.SessionID, c.Operation, c.Method, c.Proof, c.PrimaryAuthenticatedAt, c.ExpiresAt)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := recordAuditTx(tx, audit); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) GetStepUpChallenge(hash, userID, sessionID string) (*StepUpChallenge, error) {

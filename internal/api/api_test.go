@@ -332,6 +332,7 @@ func TestOIDCAuthorizeAndPKCETokenFlowViaHTTP(t *testing.T) {
 		Enabled:           true,
 	}
 	_ = dbStore.CreateOAuthClient(client)
+	allowTestAppAccess(t, dbStore, client.ID)
 
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	h := sha256.Sum256([]byte(verifier))

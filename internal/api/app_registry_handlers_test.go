@@ -100,6 +100,8 @@ func TestAppRegistryAdminAPI(t *testing.T) {
 	if len(actions) != 2 {
 		t.Fatal("missing link audit", actions)
 	}
+	allowTestAppAccess(t, db, "client")
+	allowTestAppAccess(t, db, "launcher")
 	// Legacy launcher cards retain their original IDs and remain visible.
 	r = adminRequestNoStepUp(t, srv, "GET", "/api/user/applications", userCookie, "")
 	if r.Code != 200 || !strings.Contains(r.Body.String(), `"id":"launcher"`) || !strings.Contains(r.Body.String(), `"id":"client"`) {

@@ -98,6 +98,9 @@ func (s *Store) DeleteGroup(id string, audit *AuditEvent) error {
 		}
 		return err
 	}
+	if err = revokeLostAppAccessTx(tx); err != nil {
+		return err
+	}
 	setGroupAuditDetails(audit, map[string]string{"name": name})
 	if err = recordAuditTx(tx, audit); err != nil {
 		return err
@@ -127,6 +130,9 @@ func (s *Store) SetGroupMembership(groupID, userID string, member bool, audit *A
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrGroupTargetMissing
 		}
+		return err
+	}
+	if err = revokeLostAppAccessTx(tx); err != nil {
 		return err
 	}
 	setGroupAuditDetails(audit, map[string]string{"userId": userID, "username": username, "groupName": groupName})

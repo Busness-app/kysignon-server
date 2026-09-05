@@ -309,7 +309,7 @@ func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redi
 
 	// Register the token before handing it out, so revocation has something to revoke.
 	if err := e.store.RecordIssuedToken(&store.IssuedToken{
-		JTI: accessJTI, UserID: user.ID, ClientID: clientID, ExpiresAt: exp, SessionID: authCode.SessionID,
+		AuthorizationCodeID: authCode.ID, JTI: accessJTI, UserID: user.ID, ClientID: clientID, ExpiresAt: exp, SessionID: authCode.SessionID,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to record issued token: %w", err)
 	}

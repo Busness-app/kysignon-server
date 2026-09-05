@@ -1125,6 +1125,7 @@ button {
 
 /* Settings Sections */
 .settings-section {
+  padding: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -1140,6 +1141,7 @@ button {
   gap: 0.75rem;
 }
 
+.section-header h2,
 .section-title-wrap h2 {
   font-size: 1.125rem;
   font-weight: 600;

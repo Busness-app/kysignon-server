@@ -161,6 +161,8 @@ export interface DirectoryPage<T> {
 }
 
 export interface AppRecord {
+  accessMode: 'all_active_users' | 'assigned_only';
+  enabled: boolean;
   id: string;
   revision: number;
   clientId: string;
@@ -170,3 +172,11 @@ export interface AppRecord {
   systemId: string;
   systemName: string;
 }
+
+export interface AppAccessUser {
+ id: string; username: string; displayName: string; status: 'active' | 'disabled';
+ direct: boolean; groupAssigned: boolean; effective: boolean; preview: boolean;
+ reason: 'user_disabled' | 'app_disabled' | 'client_disabled' | 'all_active_users' | 'direct_assignment' | 'group_assignment' | 'not_assigned';
+}
+export interface AppAccessGroup { id: string; name: string; assigned: boolean }
+export interface AppAccessPage extends DirectoryPage<AppAccessUser> { app: AppRecord; losingAccess: number }

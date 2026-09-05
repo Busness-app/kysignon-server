@@ -18,6 +18,12 @@ import (
 // issueToken puts a token on the revocation registry the way the token endpoint does.
 func issueToken(t *testing.T, db *store.Store, userID, clientID string) string {
 	t.Helper()
+	if c, err := db.GetOAuthClientByID(clientID); err != nil {
+		t.Fatal(err)
+	} else if c == nil {
+		newClient(t, db, clientID, []string{"https://example.com/cb"}, []string{"openid"})
+	}
+	allowTestAppAccess(t, db, clientID)
 	jti := uuid.New().String()
 	if err := db.RecordIssuedToken(&store.IssuedToken{
 		JTI: jti, UserID: userID, ClientID: clientID, SessionID: oauthSession(t, db, userID),

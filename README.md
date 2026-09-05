@@ -161,8 +161,8 @@ is [docs/RESTORE.md](docs/RESTORE.md).
 Administrators can create, rename and delete groups under **Groups**, manage each group's
 members, or open membership controls from a row in **Users**. Names are trimmed and unique
 under the directory's SQLite `NOCASE` collation; renaming preserves the group's stable ID.
-Membership does not change the user's global role. App assignment and SCIM group provisioning
-are subsequent roadmap steps.
+Membership does not change the user's global role. Group assignments grant app access;
+SCIM group provisioning remains a subsequent roadmap step.
 
 Group and membership mutations require a single-use step-up grant for their exact method
 and path and commit with their audit event. Repeated add/remove requests are idempotent;
@@ -194,7 +194,8 @@ Administrators can use **App connections** to associate an OAuth client, launche
 and provisioning system that belong to the same application. Review the connection names
 and IDs, then confirm the link with step-up authentication. **Unlink** separates one
 connection again. Each app has at most one connection of each type; overlapping types and
-stale selections are rejected. Linking/unlinking commits with its audit record.
+stale selections are rejected. Linking/unlinking commits with its audit record. Linking requires matching access settings
+and no assignments on either app; unlinking copies the access settings and assignments.
 
 Existing connections initially receive separate stable app IDs, even when their names or
 URLs match. Linking retains the selected app ID and all original connection IDs, client
@@ -202,16 +203,42 @@ secrets, callback URLs, launcher cards and sync settings. New connections automa
 receive their own app ID. Deleting a connection removes its reference; the app ID survives
 while another connection remains. Connection settings stay in their existing admin views.
 
-Linking currently organizes connections only. App assignments, access enforcement, and
-assignment-aware provisioning are subsequent roadmap steps. Existing access and launcher
-visibility continue to use their current settings.
+Use **Manage access** to assign users or groups and preview effective access. Existing
+apps migrate to explicit **All active users** access. New apps default to **Assigned users
+only**, with no grants. Direct and group assignments combine by union; removing one grant
+preserves access while another applies. Administrators need assignments too. Disabled
+users, disabled apps, and disabled linked OAuth clients cannot sign in. Use **Manage
+launcher cards** to edit cards independently of your own app entitlements.
+
+Policy changes show how many users would lose access across the directory, even when the
+list is filtered. The preview reflects current membership; edits use app revisions to
+reject stale settings. Mutations require operation-bound step-up and atomic audit records.
+Launcher-only access controls visibility, not authorization at the destination website.
+Provisioning continues with its existing scope; assignment-aware SCIM delivery is PR08.
+
+OAuth authorization and token exchange both enforce current access. Losing effective
+access revokes online tokens and invalidates authorization codes in the same transaction.
+Token registration rechecks access and the originating code atomically, including during
+membership-removal races. Re-granting access cannot revive invalidated codes or tokens.
+Offline JWT consumers may accept old access tokens for up to 15 minutes, and an app's own
+session may last longer until downstream logout integration ships.
 
 Admin API: `GET /api/admin/app-registry` accepts the same pagination bounds as group lists
 and searches connection names and IDs. `POST /api/admin/app-registry/{id}/link` accepts
 `sourceId`, `targetRevision`, and `sourceRevision`; the target app ID is retained.
 `POST /api/admin/app-registry/{id}/unlink` accepts `kind` (`client`, `launcher`, or `system`)
 and `revision`, returning the new app ID. Both mutations require operation-bound step-up.
-A `409` means the connections overlap or changed; reload before choosing again.
+A `409` means the selection is stale or its access settings/assignments prevent linking.
+Reload before choosing again.
+
+Access API: `GET /api/admin/app-registry/{id}/access-users` returns paginated users,
+current/preview access, the current app revision and an unfiltered `losingAccess` count.
+Optional `mode` (`assigned_only` or `all_active_users`) and `enabled` preview policy changes.
+`GET /api/admin/app-registry/{id}/access-groups` lists groups and assignment state.
+Both accept the same pagination bounds as group lists. `PUT .../{id}/access-policy`
+requires `mode`, `enabled`, and `revision`. `PUT`/`DELETE
+/api/admin/app-registry/{id}/assignments/{kind}/{principal}` adds/removes an individual
+assignment (`kind` is `users` or `groups`). Duplicate assignments are idempotent.
 
 ## Integration Requirements
 

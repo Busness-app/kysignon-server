@@ -209,6 +209,7 @@ func TestAdminRevocationIsTransactional(t *testing.T) {
 		t.Fatal(err)
 	}
 	jti := uuid.New().String()
+	newClient(t, f.store, "spa", []string{"https://example.com/cb"}, []string{"openid"})
 	if err := f.store.RecordIssuedToken(&store.IssuedToken{
 		JTI: jti, UserID: f.user.ID, ClientID: "spa", SessionID: oauthSession(t, f.store, f.user.ID),
 		ExpiresAt: time.Now().UTC().Add(time.Hour),
@@ -252,6 +253,7 @@ func TestResetUserMFAIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	jti := uuid.New().String()
+	newClient(t, f.store, "spa", []string{"https://example.com/cb"}, []string{"openid"})
 	if err := f.store.RecordIssuedToken(&store.IssuedToken{
 		JTI: jti, UserID: f.user.ID, ClientID: "spa", SessionID: oauthSession(t, f.store, f.user.ID),
 		ExpiresAt: time.Now().UTC().Add(time.Hour),

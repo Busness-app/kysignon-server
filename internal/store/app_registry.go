@@ -13,6 +13,8 @@ var ErrAppLinkConflict = errors.New("application links changed or conflict")
 var ErrAppRecordMissing = errors.New("application record not found")
 
 type AppRecord struct {
+	AccessMode   string `json:"accessMode"`
+	Enabled      bool   `json:"enabled"`
 	ID           string `json:"id"`
 	Revision     int    `json:"revision"`
 	ClientID     string `json:"clientId"`
@@ -62,11 +64,11 @@ const appRecordFrom = ` FROM app_registry a
  LEFT JOIN oauth_clients c ON c.id=a.client_id
  LEFT JOIN applications l ON l.id=a.launcher_id
  LEFT JOIN paired_systems s ON s.id=a.system_id`
-const appRecordSelect = `SELECT a.id,a.revision,COALESCE(a.client_id,''),COALESCE(c.client_name,''),COALESCE(a.launcher_id,''),COALESCE(l.name,''),COALESCE(a.system_id,''),COALESCE(s.name,'')`
+const appRecordSelect = `SELECT a.id,a.revision,COALESCE(a.client_id,''),COALESCE(c.client_name,''),COALESCE(a.launcher_id,''),COALESCE(l.name,''),COALESCE(a.system_id,''),COALESCE(s.name,''),a.access_mode,a.enabled`
 
 func scanAppRecord(row interface{ Scan(...any) error }) (AppRecord, error) {
 	var a AppRecord
-	err := row.Scan(&a.ID, &a.Revision, &a.ClientID, &a.ClientName, &a.LauncherID, &a.LauncherName, &a.SystemID, &a.SystemName)
+	err := row.Scan(&a.ID, &a.Revision, &a.ClientID, &a.ClientName, &a.LauncherID, &a.LauncherName, &a.SystemID, &a.SystemName, &a.AccessMode, &a.Enabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrAppRecordMissing
 	}
@@ -146,6 +148,9 @@ func (s *Store) LinkAppRecords(targetID, sourceID string, targetRevision, source
 	if err != nil {
 		return err
 	}
+	if err = ensureAppLinkPoliciesTx(tx, target, source); err != nil {
+		return err
+	}
 	if (target.ClientID != "" && source.ClientID != "") || (target.LauncherID != "" && source.LauncherID != "") || (target.SystemID != "" && source.SystemID != "") {
 		return ErrAppLinkConflict
 	}
@@ -212,6 +217,14 @@ func (s *Store) UnlinkAppRecord(id, kind string, revision int, audit *AuditEvent
 	}
 	if _, err = tx.Exec(`INSERT INTO app_registry(id,`+column+`) VALUES(?,?)`, newID, refs[kind]); err != nil {
 		return "", err
+	}
+	if _, err = tx.Exec(`UPDATE app_registry SET access_mode=?,enabled=? WHERE id=?`, a.AccessMode, a.Enabled, newID); err != nil {
+		return "", err
+	}
+	for _, spec := range []struct{ table, column string }{{"app_user_assignments", "user_id"}, {"app_group_assignments", "group_id"}} {
+		if _, err = tx.Exec(`INSERT INTO `+spec.table+`(app_id,`+spec.column+`) SELECT ?,`+spec.column+` FROM `+spec.table+` WHERE app_id=?`, newID, id); err != nil {
+			return "", err
+		}
 	}
 	if err = appRegistryAudit(audit, map[string]any{"previous": a, "connection": kind, "newAppId": newID}); err != nil {
 		return "", err

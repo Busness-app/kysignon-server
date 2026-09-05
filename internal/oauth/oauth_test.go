@@ -100,6 +100,7 @@ func TestAuthorizationCodeExchangeWithPKCE(t *testing.T) {
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 
 	// Create Auth Code
+	allowTestAppAccess(t, dbStore, client.ID)
 	code, err := engine.CreateAuthorizationCode(client.ID, oauthSession(t, dbStore, user.ID), "https://kypost.local/callback", "openid profile", challenge, "S256")
 	if err != nil {
 		t.Fatalf("CreateAuthorizationCode failed: %v", err)

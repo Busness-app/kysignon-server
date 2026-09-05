@@ -1,4 +1,4 @@
-import { parseAppRecordPage } from './parsers';
+import { parseAppRecordPage, parseAppAccessPage } from './parsers';
 import { describe, expect, it } from 'vitest';
 import {
   parseGroupPage,
@@ -318,10 +318,20 @@ describe('group directory pages', () => {
 });
 
 it('validates app registry references and revisions', () => {
-  const record = { id: 'app', revision: 1, clientId: 'client', clientName: 'Example', launcherId: '', launcherName: '', systemId: '', systemName: '' };
+  const record = { id: 'app', revision: 1, accessMode: 'assigned_only', enabled: true, clientId: 'client', clientName: 'Example', launcherId: '', launcherName: '', systemId: '', systemName: '' };
   const page = { records: [record], total: 1, limit: 25, offset: 0 };
   expect(parseAppRecordPage(page).items[0]).toEqual(record);
   expect(() => parseAppRecordPage({ ...page, records: [{ ...record, revision: 0 }] })).toThrow();
   expect(() => parseAppRecordPage({ ...page, records: [{ ...record, clientId: '' }] })).toThrow();
   expect(() => parseAppRecordPage({ ...page, records: [{ ...record, systemId: 42 }] })).toThrow();
+});
+
+it('validates effective-access decisions and preview metadata', () => {
+ const app = { id: 'app', revision: 1, accessMode: 'assigned_only', enabled: true, clientId: 'c', clientName: 'C', launcherId: '', launcherName: '', systemId: '', systemName: '' };
+ const user = { id: 'u', username: 'User', displayName: '', status: 'active', direct: false, groupAssigned: true, effective: true, preview: false, reason: 'group_assignment' };
+ const page = { app, users: [user], total: 1, limit: 25, offset: 0, losingAccess: 1 };
+ expect(parseAppAccessPage(page).items[0].effective).toBe(true);
+ expect(() => parseAppAccessPage({ ...page, users: [{ ...user, effective: 'yes' }] })).toThrow();
+ expect(() => parseAppAccessPage({ ...page, users: [{ ...user, reason: 'unknown' }] })).toThrow();
+ expect(() => parseAppAccessPage({ ...page, losingAccess: -1 })).toThrow();
 });

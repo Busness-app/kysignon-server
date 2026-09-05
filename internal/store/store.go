@@ -349,7 +349,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateStepUpChallenges(); err != nil {
 		return err
 	}
-	return s.migrateAppRegistry()
+	if err := s.migrateAppRegistry(); err != nil {
+		return err
+	}
+	return s.migrateAppAccess()
 }
 
 // migrateSyncEventLease adds the delivery lease column to pre-existing databases.
@@ -1833,7 +1836,7 @@ func (s *Store) UpdateOAuthClientWithAudit(c *OAuthClient, revokeTokens bool, au
 		c.ClientName, c.ClientType, c.ClientSecretHash, c.RedirectURIsJSON, c.AllowedScopesJSON, c.LaunchURL, c.Description, c.IconName, c.Enabled, c.ID); err != nil {
 		return err
 	}
-	if revokeTokens {
+	if revokeTokens || !c.Enabled {
 		if err := revokeClientTokensTx(tx, c.ID, time.Now().UTC()); err != nil {
 			return err
 		}
@@ -1882,10 +1885,22 @@ func revokeClientTokensTx(tx *sql.Tx, clientID string, now time.Time) error {
 
 // Authorization Codes
 func (s *Store) CreateAuthorizationCode(code *AuthorizationCode) error {
-	query := `INSERT INTO authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, created_at, session_id, primary_authenticated_at, factor_authenticated_at, factor_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, created_at, session_id, primary_authenticated_at, factor_authenticated_at, factor_method) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS
+ (SELECT 1 FROM effective_app_access e JOIN app_registry a ON a.id=e.app_id JOIN oauth_clients c ON c.id=a.client_id
+ JOIN sessions sess ON sess.user_id=e.user_id WHERE c.id=? AND c.enabled AND e.user_id=? AND sess.id=? AND sess.expires_at>?)`
 	code.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, code.ID, code.CodeHash, code.ClientID, code.UserID, code.RedirectURI, code.Scope, code.CodeChallenge, code.CodeChallengeMethod, code.Nonce, code.ExpiresAt, code.CreatedAt, code.SessionID, code.PrimaryAuthenticatedAt, code.FactorAuthenticatedAt, code.FactorMethod)
-	return err
+	result, err := s.db.Exec(query, code.ID, code.CodeHash, code.ClientID, code.UserID, code.RedirectURI, code.Scope, code.CodeChallenge, code.CodeChallengeMethod, code.Nonce, code.ExpiresAt, code.CreatedAt, code.SessionID, code.PrimaryAuthenticatedAt, code.FactorAuthenticatedAt, code.FactorMethod, code.ClientID, code.UserID, code.SessionID, code.CreatedAt)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrAppAccessDenied
+	}
+	return nil
 }
 
 func (s *Store) GetValidAuthorizationCode(codeHash string) (*AuthorizationCode, error) {
@@ -1924,9 +1939,9 @@ func (s *Store) RecordIssuedToken(t *IssuedToken) error {
 	query := `INSERT INTO issued_tokens (jti, user_id, client_id, expires_at, created_at, session_id)
  SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS
  (SELECT 1 FROM sessions JOIN users ON users.id = sessions.user_id
- WHERE sessions.id = ? AND sessions.user_id = ? AND sessions.expires_at > ? AND users.status = 'active')`
+ WHERE sessions.id = ? AND sessions.user_id = ? AND sessions.expires_at > ? AND users.status = 'active') AND EXISTS (SELECT 1 FROM effective_app_access e JOIN app_registry a ON a.id=e.app_id JOIN oauth_clients c ON c.id=a.client_id WHERE e.user_id=? AND c.id=? AND c.enabled) AND (?='' OR EXISTS(SELECT 1 FROM authorization_codes ac WHERE ac.id=? AND ac.session_id=? AND ac.client_id=? AND ac.user_id=? AND ac.used_at IS NOT NULL AND ac.expires_at>?))`
 	t.CreatedAt = time.Now().UTC()
-	res, err := s.db.Exec(query, t.JTI, t.UserID, t.ClientID, t.ExpiresAt, t.CreatedAt, t.SessionID, t.SessionID, t.UserID, t.CreatedAt)
+	res, err := s.db.Exec(query, t.JTI, t.UserID, t.ClientID, t.ExpiresAt, t.CreatedAt, t.SessionID, t.SessionID, t.UserID, t.CreatedAt, t.UserID, t.ClientID, t.AuthorizationCodeID, t.AuthorizationCodeID, t.SessionID, t.ClientID, t.UserID, t.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -1935,7 +1950,7 @@ func (s *Store) RecordIssuedToken(t *IssuedToken) error {
 		return err
 	}
 	if n != 1 {
-		return errors.New("originating session is no longer active")
+		return ErrAppAccessDenied
 	}
 	return nil
 }

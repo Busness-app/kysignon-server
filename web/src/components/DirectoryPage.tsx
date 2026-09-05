@@ -3,8 +3,8 @@ import { apiJson, errorMessage } from '../api';
 import type { DirectoryPage } from '../types';
 
 export const pageSize = 25;
-export function useDirectoryPage<T>(url: string, parse: (value: unknown) => DirectoryPage<T>) {
-  const [page, setPage] = useState<DirectoryPage<T> | null>(null);
+export function useDirectoryPage<P extends DirectoryPage<unknown>>(url: string, parse: (value: unknown) => P) {
+  const [page, setPage] = useState<P | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const reload = useCallback(() => setRevision(value => value + 1), []);

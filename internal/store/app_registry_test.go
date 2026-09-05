@@ -47,10 +47,16 @@ func TestAppRegistryMigrationAndLinkLifecycle(t *testing.T) {
 			}
 		}
 	}
+	if _, err := s.db.Exec(`DROP VIEW effective_app_access; DROP VIEW app_access_facts;`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.db.Exec("DROP TABLE app_registry"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.migrateAppRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.migrateAppAccess(); err != nil {
 		t.Fatal(err)
 	}
 	rows, total, err := s.ListAppRecords("Same", 25, 0)

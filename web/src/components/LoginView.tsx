@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ApiError, apiJson, errorMessage } from '../api';
+import { ApiError, apiJson, apiRequest, isRecord, errorMessage } from '../api';
 import { parseAuthStep, parseBeginLogin, parsePushStatus } from '../parsers';
 import { sameOriginPath } from '../returnTo';
 import { getPasskeyAssertion, isPasskeySupported } from '../webauthn';
@@ -12,7 +12,19 @@ interface LoginViewProps {
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
+  const interaction = new URLSearchParams(window.location.search).get('interaction');
+  const [interactionDetails, setInteractionDetails] = useState<{ appName: string; username: string; requiresMFA: boolean } | null>(null);
   const [username, setUsername] = useState('');
+  useEffect(() => {
+    if (!interaction) return;
+    let active = true;
+    apiJson('/api/auth/authorization/' + encodeURIComponent(interaction), value => {
+      if (!isRecord(value) || typeof value.appName !== 'string' || typeof value.username !== 'string' || typeof value.requiresMFA !== 'boolean') throw new Error('Invalid sign-in request');
+      return { appName: value.appName, username: value.username, requiresMFA: value.requiresMFA };
+    }).then(details => { if (active) { setInteractionDetails(details); setUsername(details.username); } })
+      .catch(err => { if (active) setError(errorMessage(err, 'Could not load sign-in request')); });
+    return () => { active = false; };
+  }, [interaction]);
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +54,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
     try {
       const resp = await apiJson('/api/auth/login', parseAuthStep, {
         method: 'POST',
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, interaction: interaction ?? '' }),
       });
 
       if (resp.mfaRequired) {
@@ -75,7 +87,9 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
       setError('The server reported a successful sign-in but returned no account');
       return;
     }
-    if (returnTo) {
+    if (interaction) {
+      window.location.href = '/oauth/authorize?interaction=' + encodeURIComponent(interaction);
+    } else if (returnTo) {
       window.location.href = returnTo;
     } else {
       onLoginSuccess(user);
@@ -207,6 +221,17 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
     }
   };
 
+  const cancelInteraction = async () => {
+    setLoading(true);
+    try {
+      await apiRequest('/api/auth/authorization/cancel', { method: 'POST', body: JSON.stringify({ interaction }) });
+      window.location.href = '/';
+    } catch (err) {
+      setError(errorMessage(err, 'Could not cancel sign-in'));
+      setLoading(false);
+    }
+  };
+
   const canUseWebauthn = mfaMethods.includes('webauthn') && isPasskeySupported();
   const spinner = <RefreshCw className="spin" size={16} />;
 
@@ -226,9 +251,12 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
             </div>
           )}
 
+          {interaction && <button type="button" className="text-btn" onClick={cancelInteraction}>Cancel sign-in</button>}
+
           {!mfaRequired && (
             <form onSubmit={handlePasswordSubmit} className="login-form">
-              <h2>Sign in</h2>
+              <h2>{interaction ? 'Verify your sign-in' : 'Sign in'}</h2>
+              {interactionDetails && <p className="text-muted">Continue to {interactionDetails.appName}. {interactionDetails.requiresMFA ? 'Use your password and an enrolled authenticator or passkey. Recovery codes do not meet this request.' : 'Enter your password and complete any enrolled second factor.'}</p>}
               <div className="form-group">
                 <label className="form-label" htmlFor="username">Username</label>
                 <input
@@ -236,6 +264,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                   type="text"
                   className="form-input font-mono"
                   autoComplete="username"
+                  readOnly={Boolean(interactionDetails?.username)}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   autoFocus
@@ -254,7 +283,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                   required
                 />
               </div>
-              <button type="submit" className="primary-btn full-width" disabled={loading}>
+              <button type="submit" className="primary-btn full-width" disabled={loading || Boolean(interaction && !interactionDetails)}>
                 {loading ? spinner : 'Sign in'}
               </button>
             </form>

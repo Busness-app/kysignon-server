@@ -19,9 +19,9 @@ func (s *Store) migrateAuthenticationEvidence() error {
 		columns []string
 	}{
 		{"sessions", []string{"primary_authenticated_at DATETIME", "factor_authenticated_at DATETIME", "factor_method TEXT NOT NULL DEFAULT ''"}},
-		{"authorization_codes", []string{"session_id TEXT NOT NULL DEFAULT ''", "primary_authenticated_at DATETIME", "factor_authenticated_at DATETIME", "factor_method TEXT NOT NULL DEFAULT ''"}},
+		{"authorization_codes", []string{"session_id TEXT NOT NULL DEFAULT ''", "primary_authenticated_at DATETIME", "factor_authenticated_at DATETIME", "factor_method TEXT NOT NULL DEFAULT ''", "authentication_expires_at DATETIME"}},
 		{"issued_tokens", []string{"session_id TEXT"}},
-		{"mfa_tokens", []string{"primary_authenticated_at DATETIME"}},
+		{"mfa_tokens", []string{"primary_authenticated_at DATETIME", "interaction_hash TEXT NOT NULL DEFAULT ''"}},
 		{"mfa_challenges", []string{"verified_at DATETIME"}},
 	} {
 		rows, err := tx.Query("PRAGMA table_info(" + table.name + ")")

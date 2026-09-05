@@ -272,6 +272,36 @@ disabling a user, resetting their MFA, changing their password, or revoking thei
 invalidates all of theirs. Services that validate tokens offline against JWKS cannot see a
 revocation until expiry — call `/oauth/userinfo` where revocation must take effect at once.
 
+**Authorization re-authentication (PR05a).** Ordinary requests reuse SSO. Following
+[OpenID Connect authentication requests](https://openid.net/specs/openid-connect-core-1_0.html#AuthRequest),
+`prompt=login` and `max_age=0` require a new password and any enrolled second factor
+for each authorization request. A positive `max_age` (whole seconds, at most
+2147483647) limits password age at authorization and again when the code is exchanged.
+`prompt=none` never opens a login screen; missing or insufficient authentication returns
+`login_required` to the validated redirect URI with the original state.
+
+`acr_values` supports `urn:kysignon:acr:password` and `urn:kysignon:acr:mfa`.
+The first value is the requested minimum; MFA can satisfy password assurance.
+Recovery codes do not satisfy MFA. Unsupported values, unsupported prompt modes,
+combined prompts, duplicate parameters, malformed ages, and alternate `request`,
+`request_uri`, or `claims` inputs return `invalid_request`. Discovery advertises the
+two supported request classes. Passkey-only app policy is planned in PR05b.
+
+Interactive login uses the existing password, TOTP, push, passkey and recovery screens.
+A five-minute, single-use interaction binds the original validated request (including
+client, redirect, scope, PKCE, nonce and state) to an HttpOnly browser cookie and the
+resulting login session. A signed-in user must re-authenticate as that same account.
+Up to ten interactions can be outstanding per browser, with a server-wide cap of 10000.
+Expired interactions are cleaned on creation. A different tab's login cannot satisfy
+another interaction; if the browser's session changes, restart from the app. Cancel
+sign-in burns the interaction and returns to the dashboard. Concurrent completion and
+cancellation serialize at the database; a code already issued cannot be recalled by
+cancelling the former interaction. Administrative step-up grants are never accepted.
+
+Per-app administrator policies, policy revision checks, and independent factor freshness
+remain PR05b; clients can request stronger authentication now, but server-configured
+per-app re-authentication is not yet available.
+
 **Authentication claims describe the login that established the session.** `auth_time`
 is the time the password was verified, preserved across later SSO redirects. The second
 factor's verification time is recorded separately; completing MFA or issuing a token

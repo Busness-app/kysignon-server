@@ -101,6 +101,16 @@ func TestDirectSCIMSystemCreationAndRecovery(t *testing.T) {
 	}
 }
 
+func TestKyBookmarksLegacyPresetUsesSignedWebhook(t *testing.T) {
+	sys := &store.PairedSystem{SystemType: "kybookmarks", CallbackURL: "https://bookmarks.example.com/scim/v2"}
+	for _, eventType := range []string{"user.created", "user.updated", "user.deleted"} {
+		method, target, bodyRequired := resolveSCIMURL(sys, eventType, "user-1")
+		if method != http.MethodPost || target != "https://bookmarks.example.com/api/sync/events" || !bodyRequired {
+			t.Errorf("%s resolved to %s %s body=%v", eventType, method, target, bodyRequired)
+		}
+	}
+}
+
 func TestAccountSyncWebhookDispatch(t *testing.T) {
 	engine, dbStore, adminUser, cleanup := setupTestSyncEngine(t)
 	defer cleanup()

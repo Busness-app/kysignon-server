@@ -128,14 +128,23 @@ docker compose down
 docker compose run --rm --no-deps --entrypoint sh kysignon-server -c 'ls -A /data | wc -l'
 ```
 
-That must print `0`. If it does not, the old volume still holds data. If you might still
-want it, copy it out first:
+That must print `0`. If it does not, the old volume still holds data, and you keep a copy
+of it before anything else: it holds every change made after the capsule was sealed, and it
+is the only record Step 5 can walk. Create the destination yourself, mode 700, so the daemon
+does not create it world-readable; run the copy as root, as the copy-in below does, because
+the image's user cannot write a directory it does not own:
 
 ```bash
-docker compose run --rm --no-deps -v "$PWD/old-data:/out" --entrypoint sh kysignon-server -c 'cp -a /data/. /out/'
+mkdir -m 700 old-data
+docker compose run --rm --no-deps --user root -v "$PWD/old-data:/out" --entrypoint sh kysignon-server \
+  -c 'cp -a /data/. /out/ && ls -A /out | wc -l'
 ```
 
-Then remove the volume, let compose recreate it, and check again:
+The count it prints must equal the count from the `/data` check above, and the command must
+exit 0. `old-data/` is now the old live directory in the clear, with the same keys the
+capsule holds; it is removed in "Afterwards", not before Step 5 is done.
+
+Only with the copy confirmed, remove the volume. This is irreversible:
 
 ```bash
 docker compose down -v
@@ -189,8 +198,12 @@ OAuth clients, paired systems, sessions, and `secret.key`. Anything you revoked 
 after that moment is undone, and a session cookie minted before the capsule still validates
 against the restored server.
 
-1. Revoke all sessions from the admin UI. Every signed-in user, including you, signs in again.
-2. Walk the audit log from `created_at` to the moment the old server was lost, and re-apply
+1. Revoke sessions. The admin UI's control is per account: the row action on each user in
+   Users, repeated for every user in the list. After hardware loss that is enough. After a
+   suspected compromise it is not; rotating `secret.key` (step 3) is what invalidates every
+   session and CSRF token at once, including any the list does not show you.
+2. Walk the old audit log in `old-data/kysignon.db` from `created_at` to the moment the old
+   server was lost (the restored server's log stops at `created_at`), and re-apply
    what happened after the capsule: disabled accounts, rotated passwords, deleted or rotated
    OAuth clients, removed paired systems, reset MFA.
 3. If the reason for the restore was a suspected compromise rather than hardware loss, treat
@@ -201,8 +214,9 @@ against the restored server.
 
 ## Afterwards
 
-- Delete the `restored/` directory once the server runs from its own copy. It is the live
-  directory in the clear.
+- Delete the `restored/` directory once the server runs from its own copy, and `old-data/`
+  once Step 5 is done. Both are the live directory in the clear, keys included. Files in
+  `old-data/` are root-owned after the copy, so `sudo rm -rf old-data`.
 - The custodians' cards are unchanged; a restore does not consume them. If a card was
   exposed during the restore (read aloud, photographed, pasted anywhere shared), that is a
   key compromise for the whole suite, not for one server: run a new ceremony.

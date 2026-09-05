@@ -150,6 +150,10 @@ docker compose exec kysignon /usr/local/bin/kysignon bootstrap-admin --username 
 `bootstrap-admin` only creates a missing account. It will not overwrite the password of an
 account that already exists — change those from the admin UI, so the action is audited.
 
+Restoring from a `.kycap` backup is `kysignon restore`, with k custodian shares typed on
+stdin. The full procedure, including putting the result back into service and proving it,
+is [docs/RESTORE.md](docs/RESTORE.md).
+
 ---
 
 ## Integration Requirements

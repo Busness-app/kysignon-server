@@ -3,6 +3,10 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/Busness-app/ky-primitives/capsule"
@@ -127,7 +131,41 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 }
 
 func ListLocalCopies(dir, appName string) ([]LocalCopy, error) {
+	if err := migrateLegacyLocalCopies(dir, appName); err != nil {
+		return nil, err
+	}
 	return recoveryclient.ListLocalCopies(dir, appName)
+}
+
+func migrateLegacyLocalCopies(dir, appName string) error {
+	if dir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	legacyPrefix := FilenameSafe(appName) + "-"
+	legacyName := regexp.MustCompile(`^` + regexp.QuoteMeta(legacyPrefix+"cap-"+appName+"-") + `[0-9]+\.kycap$`)
+	for _, entry := range entries {
+		if entry.IsDir() || !legacyName.MatchString(entry.Name()) {
+			continue
+		}
+		oldPath := filepath.Join(dir, entry.Name())
+		newPath := filepath.Join(dir, recoveryclient.LocalPrefix(appName)+entry.Name()[len(legacyPrefix):])
+		if _, err := os.Stat(newPath); err == nil {
+			return fmt.Errorf("migrate legacy local copy %s: destination already exists", entry.Name())
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return fmt.Errorf("migrate legacy local copy %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
 }
 
 func Interval(cfg *config.Config, s SettingsStore) (time.Duration, error) {
@@ -144,6 +182,9 @@ func NextRun(cfg *config.Config, s SettingsStore) (time.Time, bool, error) {
 
 // RunBackup seals the instance once and delivers to every configured destination.
 func RunBackup(ctx context.Context, cfg *config.Config, s SettingsStore, snap Snapshotter, client Depositor, appVersion string) (Result, error) {
+	if err := migrateLegacyLocalCopies(cfg.BackupDir, cfg.AppName); err != nil {
+		return Result{}, err
+	}
 	return recoveryclient.Run(ctx, recoveryclient.RunConfig{
 		DataDir: cfg.DataDir, AppName: cfg.AppName, AppVersion: appVersion,
 		BackupDir: cfg.BackupDir, Keep: cfg.BackupKeep, Sealer: newSealer(cfg.EncryptionKey),

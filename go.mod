@@ -3,7 +3,7 @@ module github.com/Busness-app/kysignon-server
 go 1.26.6
 
 require (
-	github.com/Busness-app/ky-primitives v0.5.0
+	github.com/Busness-app/ky-primitives v0.5.1-0.20260905024730-6cf0208c434b
 	github.com/google/uuid v1.6.0
 	golang.org/x/crypto v0.55.0
 	modernc.org/sqlite v1.56.0

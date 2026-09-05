@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/capsule"
 	"github.com/Busness-app/ky-primitives/recoveryclient"
 	"github.com/Busness-app/kysignon-server/internal/config"
 	"github.com/Busness-app/kysignon-server/internal/crypto"
@@ -24,7 +25,8 @@ func RunRestoreDrill(ctx context.Context, dataDir, serviceName, appVersion strin
 	if recipe == nil {
 		recipe = map[string]any{}
 	}
-	result, err := recoveryclient.Drill(ctx, dataDir, payload, func(scratchDir string) []CheckItem {
+	result, err := recoveryclient.Drill(ctx, dataDir, payload, func(scratchDir string, opened capsule.Manifest) []CheckItem {
+		recipe, _ := opened.VerificationRecipe.(map[string]any)
 		result := &DrillResult{}
 		// 2. Verify Required Files
 		if reqFiles := stringList(recipe["required_files"]); len(reqFiles) > 0 {

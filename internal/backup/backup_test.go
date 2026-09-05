@@ -252,6 +252,31 @@ func TestLocalCopiesWithoutKyRecovery(t *testing.T) {
 	}
 }
 
+func TestLegacyLocalCopyIsMigratedWithoutTouchingForeignFiles(t *testing.T) {
+	dir := t.TempDir()
+	legacy := "KySignOn-cap-KySignOn-123456789.kycap"
+	foreign := "KySignOn-operator-export.kycap"
+	if err := os.WriteFile(filepath.Join(dir, legacy), []byte("sealed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, foreign), []byte("foreign"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	copies, err := backup.ListLocalCopies(dir, "KySignOn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copies) != 1 || copies[0].Name != "KySignOn.cap-KySignOn-123456789.kycap" {
+		t.Fatalf("migrated copies = %+v", copies)
+	}
+	if _, err := os.Stat(filepath.Join(dir, legacy)); !os.IsNotExist(err) {
+		t.Fatalf("legacy filename still exists: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, foreign)); err != nil || string(got) != "foreign" {
+		t.Fatalf("foreign file changed: %q, %v", got, err)
+	}
+}
+
 // The directory may already hold capsules the operator put there: another service's, an
 // export, a restore staged. Pruning touches only what this instance wrote.
 func TestRecoveryTokenIsNeverStoredInTheClear(t *testing.T) {

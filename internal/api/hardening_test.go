@@ -30,6 +30,7 @@ var destructiveAdminRoutes = []struct{ method, path, body string }{
 	{"GET", "/api/admin/backup/export-capsule", ``},
 	{"POST", "/api/admin/backup/pair-remote", `{"recovery_url":"https://r.test","pairing_code":"123456"}`},
 	{"POST", "/api/admin/backup/deposit", ``},
+	{"DELETE", "/api/admin/backup/pairing", ``},
 	{"POST", "/api/admin/backup/pin-key", `{"public_key":"AA==","threshold":2,"total_shares":3}`},
 	{"PUT", "/api/admin/backup/schedule", `{"interval_sec":3600}`},
 }

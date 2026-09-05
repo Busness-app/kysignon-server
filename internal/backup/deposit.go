@@ -75,6 +75,24 @@ func StorePairing(settings SettingsStore, encryptionKey []byte, serverURL, token
 	return settings.SetSetting(settingRecoveryToken, sealed)
 }
 
+// ClearPairing removes the KyRecovery URL and the sealed token from system_settings, so
+// scheduled deposits stop and LoadPairing refuses. That is all it does: the rows are gone
+// from the table, not scrubbed from the database file, and the credential itself is dead
+// only once the KyRecovery admin revokes it there. The key pin stays: unpairing does not
+// make a different key acceptable, and the local backup directory keeps working. Receipts
+// stay as history. A pairing left half-cleared by an earlier failure is cleared too.
+func ClearPairing(settings SettingsStore) error {
+	_, uerr := settings.GetSetting(settingRecoveryURL)
+	_, terr := settings.GetSetting(settingRecoveryToken)
+	if errors.Is(uerr, store.ErrNotFound) && errors.Is(terr, store.ErrNotFound) {
+		return ErrNotPaired
+	}
+	if err := settings.DeleteSetting(settingRecoveryToken); err != nil {
+		return err
+	}
+	return settings.DeleteSetting(settingRecoveryURL)
+}
+
 // HasPairing reports whether a URL and a sealed token are stored, without decrypting.
 func HasPairing(settings SettingsStore) bool {
 	u, err := settings.GetSetting(settingRecoveryURL)

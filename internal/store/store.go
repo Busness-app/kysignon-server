@@ -2171,6 +2171,12 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
+// DeleteSetting removes a key; a key that was never written is not an error.
+func (s *Store) DeleteSetting(key string) error {
+	_, err := s.db.Exec(`DELETE FROM system_settings WHERE key = ?`, key)
+	return err
+}
+
 // SnapshotTo writes a transactionally consistent copy of the database to destPath through
 // the live connection. Copying the main database file is not a backup procedure in WAL mode:
 // recently committed transactions can live only in the -wal file, so a file copy silently

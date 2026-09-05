@@ -218,6 +218,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("GET /api/admin/backup/export-capsule", adminStepUpM(http.HandlerFunc(backupH.ExportCapsule)))
 	mux.Handle("POST /api/admin/backup/pair-remote", adminStepUpM(http.HandlerFunc(backupH.PairRemote)))
 	mux.Handle("POST /api/admin/backup/deposit", adminStepUpM(http.HandlerFunc(backupH.Deposit)))
+	mux.Handle("DELETE /api/admin/backup/pairing", adminStepUpM(http.HandlerFunc(backupH.Unpair)))
 	mux.Handle("POST /api/admin/backup/pin-key", adminStepUpM(http.HandlerFunc(backupH.PinKey)))
 	mux.Handle("PUT /api/admin/backup/schedule", adminStepUpM(http.HandlerFunc(backupH.SetSchedule)))
 	mux.Handle("GET /api/admin/backup/status", adminM(http.HandlerFunc(backupH.Status)))

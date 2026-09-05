@@ -296,6 +296,29 @@ func (h *BackupHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// Unpair forgets the KyRecovery pairing. Deposits stop; the key pin and any local backup
+// directory are untouched. The token on KyRecovery's side is revoked there, by its admin.
+func (h *BackupHandler) Unpair(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	adminID, adminUsername := h.actor(r)
+	target, _ := h.store.GetSetting("kyrecovery_url")
+	target = backup.AuditSafe(target)
+	if err := backup.ClearPairing(h.store); err != nil {
+		if errors.Is(err, backup.ErrNotPaired) {
+			writeError(w, http.StatusPreconditionFailed, "Not paired with KyRecovery")
+			return
+		}
+		_ = h.record(r, "admin.backup_unpair", adminID, adminUsername, target, "failure", map[string]any{"recovery_url": target, "error": backup.AuditSafe(err.Error())})
+		writeError(w, http.StatusInternalServerError, "Failed to remove the pairing")
+		return
+	}
+	_ = h.record(r, "admin.backup_unpair", adminID, adminUsername, target, "success", map[string]any{"recovery_url": target})
+	writeJSON(w, http.StatusOK, map[string]any{"paired": false})
+}
+
 type PinKeyRequest struct {
 	PublicKey   string `json:"public_key"`
 	Threshold   int    `json:"threshold"`

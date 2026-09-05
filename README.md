@@ -291,11 +291,16 @@ Interactive login uses the existing password, TOTP, push, passkey and recovery s
 A five-minute, single-use interaction binds the original validated request (including
 client, redirect, scope, PKCE, nonce and state) to a signed HttpOnly browser cookie and the
 resulting login session. A signed-in user must re-authenticate as that same account.
-Up to ten interactions can be outstanding per browser, with a server-wide cap of 10000.
+Up to ten interactions can be outstanding per browser and per account, with a server-wide
+cap of 10000. Completing an anonymous login assigns its interaction to that account and
+enforces the same bound. Upgrade and capacity recovery trim pre-existing account overages
+to ten requests, preferring completed proofs; affected requests must restart authorization.
 Expired interactions are cleaned on creation. At capacity, only the oldest anonymous,
 unfinished interactions are evicted; account-bound requests and completed proofs are
-preserved. Authorization allows a burst of 300 requests with five requests/second refill
-per signed browser identity, falling back to IP for requests without a valid cookie.
+preserved within the account bound. Every authorization request spends an IP allowance
+of 300 requests with five requests/second refill. A signed browser identity also has a
+tighter allowance of 60 requests with one request/second refill; rotating cookies cannot
+reset the source allowance.
 Throttling uses `temporarily_unavailable` after validating the redirect URI; database
 failures use `server_error`. A different tab's login cannot satisfy
 another interaction; if the browser's session changes, restart from the app. Cancel
@@ -327,8 +332,9 @@ does not refresh the password's age. ID tokens expose these method/context value
 These are KySignOn context classes, not NIST assurance levels or assertions that keys
 are hardware-backed. Recovery does not claim ordinary MFA. The standard method names
 follow [RFC 8176](https://www.rfc-editor.org/rfc/rfc8176.html); the URNs are local contracts.
-Per-app freshness policies and OIDC `prompt`/`max_age` enforcement are subsequent steps
-in [the access lifecycle plan](docs/access-lifecycle-plan.md).
+Administrator per-app freshness policies remain PR05b in
+[the access lifecycle plan](docs/access-lifecycle-plan.md); OIDC request enforcement is
+implemented as described above.
 
 Existing sessions survive the upgrade but omit `auth_time`, `amr` and `acr` until a new
 login supplies evidence. Pending legacy authorization codes and MFA flows are invalidated;

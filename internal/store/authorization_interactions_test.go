@@ -158,7 +158,7 @@ func TestAuthorizationInteractionEvictsOnlyAnonymousPending(t *testing.T) {
 			user = "owned"
 		}
 		if n == 1 {
-			session = "completed"
+			session = "session"
 		}
 		if _, err := statement.Exec(id, id, user, session, "client_id=client", now.Add(time.Duration(n-10000)*time.Millisecond), now.Add(time.Minute)); err != nil {
 			t.Fatal(err)
@@ -196,5 +196,71 @@ func TestCompletedLoginCannotCreateDisabledUserSession(t *testing.T) {
 	}
 	if sess, err := s.GetSessionByID("fallback"); err != nil || sess != nil {
 		t.Fatal("disabled user retained session", err)
+	}
+}
+
+func TestAuthorizationInteractionCapacityPerAccount(t *testing.T) {
+	s, u, _ := appAccessFixture(t)
+	now := time.Now().UTC()
+	for n := range 11 {
+		id := fmt.Sprint(n)
+		err := s.CreateAuthorizationInteraction(&AuthorizationInteraction{Hash: id, BrowserHash: id, UserID: u.ID, Request: "client_id=client", CreatedAt: now, ExpiresAt: now.Add(time.Minute)})
+		if n < 10 && err != nil {
+			t.Fatal(err)
+		}
+		if n == 10 && !errors.Is(err, ErrAuthorizationInteraction) {
+			t.Fatal("cookie rotation bypassed account capacity", err)
+		}
+	}
+	// Completing an already-counted request must not consume an extra account slot.
+	at := time.Now().UTC()
+	if err := s.CreateSessionForInteraction(&Session{ID: "own-slot", UserID: u.ID, SessionTokenHash: "own-slot", ExpiresAt: now.Add(time.Hour), AuthenticationEvidence: AuthenticationEvidence{PrimaryAuthenticatedAt: &at}}, "0", "0"); err != nil {
+		t.Fatal("existing account slot could not complete", err)
+	}
+	// An anonymous request must not bypass the same bound when login identifies its owner.
+	if err := s.CreateAuthorizationInteraction(&AuthorizationInteraction{Hash: "anonymous", BrowserHash: "anonymous", Request: "client_id=client", CreatedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	at = time.Now().UTC()
+	err := s.CreateSessionForInteraction(&Session{ID: "promoted", UserID: u.ID, SessionTokenHash: "promoted", ExpiresAt: now.Add(time.Hour), AuthenticationEvidence: AuthenticationEvidence{PrimaryAuthenticatedAt: &at}}, "anonymous", "anonymous")
+	if !errors.Is(err, ErrAuthorizationInteraction) {
+		t.Fatal("anonymous completion bypassed account capacity", err)
+	}
+}
+
+func TestAuthorizationInteractionCapacityRepairsLegacyAccountFlood(t *testing.T) {
+	s, u, _ := appAccessFixture(t)
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<9999)
+ INSERT INTO authorization_interactions(hash,browser_hash,user_id,request,created_at,expires_at)
+ SELECT CAST(n AS TEXT),CAST(n AS TEXT),?,'client_id=client',?,? FROM seq`, u.ID, now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := createTestUser(t, s)
+	if err := s.CreateAuthorizationInteraction(&AuthorizationInteraction{Hash: "new", BrowserHash: "new", UserID: other.ID, Request: "client_id=client", CreatedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal("legacy account flood blocked another user", err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM authorization_interactions WHERE user_id=?`, u.ID).Scan(&count); err != nil || count != 10 {
+		t.Fatal("legacy overage not repaired", count, err)
+	}
+}
+
+func TestAuthorizationInteractionCapacityMigrationOwnsCompletedRequests(t *testing.T) {
+	s, u, _ := appAccessFixture(t)
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`WITH RECURSIVE seq(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM seq WHERE n<11)
+ INSERT INTO authorization_interactions(hash,browser_hash,session_id,request,created_at,expires_at)
+ SELECT CAST(n AS TEXT),CAST(n AS TEXT),'session','client_id=client',?,? FROM seq`, now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.migrateAuthorizationInteractions(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM authorization_interactions WHERE user_id=?`, u.ID).Scan(&count); err != nil || count != 10 {
+		t.Fatal("completed requests escaped account capacity on upgrade", count, err)
 	}
 }

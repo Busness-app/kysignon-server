@@ -248,8 +248,8 @@ func TestAuthorizationRateLimitUsesProtocolErrors(t *testing.T) {
 	}
 	r := browser("GET", path, nil)
 	location, _ := url.Parse(r.Header().Get("Location"))
-	if location.Query().Get("error") != "login_required" {
-		t.Fatal("another browser exhausted this browser's allowance")
+	if location.Query().Get("error") != "temporarily_unavailable" {
+		t.Fatal("signed cookie bypassed the exhausted IP allowance")
 	}
 	req := httptest.NewRequest("GET", path, nil)
 	req.AddCookie(&http.Cookie{Name: authorizationBrowserCookie, Value: strings.Repeat("f", 64) + ".forged"})
@@ -274,5 +274,67 @@ func TestAuthorizationInteractionDatabaseError(t *testing.T) {
 	location, _ := url.Parse(r.Header().Get("Location"))
 	if r.Code != 302 || location.Query().Get("error") != "server_error" || location.Query().Get("state") != "kept" {
 		t.Fatalf("database outage reported as throttling: %d %s", r.Code, r.Header().Get("Location"))
+	}
+}
+
+func TestAuthorizationRateLimitSignedCookieRotation(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	newClient(t, db, "app", []string{"https://app.example/cb"}, []string{"openid"})
+	now := time.Now()
+	srv.middleware.now = func() time.Time { return now }
+	path := "/oauth/authorize?client_id=app&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&response_type=code&scope=openid&code_challenge=challenge&code_challenge_method=S256&prompt=none"
+	cookies := []*http.Cookie{}
+	for range 10 {
+		r := adminRequestNoStepUp(t, srv, "GET", strings.Replace(path, "prompt=none", "prompt=login", 1), "", "")
+		for _, c := range r.Result().Cookies() {
+			if c.Name == authorizationBrowserCookie {
+				cookies = append(cookies, c)
+			}
+		}
+	}
+	if len(cookies) != 10 {
+		t.Fatal("did not mint ten distinct browser identities")
+	}
+	for n := range 301 {
+		req := httptest.NewRequest("GET", path, nil)
+		req.AddCookie(cookies[n%len(cookies)])
+		r := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(r, req)
+		location, _ := url.Parse(r.Header().Get("Location"))
+		want := "login_required"
+		if n >= 290 {
+			want = "temporarily_unavailable"
+		}
+		if r.Code != 302 || location.Query().Get("error") != want {
+			t.Fatalf("rotated request %d: %d %s, want %s", n+11, r.Code, r.Header().Get("Location"), want)
+		}
+	}
+}
+
+func TestAuthorizationRateLimitBrowserIsAdditional(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	newClient(t, db, "app", []string{"https://app.example/cb"}, []string{"openid"})
+	now := time.Now()
+	srv.middleware.now = func() time.Time { return now }
+	path := "/oauth/authorize?client_id=app&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&response_type=code&scope=openid&code_challenge=challenge&code_challenge_method=S256&prompt=none"
+	browser := interactionBrowser(t, srv)
+	browser("GET", strings.Replace(path, "prompt=none", "prompt=login", 1), nil)
+	for n := range 61 {
+		r := browser("GET", path, nil)
+		location, _ := url.Parse(r.Header().Get("Location"))
+		want := "login_required"
+		if n == 60 {
+			want = "temporarily_unavailable"
+		}
+		if location.Query().Get("error") != want {
+			t.Fatalf("browser request %d: %s", n+1, r.Header().Get("Location"))
+		}
+	}
+	r := adminRequestNoStepUp(t, srv, "GET", path, "", "")
+	location, _ := url.Parse(r.Header().Get("Location"))
+	if location.Query().Get("error") != "login_required" {
+		t.Fatal("browser's tighter limit exhausted source allowance")
 	}
 }

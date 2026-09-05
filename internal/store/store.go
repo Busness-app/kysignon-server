@@ -795,7 +795,7 @@ func (s *Store) CreateSessionForInteraction(sess *Session, interactionHash, brow
 	}
 	defer tx.Rollback()
 	if interactionHash != "" {
-		result, err := tx.Exec(`UPDATE authorization_interactions SET session_id=? WHERE hash=? AND browser_hash=? AND session_id='' AND expires_at>? AND (user_id='' OR user_id=?) AND created_at<=? AND EXISTS(SELECT 1 FROM users WHERE id=? AND status='active') AND (original_session_id='' OR EXISTS(SELECT 1 FROM sessions WHERE id=authorization_interactions.original_session_id AND expires_at>?))`, sess.ID, interactionHash, browserHash, time.Now().UTC(), sess.UserID, sess.PrimaryAuthenticatedAt, sess.UserID, time.Now().UTC())
+		result, err := tx.Exec(`UPDATE authorization_interactions SET session_id=?,user_id=? WHERE hash=? AND browser_hash=? AND session_id='' AND expires_at>? AND (user_id='' OR user_id=?) AND (SELECT COUNT(*) FROM authorization_interactions WHERE user_id=? AND hash<>?)<10 AND created_at<=? AND EXISTS(SELECT 1 FROM users WHERE id=? AND status='active') AND (original_session_id='' OR EXISTS(SELECT 1 FROM sessions WHERE id=authorization_interactions.original_session_id AND expires_at>?))`, sess.ID, sess.UserID, interactionHash, browserHash, time.Now().UTC(), sess.UserID, sess.UserID, interactionHash, sess.PrimaryAuthenticatedAt, sess.UserID, time.Now().UTC())
 		if err != nil {
 			return err
 		}

@@ -285,7 +285,7 @@ func TestMFATokenIsSpentAfterTooManyFailures(t *testing.T) {
 	if err := e.SaveUserTOTP(u.ID, secret, nil); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := e.IssueMFAToken(u.ID, "")
+	raw, err := e.IssueMFAToken(u.ID, "", time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestMFATokenSurvivesAFewFailures(t *testing.T) {
 	defer cleanup()
 	u := mfaUser(t, db)
 
-	raw, err := e.IssueMFAToken(u.ID, "")
+	raw, err := e.IssueMFAToken(u.ID, "", time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}

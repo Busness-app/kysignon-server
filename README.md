@@ -188,6 +188,32 @@ disabling a user, resetting their MFA, changing their password, or revoking thei
 invalidates all of theirs. Services that validate tokens offline against JWKS cannot see a
 revocation until expiry — call `/oauth/userinfo` where revocation must take effect at once.
 
+**Authentication claims describe the login that established the session.** `auth_time`
+is the time the password was verified, preserved across later SSO redirects. The second
+factor's verification time is recorded separately; completing MFA or issuing a token
+does not refresh the password's age. ID tokens expose these method/context values:
+
+| Login | `amr` | `acr` |
+|---|---|---|
+| Password | `pwd` | `urn:kysignon:acr:password` |
+| Password + TOTP | `pwd`, `otp`, `mfa` | `urn:kysignon:acr:mfa` |
+| Password + signed push | `pwd`, `urn:kysignon:amr:push`, `mfa` | `urn:kysignon:acr:mfa` |
+| Password + passkey | `pwd`, `urn:kysignon:amr:webauthn`, `mfa` | `urn:kysignon:acr:mfa` |
+| Password + recovery code | `pwd`, `urn:kysignon:amr:recovery` | `urn:kysignon:acr:recovery` |
+
+These are KySignOn context classes, not NIST assurance levels or assertions that keys
+are hardware-backed. Recovery does not claim ordinary MFA. The standard method names
+follow [RFC 8176](https://www.rfc-editor.org/rfc/rfc8176.html); the URNs are local contracts.
+Per-app freshness policies and OIDC `prompt`/`max_age` enforcement are subsequent steps
+in [the access lifecycle plan](docs/access-lifecycle-plan.md).
+
+Existing sessions survive the upgrade but omit `auth_time`, `amr` and `acr` until a new
+login supplies evidence. Pending legacy authorization codes and MFA flows are invalidated;
+users in those flows restart login. New codes and access tokens bind internally to the
+originating session: removing it blocks exchange and online UserInfo access. Already-issued
+legacy access tokens retain their previous expiry/revocation behavior. Internal session IDs
+are not published as logout `sid` claims; standard downstream logout remains future work.
+
 **System pairing requires the PIN** shown next to the token, and callback URLs must be
 `https` and resolve off-network unless `KYSIGNON_ALLOW_PRIVATE_CALLBACKS=true` (the
 compose file sets this, since services on `kypost-net` address each other privately).

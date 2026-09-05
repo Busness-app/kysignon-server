@@ -20,7 +20,7 @@ func issueToken(t *testing.T, db *store.Store, userID, clientID string) string {
 	t.Helper()
 	jti := uuid.New().String()
 	if err := db.RecordIssuedToken(&store.IssuedToken{
-		JTI: jti, UserID: userID, ClientID: clientID,
+		JTI: jti, UserID: userID, ClientID: clientID, SessionID: oauthSession(t, db, userID),
 		ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}); err != nil {
 		t.Fatalf("RecordIssuedToken: %v", err)

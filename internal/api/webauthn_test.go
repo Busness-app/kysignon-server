@@ -298,6 +298,7 @@ func TestPasskeyLoginIssuesSession(t *testing.T) {
 		t.Fatalf("verify returned %d: %s", rec.Code, rec.Body.String())
 	}
 
+	assertFactorEvidence(t, f.store, rec, "webauthn")
 	sessionIssued := false
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == "kysignon_session" && c.Value != "" {

@@ -329,7 +329,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateSyncEventLease(); err != nil {
 		return err
 	}
-	return s.migrateLegacyDevicePairingTokens()
+	if err := s.migrateLegacyDevicePairingTokens(); err != nil {
+		return err
+	}
+	return s.migrateAuthenticationEvidence()
 }
 
 // migrateSyncEventLease adds the delivery lease column to pre-existing databases.
@@ -759,11 +762,11 @@ func insertSyncEvents(tx *sql.Tx, events []AccountSyncEvent, now time.Time) erro
 
 // Session Management
 func (s *Store) CreateSession(sess *Session) error {
-	query := `INSERT INTO sessions (id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO sessions (id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at, primary_authenticated_at, factor_authenticated_at, factor_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	now := time.Now().UTC()
 	sess.CreatedAt = now
 	sess.LastActiveAt = now
-	_, err := s.db.Exec(query, sess.ID, sess.UserID, sess.SessionTokenHash, sess.IPAddress, sess.UserAgent, sess.ExpiresAt, sess.CreatedAt, sess.LastActiveAt)
+	_, err := s.db.Exec(query, sess.ID, sess.UserID, sess.SessionTokenHash, sess.IPAddress, sess.UserAgent, sess.ExpiresAt, sess.CreatedAt, sess.LastActiveAt, sess.PrimaryAuthenticatedAt, sess.FactorAuthenticatedAt, sess.FactorMethod)
 	return err
 }
 
@@ -772,9 +775,9 @@ func (s *Store) CreateSession(sess *Session) error {
 // session by forgetting either check.
 func (s *Store) GetSessionByTokenHash(tokenHash string, idleTTL time.Duration) (*Session, error) {
 	now := time.Now().UTC()
-	query := `SELECT id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at FROM sessions WHERE session_token_hash = ? AND expires_at > ? AND last_active_at > ?`
+	query := `SELECT id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at, primary_authenticated_at, factor_authenticated_at, factor_method FROM sessions WHERE session_token_hash = ? AND expires_at > ? AND last_active_at > ?`
 	sess := &Session{}
-	err := s.db.QueryRow(query, tokenHash, now, now.Add(-idleTTL)).Scan(&sess.ID, &sess.UserID, &sess.SessionTokenHash, &sess.IPAddress, &sess.UserAgent, &sess.ExpiresAt, &sess.CreatedAt, &sess.LastActiveAt)
+	err := s.db.QueryRow(query, tokenHash, now, now.Add(-idleTTL)).Scan(&sess.ID, &sess.UserID, &sess.SessionTokenHash, &sess.IPAddress, &sess.UserAgent, &sess.ExpiresAt, &sess.CreatedAt, &sess.LastActiveAt, &sess.PrimaryAuthenticatedAt, &sess.FactorAuthenticatedAt, &sess.FactorMethod)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1434,9 +1437,9 @@ func (s *Store) CreateMFAChallenge(ch *MFAChallenge) error {
 }
 
 func (s *Store) GetMFAChallenge(challengeID string) (*MFAChallenge, error) {
-	query := `SELECT id, user_id, method_type, match_digits, decoy_digits_json, status, expires_at, created_at FROM mfa_challenges WHERE id = ?`
+	query := `SELECT id, user_id, method_type, match_digits, decoy_digits_json, status, expires_at, created_at, verified_at FROM mfa_challenges WHERE id = ?`
 	ch := &MFAChallenge{}
-	err := s.db.QueryRow(query, challengeID).Scan(&ch.ID, &ch.UserID, &ch.MethodType, &ch.MatchDigits, &ch.DecoyDigitsJSON, &ch.Status, &ch.ExpiresAt, &ch.CreatedAt)
+	err := s.db.QueryRow(query, challengeID).Scan(&ch.ID, &ch.UserID, &ch.MethodType, &ch.MatchDigits, &ch.DecoyDigitsJSON, &ch.Status, &ch.ExpiresAt, &ch.CreatedAt, &ch.VerifiedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1447,7 +1450,12 @@ func (s *Store) GetMFAChallenge(challengeID string) (*MFAChallenge, error) {
 // It reports false when the challenge was not in the expected starting status, so concurrent
 // responders cannot both observe a successful transition.
 func (s *Store) TransitionMFAChallengeStatus(challengeID, from, to string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE mfa_challenges SET status = ? WHERE id = ? AND status = ?`, to, challengeID, from)
+	var verifiedAt *time.Time
+	if to == "approved" {
+		now := time.Now().UTC()
+		verifiedAt = &now
+	}
+	res, err := s.db.Exec(`UPDATE mfa_challenges SET status = ?, verified_at = ? WHERE id = ? AND status = ?`, to, verifiedAt, challengeID, from)
 	if err != nil {
 		return false, err
 	}
@@ -1465,24 +1473,24 @@ func (s *Store) DeleteExpiredMFAChallenges() error {
 
 // MFA Tokens
 func (s *Store) CreateMFAToken(t *MFAToken) error {
-	query := `INSERT INTO mfa_tokens (id, user_id, token_hash, challenge_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO mfa_tokens (id, user_id, token_hash, challenge_id, expires_at, created_at, primary_authenticated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
 	t.CreatedAt = time.Now().UTC()
 	var challengeID any
 	if t.ChallengeID != "" {
 		challengeID = t.ChallengeID
 	}
-	_, err := s.db.Exec(query, t.ID, t.UserID, t.TokenHash, challengeID, t.ExpiresAt, t.CreatedAt)
+	_, err := s.db.Exec(query, t.ID, t.UserID, t.TokenHash, challengeID, t.ExpiresAt, t.CreatedAt, t.PrimaryAuthenticatedAt)
 	return err
 }
 
 // GetValidMFAToken returns an unused, unexpired token that still has attempts left.
 func (s *Store) GetValidMFAToken(tokenHash string, maxAttempts int) (*MFAToken, error) {
-	query := `SELECT id, user_id, token_hash, challenge_id, attempts, expires_at, used_at, created_at
+	query := `SELECT id, user_id, token_hash, challenge_id, attempts, expires_at, used_at, created_at, primary_authenticated_at
 	          FROM mfa_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? AND attempts < ?`
 	t := &MFAToken{}
 	var challengeID sql.NullString
 	err := s.db.QueryRow(query, tokenHash, time.Now().UTC(), maxAttempts).
-		Scan(&t.ID, &t.UserID, &t.TokenHash, &challengeID, &t.Attempts, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+		Scan(&t.ID, &t.UserID, &t.TokenHash, &challengeID, &t.Attempts, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt, &t.PrimaryAuthenticatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1857,16 +1865,16 @@ func revokeClientTokensTx(tx *sql.Tx, clientID string, now time.Time) error {
 
 // Authorization Codes
 func (s *Store) CreateAuthorizationCode(code *AuthorizationCode) error {
-	query := `INSERT INTO authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, created_at, session_id, primary_authenticated_at, factor_authenticated_at, factor_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	code.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, code.ID, code.CodeHash, code.ClientID, code.UserID, code.RedirectURI, code.Scope, code.CodeChallenge, code.CodeChallengeMethod, code.Nonce, code.ExpiresAt, code.CreatedAt)
+	_, err := s.db.Exec(query, code.ID, code.CodeHash, code.ClientID, code.UserID, code.RedirectURI, code.Scope, code.CodeChallenge, code.CodeChallengeMethod, code.Nonce, code.ExpiresAt, code.CreatedAt, code.SessionID, code.PrimaryAuthenticatedAt, code.FactorAuthenticatedAt, code.FactorMethod)
 	return err
 }
 
 func (s *Store) GetValidAuthorizationCode(codeHash string) (*AuthorizationCode, error) {
-	query := `SELECT id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, used_at, created_at FROM authorization_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`
+	query := `SELECT id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, used_at, created_at, session_id, primary_authenticated_at, factor_authenticated_at, factor_method FROM authorization_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`
 	code := &AuthorizationCode{}
-	err := s.db.QueryRow(query, codeHash, time.Now().UTC()).Scan(&code.ID, &code.CodeHash, &code.ClientID, &code.UserID, &code.RedirectURI, &code.Scope, &code.CodeChallenge, &code.CodeChallengeMethod, &code.Nonce, &code.ExpiresAt, &code.UsedAt, &code.CreatedAt)
+	err := s.db.QueryRow(query, codeHash, time.Now().UTC()).Scan(&code.ID, &code.CodeHash, &code.ClientID, &code.UserID, &code.RedirectURI, &code.Scope, &code.CodeChallenge, &code.CodeChallengeMethod, &code.Nonce, &code.ExpiresAt, &code.UsedAt, &code.CreatedAt, &code.SessionID, &code.PrimaryAuthenticatedAt, &code.FactorAuthenticatedAt, &code.FactorMethod)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1877,8 +1885,8 @@ func (s *Store) GetValidAuthorizationCode(codeHash string) (*AuthorizationCode, 
 // spent it first, which is what makes the code single-use under concurrency.
 func (s *Store) ConsumeAuthorizationCode(codeID string) (bool, error) {
 	res, err := s.db.Exec(
-		`UPDATE authorization_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
-		time.Now().UTC(), codeID)
+		`UPDATE authorization_codes SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?`,
+		time.Now().UTC(), codeID, time.Now().UTC())
 	if err != nil {
 		return false, err
 	}
@@ -1896,10 +1904,23 @@ func (s *Store) DeleteExpiredAuthorizationCodes() error {
 
 // Issued Tokens (revocation registry)
 func (s *Store) RecordIssuedToken(t *IssuedToken) error {
-	query := `INSERT INTO issued_tokens (jti, user_id, client_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`
+	query := `INSERT INTO issued_tokens (jti, user_id, client_id, expires_at, created_at, session_id)
+ SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS
+ (SELECT 1 FROM sessions JOIN users ON users.id = sessions.user_id
+ WHERE sessions.id = ? AND sessions.user_id = ? AND sessions.expires_at > ? AND users.status = 'active')`
 	t.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(query, t.JTI, t.UserID, t.ClientID, t.ExpiresAt, t.CreatedAt)
-	return err
+	res, err := s.db.Exec(query, t.JTI, t.UserID, t.ClientID, t.ExpiresAt, t.CreatedAt, t.SessionID, t.SessionID, t.UserID, t.CreatedAt)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.New("originating session is no longer active")
+	}
+	return nil
 }
 
 // IsTokenRevoked reports whether a token has been revoked. A jti that is not on the
@@ -1908,7 +1929,8 @@ func (s *Store) RecordIssuedToken(t *IssuedToken) error {
 func (s *Store) IsTokenRevoked(jti string) (bool, error) {
 	var revokedAt sql.NullTime
 	err := s.db.QueryRow(
-		`SELECT revoked_at FROM issued_tokens WHERE jti = ? AND expires_at > ?`,
+		`SELECT revoked_at FROM issued_tokens WHERE jti = ? AND expires_at > ?
+ AND (session_id IS NULL OR EXISTS (SELECT 1 FROM sessions WHERE sessions.id = issued_tokens.session_id))`,
 		jti, time.Now().UTC()).Scan(&revokedAt)
 	if err == sql.ErrNoRows {
 		return true, nil

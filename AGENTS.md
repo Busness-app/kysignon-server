@@ -25,6 +25,8 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 - The step-up prompt outranks the modals it is opened from (`.step-up-backdrop`); a grant request painted under its caller silently cancels the action it was meant to protect.
 - A client secret is shown once and rotated in place from the clients table; rotation revokes that client's outstanding tokens, so delete-and-recreate is never the recovery path for a lost secret.
 - Sessions have both a configurable absolute lifetime (24h default) and inactivity lifetime (30m default); both are enforced in the store lookup.
+- Login sessions record actual password and second-factor verification times. Authorization codes snapshot that evidence; ID-token `auth_time` is the password proof time, never code creation. Legacy sessions omit unknown authentication claims. Recovery is identified separately from ordinary MFA; claim values are documented in README.md.
+- New authorization codes and access-token records bind to their originating session. Token registration requires that session and an active user in the same SQL statement; removing the session blocks code exchange and online use of its tokens. Upgrade invalidates legacy pending codes and MFA flows, preserving existing sessions and already-issued tokens without inventing evidence.
 
 ## WebAuthn
 

@@ -370,6 +370,7 @@ func (h *WebAuthnHandler) FinishLogin(w http.ResponseWriter, r *http.Request, au
 		return
 	}
 
+	factorAt := time.Now().UTC()
 	if !auth.spendMFAToken(w, token) {
 		return
 	}
@@ -382,7 +383,7 @@ func (h *WebAuthnHandler) FinishLogin(w http.ResponseWriter, r *http.Request, au
 	h.audit.Record("auth.mfa_passkey", user.ID, user.Username, user.ID, "user",
 		h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"userVerified": ad.UserVerified()})
 	_ = h.store.ClearFailedLogins(user.ID)
-	auth.createSessionAndRespond(w, r, user)
+	auth.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: &factorAt, FactorMethod: "webauthn"})
 }
 
 // ListPasskeys returns the caller's enrolled passkeys. The public key and signature

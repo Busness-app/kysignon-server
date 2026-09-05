@@ -536,7 +536,7 @@ func TestRevokedTokenIsRejectedAtUserinfo(t *testing.T) {
 
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
-	code, err := oe.CreateAuthorizationCode("kynotes", u.ID, "https://notes.urlxl.com/callback", "openid", challenge, "S256")
+	code, err := oe.CreateAuthorizationCode("kynotes", oauthSession(t, db, u.ID), "https://notes.urlxl.com/callback", "openid", challenge, "S256")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,7 +583,7 @@ func TestDisablingUserRevokesOutstandingTokens(t *testing.T) {
 
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
-	code, _ := oe.CreateAuthorizationCode("kynotes", victim.ID, "https://notes.urlxl.com/callback", "openid", challenge, "S256")
+	code, _ := oe.CreateAuthorizationCode("kynotes", oauthSession(t, db, victim.ID), "https://notes.urlxl.com/callback", "openid", challenge, "S256")
 	resp, err := oe.ExchangeAuthorizationCode(code, "kynotes", "", "https://notes.urlxl.com/callback", verifier)
 	if err != nil {
 		t.Fatal(err)
@@ -843,7 +843,7 @@ func TestClientSecretCanBeRotated(t *testing.T) {
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
-	code, err := oe.CreateAuthorizationCode("kydns", user.ID, "https://dns.urlxl.com/callback", "openid", challenge, "S256")
+	code, err := oe.CreateAuthorizationCode("kydns", oauthSession(t, db, user.ID), "https://dns.urlxl.com/callback", "openid", challenge, "S256")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -851,7 +851,7 @@ func TestClientSecretCanBeRotated(t *testing.T) {
 		t.Error("the superseded client secret still authenticated")
 	}
 
-	code, err = oe.CreateAuthorizationCode("kydns", user.ID, "https://dns.urlxl.com/callback", "openid", challenge, "S256")
+	code, err = oe.CreateAuthorizationCode("kydns", oauthSession(t, db, user.ID), "https://dns.urlxl.com/callback", "openid", challenge, "S256")
 	if err != nil {
 		t.Fatal(err)
 	}

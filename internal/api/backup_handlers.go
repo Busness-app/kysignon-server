@@ -113,7 +113,7 @@ func (h *BackupHandler) RunDrill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Failed to load recovery key: "+err.Error())
 		return
 	}
-	result, err := backup.RunRestoreDrill(r.Context(), payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, pinned)
+	result, err := backup.RunRestoreDrill(r.Context(), h.cfg.DataDir, payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, pinned)
 	if err != nil {
 		_ = h.record(r, "admin.backup_drill_run", adminID, adminUsername, "", "failure", map[string]any{"error": backup.AuditSafe(err.Error())})
 		writeError(w, http.StatusInternalServerError, "Failed to execute restore drill: "+err.Error())
@@ -123,7 +123,7 @@ func (h *BackupHandler) RunDrill(w http.ResponseWriter, r *http.Request) {
 	if !result.Passed {
 		outcome = "failure"
 	}
-	_ = h.record(r, "admin.backup_drill_run", adminID, adminUsername, "", outcome, map[string]any{"passed": result.Passed, "duration_ms": result.DurationMS})
+	_ = h.record(r, "admin.backup_drill_run", adminID, adminUsername, "", outcome, map[string]any{"passed": result.Passed, "duration_ms": result.DurationMs})
 	writeJSON(w, http.StatusOK, result)
 }
 

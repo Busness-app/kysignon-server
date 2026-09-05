@@ -8,199 +8,137 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Busness-app/ky-primitives/capsule"
-	"github.com/Busness-app/ky-primitives/recoverykey"
+	"github.com/Busness-app/ky-primitives/recoveryclient"
 	"github.com/Busness-app/kysignon-server/internal/config"
 	"github.com/Busness-app/kysignon-server/internal/crypto"
 	_ "modernc.org/sqlite"
 )
 
-// CheckItem represents a discrete verification result in a restore drill.
-type CheckItem struct {
-	Name    string `json:"name"`
-	Passed  bool   `json:"passed"`
-	Message string `json:"message"`
-}
-
-// DrillResult contains the structured outcome of a restore drill.
-type DrillResult struct {
-	Passed       bool        `json:"passed"`
-	DurationMS   int64       `json:"duration_ms"`
-	Checks       []CheckItem `json:"checks"`
-	ErrorMessage string      `json:"error_message,omitempty"`
-}
-
-// RunRestoreDrill proves the backup pipeline: it seals files exactly as a real backup would,
-// but to a throwaway keypair it then opens with, extracts into a 0700 scratch directory, and
-// runs the verification recipe. The product has no recovery private key, so this is the only
-// end-to-end check it can run alone. A separate check reports whether the suite key is pinned.
-func RunRestoreDrill(ctx context.Context, serviceName, appVersion string, files []BackupFile, deps, recipe map[string]any, pinned RecoveryKey) (*DrillResult, error) {
-	start := time.Now()
-	result := &DrillResult{Passed: true, Checks: make([]CheckItem, 0)}
-
-	if pinned.Public.IsZero() {
-		result.Passed = false
-		result.Checks = append(result.Checks, CheckItem{Name: "Recovery Key", Passed: false, Message: ErrNotPaired.Error()})
-	} else {
-		result.Checks = append(result.Checks, CheckItem{Name: "Recovery Key", Passed: true,
-			Message: fmt.Sprintf("Sealing to recovery key %s (%d-of-%d custodians)", pinned.Public.ID()[:16], pinned.Threshold, pinned.TotalShares)})
-	}
-
-	// Seal to a throwaway key and open with it. Topology is display metadata here; the
-	// drill key has no custodians and is dropped when this call returns.
-	drillKey, err := recoverykey.Generate()
-	if err != nil {
-		return nil, fmt.Errorf("drill key: %w", err)
-	}
-	var payloadBytes int64
-	for _, f := range files {
-		payloadBytes += int64(len(f.Data))
-	}
-	raw, _, err := capsule.Seal(serviceName, appVersion, toCapsuleFiles(files), deps, recipe, 2, 3, drillKey.Public())
-	if err != nil {
-		result.Passed = false
-		result.ErrorMessage = fmt.Sprintf("Seal failed: %v", err)
-		result.Checks = append(result.Checks, CheckItem{Name: "Seal", Passed: false,
-			Message: fmt.Sprintf("%s (payload %d bytes across %d files)", result.ErrorMessage, payloadBytes, len(files))})
-		result.DurationMS = time.Since(start).Milliseconds()
-		return result, nil
-	}
-
-	scratchDir, err := os.MkdirTemp("", "kybackup-drill-*")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create drill sandbox: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(scratchDir) }()
-	_ = os.Chmod(scratchDir, 0700)
-
-	m, extracted, err := capsule.Open(raw, drillKey, scratchDir)
-	if err != nil {
-		result.Passed = false
-		result.ErrorMessage = fmt.Sprintf("Open failed: %v", err)
-		result.Checks = append(result.Checks, CheckItem{Name: "Directory Unpack", Passed: false, Message: result.ErrorMessage})
-		result.DurationMS = time.Since(start).Milliseconds()
-		return result, nil
-	}
-	var totalBytes int64
-	for _, f := range extracted {
-		totalBytes += int64(len(f.Content))
-	}
-	result.Checks = append(result.Checks, CheckItem{Name: "Directory Unpack", Passed: true,
-		Message: fmt.Sprintf("Extracted %d files (%d bytes) into isolated sandbox", len(extracted), totalBytes)})
-
-	recipe, _ = m.VerificationRecipe.(map[string]any)
+// RunRestoreDrill proves the backup pipeline: recoveryclient.Drill seals the payload to a
+// throwaway key, opens it into a 0700 scratch directory under dataDir, and this function
+// adds KySignOn's own checks: required files present, SQLite integrity and application
+// records, MFA secrets decrypt and the signing key issues a verifiable token. A separate
+// check reports whether the suite key is pinned; the drill itself never touches it.
+func RunRestoreDrill(ctx context.Context, dataDir, serviceName, appVersion string, files []File, deps, recipe map[string]any, pinned RecoveryKey) (*DrillResult, error) {
+	payload := Payload{ServiceName: serviceName, AppVersion: appVersion, Files: files, Dependencies: deps, VerificationRecipe: recipe}
 	if recipe == nil {
-		recipe = make(map[string]any)
+		recipe = map[string]any{}
 	}
-
-	// 2. Verify Required Files
-	if reqFiles := stringList(recipe["required_files"]); len(reqFiles) > 0 {
-		allFound := true
-		for _, pathStr := range reqFiles {
-			fullPath := filepath.Join(scratchDir, pathStr)
-			fi, err := os.Stat(fullPath)
-			if err != nil || fi.Size() == 0 {
-				allFound = false
-				result.Passed = false
+	result, err := recoveryclient.Drill(ctx, dataDir, payload, func(scratchDir string) []CheckItem {
+		result := &DrillResult{}
+		// 2. Verify Required Files
+		if reqFiles := stringList(recipe["required_files"]); len(reqFiles) > 0 {
+			allFound := true
+			for _, pathStr := range reqFiles {
+				fullPath := filepath.Join(scratchDir, pathStr)
+				fi, err := os.Stat(fullPath)
+				if err != nil || fi.Size() == 0 {
+					allFound = false
+					result.Passed = false
+					result.Checks = append(result.Checks, CheckItem{
+						Name:    fmt.Sprintf("Required File: %s", pathStr),
+						Passed:  false,
+						Message: "File missing or empty in unpacked capsule",
+					})
+				}
+			}
+			if allFound && len(reqFiles) > 0 {
 				result.Checks = append(result.Checks, CheckItem{
-					Name:    fmt.Sprintf("Required File: %s", pathStr),
-					Passed:  false,
-					Message: "File missing or empty in unpacked capsule",
+					Name:    "Required Files",
+					Passed:  true,
+					Message: fmt.Sprintf("All %d required files verified", len(reqFiles)),
 				})
 			}
 		}
-		if allFound && len(reqFiles) > 0 {
-			result.Checks = append(result.Checks, CheckItem{
-				Name:    "Required Files",
-				Passed:  true,
-				Message: fmt.Sprintf("All %d required files verified", len(reqFiles)),
-			})
-		}
-	}
 
-	// 3. SQLite Integrity Check
-	if checkDB, ok := recipe["check_sqlite_integrity"].(bool); ok && checkDB {
-		sqlitePaths := stringList(recipe["sqlite_paths"])
-		if len(sqlitePaths) == 0 {
-			result.Passed = false
-			result.Checks = append(result.Checks, CheckItem{
-				Name:    "SQLite Verification",
-				Passed:  false,
-				Message: "Recipe requires a SQLite integrity check but names no database",
-			})
-		}
-		{
-			for _, dbRelPath := range sqlitePaths {
-				fullDBPath := filepath.Join(scratchDir, dbRelPath)
+		// 3. SQLite Integrity Check
+		if checkDB, ok := recipe["check_sqlite_integrity"].(bool); ok && checkDB {
+			sqlitePaths := stringList(recipe["sqlite_paths"])
+			if len(sqlitePaths) == 0 {
+				result.Passed = false
+				result.Checks = append(result.Checks, CheckItem{
+					Name:    "SQLite Verification",
+					Passed:  false,
+					Message: "Recipe requires a SQLite integrity check but names no database",
+				})
+			}
+			{
+				for _, dbRelPath := range sqlitePaths {
+					fullDBPath := filepath.Join(scratchDir, dbRelPath)
 
-				db, err := sql.Open("sqlite", fullDBPath)
-				if err != nil {
-					result.Passed = false
-					result.Checks = append(result.Checks, CheckItem{
-						Name:    fmt.Sprintf("SQLite Open: %s", dbRelPath),
-						Passed:  false,
-						Message: fmt.Sprintf("Failed to open extracted DB: %v", err),
-					})
-					continue
+					db, err := sql.Open("sqlite", fullDBPath)
+					if err != nil {
+						result.Passed = false
+						result.Checks = append(result.Checks, CheckItem{
+							Name:    fmt.Sprintf("SQLite Open: %s", dbRelPath),
+							Passed:  false,
+							Message: fmt.Sprintf("Failed to open extracted DB: %v", err),
+						})
+						continue
+					}
+
+					// Run PRAGMA integrity_check
+					var integrityResult string
+					row := db.QueryRowContext(ctx, "PRAGMA integrity_check;")
+					if err := row.Scan(&integrityResult); err != nil || integrityResult != "ok" {
+						result.Passed = false
+						result.Checks = append(result.Checks, CheckItem{
+							Name:    fmt.Sprintf("DB Integrity Check: %s", dbRelPath),
+							Passed:  false,
+							Message: fmt.Sprintf("Integrity failure (%s): %v", integrityResult, err),
+						})
+					} else {
+						var tableCount int
+						_ = db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table';").Scan(&tableCount)
+
+						result.Checks = append(result.Checks, CheckItem{
+							Name:    fmt.Sprintf("DB Integrity Check: %s", dbRelPath),
+							Passed:  true,
+							Message: fmt.Sprintf("SQLite PRAGMA integrity_check passed (found %d tables)", tableCount),
+						})
+
+						// integrity_check only proves the file is not corrupt. A restore is
+						// only useful if the identity records are actually in it.
+						checkApplicationRecords(ctx, db, dbRelPath, recipe, result)
+					}
+					_ = db.Close()
 				}
-
-				// Run PRAGMA integrity_check
-				var integrityResult string
-				row := db.QueryRowContext(ctx, "PRAGMA integrity_check;")
-				if err := row.Scan(&integrityResult); err != nil || integrityResult != "ok" {
-					result.Passed = false
-					result.Checks = append(result.Checks, CheckItem{
-						Name:    fmt.Sprintf("DB Integrity Check: %s", dbRelPath),
-						Passed:  false,
-						Message: fmt.Sprintf("Integrity failure (%s): %v", integrityResult, err),
-					})
-				} else {
-					var tableCount int
-					_ = db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table';").Scan(&tableCount)
-
-					result.Checks = append(result.Checks, CheckItem{
-						Name:    fmt.Sprintf("DB Integrity Check: %s", dbRelPath),
-						Passed:  true,
-						Message: fmt.Sprintf("SQLite PRAGMA integrity_check passed (found %d tables)", tableCount),
-					})
-
-					// integrity_check only proves the file is not corrupt. A restore is
-					// only useful if the identity records are actually in it.
-					checkApplicationRecords(ctx, db, dbRelPath, recipe, result)
-				}
-				_ = db.Close()
 			}
 		}
+
+		// 4. Prove the restored bytes are usable, not merely present. This is the difference
+		// between a drill and a recovery test: encrypted MFA state that cannot be decrypted and
+		// a signing key that cannot mint a token both survive every check above unnoticed.
+		proveRestoreIsUsable(ctx, scratchDir, recipe, result)
+
+		return result.Checks
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	// 4. Prove the restored bytes are usable, not merely present. This is the difference
-	// between a drill and a recovery test: encrypted MFA state that cannot be decrypted and
-	// a signing key that cannot mint a token both survive every check above unnoticed.
-	proveRestoreIsUsable(ctx, scratchDir, recipe, result)
-
-	// 5. Validate Expected Environment Dependencies
-	if expEnv := stringList(recipe["expected_env"]); len(expEnv) > 0 {
-		var setEnvs []string
-		for _, envName := range expEnv {
-			if os.Getenv(envName) != "" {
-				setEnvs = append(setEnvs, envName)
-			}
+	pin := CheckItem{Name: "Recovery Key", Passed: true, Message: fmt.Sprintf("Sealing to recovery key %s (%d-of-%d custodians)", shortID(pinned), pinned.Threshold, pinned.TotalShares)}
+	if pinned.Public.IsZero() {
+		pin = CheckItem{Name: "Recovery Key", Passed: false, Message: ErrNotPaired.Error()}
+		result.Passed = false
+		if result.ErrorMessage == "" {
+			result.ErrorMessage = pin.Message
 		}
-		result.Checks = append(result.Checks, CheckItem{
-			Name:    "Environment Configuration",
-			Passed:  true,
-			Message: fmt.Sprintf("%d/%d expected environment variables active", len(setEnvs), len(expEnv)),
-		})
 	}
-
-	// 6. Verification Recipe Completed
-	result.DurationMS = time.Since(start).Milliseconds()
+	result.Checks = append([]CheckItem{pin}, result.Checks...)
 	return result, nil
 }
 
-// checkApplicationRecords asserts the restored database contains the tables and rows the
-// service cannot start without. This is the difference between "the file parses" and "the
-// identity directory survived".
+func shortID(k RecoveryKey) string {
+	if k.Public.IsZero() {
+		return "-"
+	}
+	id := k.Public.ID()
+	if len(id) > 16 {
+		id = id[:16]
+	}
+	return id
+}
+
 func checkApplicationRecords(ctx context.Context, db *sql.DB, dbRelPath string, recipe map[string]interface{}, result *DrillResult) {
 	for _, table := range stringList(recipe["required_tables"]) {
 		{

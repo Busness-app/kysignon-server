@@ -77,4 +77,4 @@ Non-trivial logic must include one runnable check (unit test or minimal self-che
 
 ## Child DOX Index
 
-- [internal/backup/AGENTS.md](file:///home/yoshi/busness.app/kysignon-server/internal/backup/AGENTS.md): Feature 0 disaster recovery: sealed capsules, KyRecovery pairing and deposit, restore drills.
+- [internal/backup/AGENTS.md](file:///home/yoshi/busness.app/kysignon-server/internal/backup/AGENTS.md): adapter over ky-primitives/recoveryclient: what KySignOn seals, its drill checks, store/key/config glue.

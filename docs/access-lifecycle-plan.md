@@ -1,11 +1,13 @@
 **Repo:** kysignon-server
-**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/admin-groups)
+**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/app-identity)
 
 # KySignOn access and identity lifecycle implementation plan
 
 Date: 2026-09-05. Status: implementation started. PR 01 merged as GitHub PR #24;
-PR 02 merged as GitHub PR #25. PR 03 is implemented on `feat/admin-groups`; CI and
-review determine readiness to merge. PRs 04–23 and D1–D4 remain planned.
+PR 02 merged as GitHub PR #25; PR 03 merged as GitHub PR #26. PR 04 is split into
+04a (application identity and explicit linking, implemented on `feat/app-identity`) and
+04b (assignments and enforcement, planned). CI and review determine 04a readiness.
+PRs 05–23 and D1–D4 remain planned.
 PR numbers below are sequence labels, not GitHub PR numbers.
 
 ## Outcome and scope
@@ -164,6 +166,17 @@ Acceptance: duplicate membership is idempotent, deleted users leave no dangling 
 concurrent membership edits preserve integrity, non-admin access is denied.
 
 ### PR 04 — Application records and enforced assignments
+
+Split for independent review:
+- **04a — Application identity and explicit linking:** migrate a stable registry over
+  existing OAuth clients, launcher cards and paired systems; provide searched/paginated
+  admin linking and reversible unlinking with step-up, revisions and atomic audit.
+  Preserve connection IDs, credentials and current access. No assignment controls yet.
+- **04b — Assignments and enforcement:** add direct/group grants, compatibility access
+  modes, effective-access previews, launcher filtering, authorization/token checks and
+  transactional revocation. Ship the access controls with enforcement, not before it.
+
+The acceptance criteria below remain required across both increments.
 
 Depends on: 01, 03. Touch: store, OAuth engine/handlers, client/system/launcher admin UI.
 

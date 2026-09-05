@@ -7,6 +7,7 @@ import { LoginView } from './components/LoginView';
 import { UserDashboard } from './components/UserDashboard';
 import { DeviceSettings } from './components/DeviceSettings';
 import { Appearance } from './components/Appearance';
+import { AdminAppRegistry } from './components/AdminAppRegistry';
 import { AdminGroups } from './components/AdminGroups';
 import { AdminUsers } from './components/AdminUsers';
 import { AdminSystems } from './components/AdminSystems';
@@ -93,6 +94,7 @@ export const App: React.FC = () => {
           <>
             {activeTab === 'admin-users' && <AdminUsers onManageGroups={user => { setGroupUser(user); setActiveTab('admin-groups'); }} />}
             {activeTab === 'admin-groups' && <AdminGroups key={groupUser?.id ?? 'all'} user={groupUser} onClearUser={() => setGroupUser(null)} />}
+            {activeTab === 'admin-app-registry' && <AdminAppRegistry />}
             {activeTab === 'admin-systems' && <AdminSystems />}
             {activeTab === 'admin-clients' && <AdminClients />}
             {activeTab === 'admin-audit' && <AdminAudit />}

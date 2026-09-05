@@ -188,6 +188,31 @@ private-use characters, and whitespace other than ordinary spaces. Descriptions 
 to 2048 characters without Unicode format marks. All routes require an active administrator;
 member lists expose only public directory fields.
 
+## App connections
+
+Administrators can use **App connections** to associate an OAuth client, launcher card,
+and provisioning system that belong to the same application. Review the connection names
+and IDs, then confirm the link with step-up authentication. **Unlink** separates one
+connection again. Each app has at most one connection of each type; overlapping types and
+stale selections are rejected. Linking/unlinking commits with its audit record.
+
+Existing connections initially receive separate stable app IDs, even when their names or
+URLs match. Linking retains the selected app ID and all original connection IDs, client
+secrets, callback URLs, launcher cards and sync settings. New connections automatically
+receive their own app ID. Deleting a connection removes its reference; the app ID survives
+while another connection remains. Connection settings stay in their existing admin views.
+
+Linking currently organizes connections only. App assignments, access enforcement, and
+assignment-aware provisioning are subsequent roadmap steps. Existing access and launcher
+visibility continue to use their current settings.
+
+Admin API: `GET /api/admin/app-registry` accepts the same pagination bounds as group lists
+and searches connection names and IDs. `POST /api/admin/app-registry/{id}/link` accepts
+`sourceId`, `targetRevision`, and `sourceRevision`; the target app ID is retained.
+`POST /api/admin/app-registry/{id}/unlink` accepts `kind` (`client`, `launcher`, or `system`)
+and `revision`, returning the new app ID. Both mutations require operation-bound step-up.
+A `409` means the connections overlap or changed; reload before choosing again.
+
 ## Integration Requirements
 
 These rules are enforced strictly. Each is a constraint on how a client integrates.

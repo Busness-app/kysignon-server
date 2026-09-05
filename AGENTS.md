@@ -15,6 +15,8 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 
 ## Security Invariants
 
+- `app_registry` gives each OAuth client, launcher card, and paired system a stable application identity. Startup backfills separate records without guessing links; insert/delete triggers keep references complete across all creation/deletion paths. Admin linking/unlinking requires step-up, matching revisions, non-overlapping connection types, and an atomic audit with readable connection names. Linking preserves connection IDs, credentials and settings. This registry does not yet enforce assignments or change launcher visibility/provisioning scope; that is roadmap PR04b.
+
 - Directory groups have stable IDs and unique names; names reject invisible format/control characters, private-use characters, and non-ASCII whitespace. Membership/deletion audit records capture readable target identifiers in the mutation transaction; explicit membership never grants global administrator status. Admin group/member lists are searched and paginated. Every group or membership mutation requires operation-bound step-up and commits with its audit record; individual membership writes are idempotent and preserve concurrent edits. Foreign-key cascades remove memberships when a user or group is deleted. App access and SCIM group provisioning remain separate roadmap steps.
 
 - Public deployments require an HTTPS issuer and secure session cookies; loopback HTTP is development-only.

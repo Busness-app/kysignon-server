@@ -346,7 +346,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateAuthenticationEvidence(); err != nil {
 		return err
 	}
-	return s.migrateStepUpChallenges()
+	if err := s.migrateStepUpChallenges(); err != nil {
+		return err
+	}
+	return s.migrateAppRegistry()
 }
 
 // migrateSyncEventLease adds the delivery lease column to pre-existing databases.

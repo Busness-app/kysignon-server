@@ -8,6 +8,7 @@
  */
 import { isRecord } from './api';
 import type {
+  AppRecord,
   DirectoryGroup,
   DirectoryPage,
   GroupUser,
@@ -458,5 +459,21 @@ export function parseGroupUserPage(value: unknown): DirectoryPage<GroupUser> {
     const o = obj(item, 'a group user');
     return { id: str(o, 'id'), username: str(o, 'username'), displayName: str(o, 'displayName'),
       email: str(o, 'email'), status: oneOf(o, 'status', ['active', 'disabled']), member: directoryMember(o) };
+  });
+}
+
+export function parseAppRecordPage(value: unknown): DirectoryPage<AppRecord> {
+  return directoryPage(value, 'records', value => {
+    const a = obj(value, 'an app record');
+    const revision = directoryCount(a, 'revision');
+    if (revision < 1) return fail('a positive revision');
+    const record = {
+      id: str(a, 'id'), revision,
+      clientId: str(a, 'clientId'), clientName: str(a, 'clientName'),
+      launcherId: str(a, 'launcherId'), launcherName: str(a, 'launcherName'),
+      systemId: str(a, 'systemId'), systemName: str(a, 'systemName'),
+    };
+    if (!record.id || (!record.clientId && !record.launcherId && !record.systemId)) return fail('an app with a connection');
+    return record;
   });
 }

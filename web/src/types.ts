@@ -159,3 +159,14 @@ export interface DirectoryPage<T> {
   limit: number;
   offset: number;
 }
+
+export interface AppRecord {
+  id: string;
+  revision: number;
+  clientId: string;
+  clientName: string;
+  launcherId: string;
+  launcherName: string;
+  systemId: string;
+  systemName: string;
+}

@@ -1,3 +1,4 @@
+import { parseAppRecordPage } from './parsers';
 import { describe, expect, it } from 'vitest';
 import {
   parseGroupPage,
@@ -314,4 +315,13 @@ describe('group directory pages', () => {
     }
     expect(() => parseGroupUserPage({ users: [{ ...user, status: 'unknown', member: false }], limit: 25, offset: 0, total: 1 })).toThrow();
   });
+});
+
+it('validates app registry references and revisions', () => {
+  const record = { id: 'app', revision: 1, clientId: 'client', clientName: 'Example', launcherId: '', launcherName: '', systemId: '', systemName: '' };
+  const page = { records: [record], total: 1, limit: 25, offset: 0 };
+  expect(parseAppRecordPage(page).items[0]).toEqual(record);
+  expect(() => parseAppRecordPage({ ...page, records: [{ ...record, revision: 0 }] })).toThrow();
+  expect(() => parseAppRecordPage({ ...page, records: [{ ...record, clientId: '' }] })).toThrow();
+  expect(() => parseAppRecordPage({ ...page, records: [{ ...record, systemId: 42 }] })).toThrow();
 });

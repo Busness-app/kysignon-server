@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Busness-app/ky-primitives/capsule"
@@ -48,11 +49,20 @@ var (
 	TooLargeMessage        = recoveryclient.TooLargeMessage
 )
 
-var (
-	AuditSafe       = recoveryclient.AuditSafe
-	FilenameSafe    = recoveryclient.FilenameSafe
-	RecoveryKeyPath = recoveryclient.RecoveryKeyPath
-)
+// Sanitisers are wrapped as functions, not re-exported as variables, so nothing in the
+// package can reassign them.
+func AuditSafe(s string) string             { return recoveryclient.AuditSafe(s) }
+func FilenameSafe(s string) string          { return recoveryclient.FilenameSafe(s) }
+func RecoveryKeyPath(dataDir string) string { return recoveryclient.RecoveryKeyPath(dataDir) }
+
+// privateSwitch names the deployment's own switch in refusals the lib phrases generically,
+// so the operator reads what to flip.
+func privateSwitch(err error) error {
+	if err != nil && strings.Contains(err.Error(), "private-destination option") {
+		return fmt.Errorf("%w (set KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY=true for a KyRecovery on your own network)", err)
+	}
+	return err
+}
 
 // recoveryTokenLabel is the domain-separation label the sealed KyRecovery token has always
 // been encrypted under. Changing it would orphan every live pairing.
@@ -90,7 +100,7 @@ func (s sealer) Open(sealed string) ([]byte, error) { return crypto.DecryptAESGC
 
 // ValidateRecoveryURL is the URL rule for where this server sends a capsule.
 func ValidateRecoveryURL(raw string, allowPrivate bool) error {
-	return recoveryclient.ValidateURL(raw, allowPrivate)
+	return privateSwitch(recoveryclient.ValidateURL(raw, allowPrivate))
 }
 
 // NewKyRecoveryClient builds the client with this deployment's private-destination choice.

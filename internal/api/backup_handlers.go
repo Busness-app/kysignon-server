@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Busness-app/ky-primitives/capsule"
@@ -96,7 +97,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 // RunDrill seals the live payload to a throwaway key, opens it in a sandbox and runs the
 // verification recipe. It reports, not proves, whether the suite key is pinned.
+// drillMu serialises drills: each one materialises the whole directory in the clear under
+// the data directory, and two at once is twice the exposure for no more assurance.
+var drillMu sync.Mutex
+
 func (h *BackupHandler) RunDrill(w http.ResponseWriter, r *http.Request) {
+	if !drillMu.TryLock() {
+		writeError(w, http.StatusConflict, "A restore drill is already running")
+		return
+	}
+	defer drillMu.Unlock()
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return

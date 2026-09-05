@@ -96,16 +96,15 @@ func (l *Logger) Health() (degraded bool, failures uint64, lastError string, las
 // which half is lost when the second write fails. A security mutation and the record of who
 // made it belong in one commit or neither.
 type Pending struct {
-	Row     *store.AuditEvent
-	details map[string]any
-	logger  *Logger
+	Row    *store.AuditEvent
+	logger *Logger
 }
 
 // Prepare builds an audit event for a mutation that will persist it in its own transaction.
 // Nothing is written until the caller hands Row to a transactional store method and then
 // calls Committed.
 func (l *Logger) Prepare(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome string, details map[string]any) *Pending {
-	return &Pending{Row: buildEvent(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome, details), details: details, logger: l}
+	return &Pending{Row: buildEvent(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome, details), logger: l}
 }
 
 // Committed emits the console copy of an event whose durable row committed with its
@@ -115,7 +114,15 @@ func (p *Pending) Committed() {
 		return
 	}
 	p.logger.noteResult(p.Row.CreatedAt, nil)
-	p.logger.emit(p.Row, p.details, nil)
+	// Stores may enrich details from the same transaction as the mutation.
+	// Emit the committed row, rather than a stale copy prepared before it.
+	var details map[string]any
+	if p.Row.DetailsJSON != "" {
+		if err := json.Unmarshal([]byte(p.Row.DetailsJSON), &details); err != nil {
+			details = map[string]any{"audit_detail_error": err.Error()}
+		}
+	}
+	p.logger.emit(p.Row, details, nil)
 }
 
 func buildEvent(action, actorID, actorUsername, targetID, targetType, ip, userAgent, outcome string, details map[string]any) *store.AuditEvent {

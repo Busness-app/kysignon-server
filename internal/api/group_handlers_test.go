@@ -83,9 +83,9 @@ func TestGroupAdminAPI(t *testing.T) {
 	if r := call("POST", "/api/admin/groups", `{"name":"OPERATIONS"}`); r.Code != 409 {
 		t.Fatal("duplicate accepted")
 	}
-	for _, body := range []string{`{"name":"  "}`, `{"name":"line\nbreak"}`, `{"name":"` + strings.Repeat("x", 129) + `"}`} {
+	for _, body := range []string{`{"name":"  "}`, `{"name":"line\nbreak"}`, `{"name":"ops\u202Ehidden"}`, `{"name":"ops\u200Bhidden"}`, `{"name":"ops\u00A0team"}`, `{"name":"ops\u2028team"}`, `{"name":"ops\uE000team"}`, `{"name":"ops","description":"hidden\u200Btext"}`, `{"name":"` + strings.Repeat("x", 129) + `"}`} {
 		if r := call("POST", "/api/admin/groups", body); r.Code != 400 {
-			t.Fatalf("invalid name accepted: %d", r.Code)
+			t.Errorf("invalid name accepted: %s: %d", body, r.Code)
 		}
 	}
 	if r := call("PUT", path, `{"name":"Renamed","description":"Updated"}`); r.Code != 200 {
@@ -113,6 +113,24 @@ func TestGroupAdminAPI(t *testing.T) {
 	for _, e := range events {
 		if e.ActorID == admin.ID && e.TargetID == response.Group.ID && e.Outcome == "success" {
 			actions[e.Action] = true
+			var details map[string]string
+			if err := json.Unmarshal([]byte(e.DetailsJSON), &details); err != nil {
+				t.Errorf("invalid audit details for %s: %v", e.Action, err)
+			}
+			switch e.Action {
+			case "admin.group_deleted":
+				if details["name"] != "Renamed" {
+					t.Errorf("deleted group name missing: %v", details)
+				}
+			case "admin.group_member_added", "admin.group_member_removed":
+				want := "Operations"
+				if e.Action == "admin.group_member_removed" {
+					want = "Renamed"
+				}
+				if details["userId"] != user.ID || details["username"] != user.Username || details["groupName"] != want {
+					t.Errorf("membership identifiers missing: %v", details)
+				}
+			}
 		}
 	}
 	for _, action := range []string{"admin.group_created", "admin.group_updated", "admin.group_deleted", "admin.group_member_added", "admin.group_member_removed"} {

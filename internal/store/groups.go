@@ -1,6 +1,8 @@
 package store
 
 import (
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -89,17 +91,14 @@ func (s *Store) DeleteGroup(id string, audit *AuditEvent) error {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`DELETE FROM directory_groups WHERE id=?`, id)
-	if err != nil {
+	var name string
+	if err = tx.QueryRow(`DELETE FROM directory_groups WHERE id=? RETURNING name`, id).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrGroupTargetMissing
+		}
 		return err
 	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrGroupTargetMissing
-	}
+	setGroupAuditDetails(audit, map[string]string{"name": name})
 	if err = recordAuditTx(tx, audit); err != nil {
 		return err
 	}
@@ -123,13 +122,14 @@ func (s *Store) SetGroupMembership(groupID, userID string, member bool, audit *A
 		return groupWriteError(err)
 	}
 	// The preceding write acquires the writer lock before checking either parent.
-	var exists bool
-	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM directory_groups WHERE id=?) AND EXISTS(SELECT 1 FROM users WHERE id=?)`, groupID, userID).Scan(&exists); err != nil {
+	var groupName, username string
+	if err = tx.QueryRow(`SELECT g.name,u.username FROM directory_groups g CROSS JOIN users u WHERE g.id=? AND u.id=?`, groupID, userID).Scan(&groupName, &username); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrGroupTargetMissing
+		}
 		return err
 	}
-	if !exists {
-		return ErrGroupTargetMissing
-	}
+	setGroupAuditDetails(audit, map[string]string{"userId": userID, "username": username, "groupName": groupName})
 	if err = recordAuditTx(tx, audit); err != nil {
 		return err
 	}
@@ -222,4 +222,13 @@ func (s *Store) ListGroupUsers(groupID, query string, includeNonMembers bool, li
 		return nil, 0, err
 	}
 	return users, total, tx.Commit()
+}
+
+// Capture readable identifiers while holding the mutation's writer lock, so renames
+// and deletion cannot leave the audit referring to a different version of the target.
+func setGroupAuditDetails(audit *AuditEvent, details map[string]string) {
+	if audit != nil {
+		encoded, _ := json.Marshal(details) // String maps cannot fail JSON encoding.
+		audit.DetailsJSON = string(encoded)
+	}
 }

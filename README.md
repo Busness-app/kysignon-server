@@ -181,9 +181,12 @@ each accepted request is audited. Deleting a group or user removes its membershi
 Both list endpoints accept `limit` (1–100, default 25), `offset` (0–1,000,000, default 0),
 and `q` (up to 200 characters). Group search matches names; member search matches username,
 display name or email. Responses include `total`, `limit`, and `offset`, with results under
-`groups` or `users`. Counts and results share a database snapshot. Names allow 1–128
-characters without controls; descriptions allow up to 2048 characters. All routes require
-an active administrator; member lists expose only public directory fields.
+`groups` or `users`. Counts and results share a database snapshot. Membership and deletion
+audits retain the group name and, for membership changes, the username captured in the
+mutation transaction. Names allow 1–128 characters, rejecting control/format marks,
+private-use characters, and whitespace other than ordinary spaces. Descriptions allow up
+to 2048 characters without Unicode format marks. All routes require an active administrator;
+member lists expose only public directory fields.
 
 ## Integration Requirements
 

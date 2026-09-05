@@ -87,9 +87,11 @@ func readGroup(r *http.Request) (*store.Group, error) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return nil, err
 	}
-	req.Name = strings.TrimSpace(req.Name)
+	req.Name = strings.Trim(req.Name, " ")
 	req.Description = strings.TrimSpace(req.Description)
-	if req.Name == "" || !utf8.ValidString(req.Name) || !utf8.ValidString(req.Description) || utf8.RuneCountInString(req.Name) > 128 || utf8.RuneCountInString(req.Description) > 2048 || strings.ContainsFunc(req.Name, unicode.IsControl) {
+	if req.Name == "" || !utf8.ValidString(req.Name) || !utf8.ValidString(req.Description) || utf8.RuneCountInString(req.Name) > 128 || utf8.RuneCountInString(req.Description) > 2048 || strings.ContainsFunc(req.Name, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Cs, unicode.Co) || (unicode.IsSpace(r) && r != ' ')
+	}) || strings.ContainsFunc(req.Description, func(r rune) bool { return unicode.Is(unicode.Cf, r) }) {
 		return nil, errors.New("invalid group")
 	}
 	return &store.Group{ID: r.PathValue("id"), Name: req.Name, Description: req.Description}, nil
@@ -100,7 +102,7 @@ func (h *AdminHandler) UpdateGroup(w http.ResponseWriter, r *http.Request) { h.s
 func (h *AdminHandler) saveGroup(w http.ResponseWriter, r *http.Request, create bool) {
 	g, err := readGroup(r)
 	if err != nil {
-		http.Error(w, `{"error":"invalid_request","error_description":"Group name must be 1–128 characters without control characters; description may contain up to 2048 characters"}`, 400)
+		http.Error(w, `{"error":"invalid_request","error_description":"Group name must be 1–128 characters using visible characters and ordinary spaces; description may contain up to 2048 characters without Unicode format marks"}`, 400)
 		return
 	}
 	action := "admin.group_updated"

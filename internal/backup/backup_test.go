@@ -386,3 +386,13 @@ func TestSettingsAdapterMapsNotFound(t *testing.T) {
 		t.Fatalf("clear on fresh store: %v", err)
 	}
 }
+
+func TestPrivateDestinationRefusalNamesTheSwitch(t *testing.T) {
+	err := backup.ValidateRecoveryURL("https://192.168.1.91", false)
+	if err == nil || !strings.Contains(err.Error(), "KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY") {
+		t.Fatalf("%v", err)
+	}
+	if err := backup.ValidateRecoveryURL("https://192.168.1.91", true); err != nil {
+		t.Fatalf("with the switch: %v", err)
+	}
+}

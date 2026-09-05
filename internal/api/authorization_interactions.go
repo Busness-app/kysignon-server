@@ -49,7 +49,7 @@ func (h *OAuthHandler) beginInteraction(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	now := time.Now().UTC()
-	i := &store.AuthorizationInteraction{Hash: crypto.HashSHA256(raw), BrowserHash: browserHash, Request: q.Encode(), CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute)}
+	i := &store.AuthorizationInteraction{ClientID: q.Get("client_id"), Hash: crypto.HashSHA256(raw), BrowserHash: browserHash, Request: q.Encode(), CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute)}
 	if sess := GetSessionFromContext(r.Context()); sess != nil {
 		i.UserID = sess.UserID
 		i.OriginalSessionID = sess.ID
@@ -111,5 +111,10 @@ func (h *OAuthHandler) InteractionDetails(w http.ResponseWriter, r *http.Request
 		stepUpInternalError(w)
 		return
 	}
-	writeStepUpJSON(w, map[string]any{"appName": client.ClientName, "username": username, "requiresMFA": requirements.ACR == oauth.MFAACR})
+	policy, err := h.store.ClientAuthenticationPolicy(client.ID)
+	if err != nil {
+		stepUpInternalError(w)
+		return
+	}
+	writeStepUpJSON(w, map[string]any{"appName": client.ClientName, "username": username, "requiresMFA": requirements.ACR == oauth.MFAACR || policy.Factor != "password", "requiresPasskey": policy.Factor == "passkey"})
 }

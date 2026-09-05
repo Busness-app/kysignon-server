@@ -147,8 +147,10 @@ type OAuthClient struct {
 }
 
 type AuthorizationCode struct {
-	InteractionHash         string     `json:"-"`
-	AuthenticationExpiresAt *time.Time `json:"-"`
+	AuthenticationAppID          string     `json:"-"`
+	AuthenticationPolicyRevision int        `json:"-"`
+	InteractionHash              string     `json:"-"`
+	AuthenticationExpiresAt      *time.Time `json:"-"`
 	AuthenticationEvidence
 	SessionID           string     `json:"-"`
 	ID                  string     `json:"id"`

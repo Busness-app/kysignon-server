@@ -8,7 +8,7 @@
  */
 import { isRecord } from './api';
 import type {
-  AppRecord, AppAccessPage, AppAccessGroup,
+  AppRecord, AppAccessPage, AppAccessGroup, AppAuthenticationPolicy,
   DirectoryGroup,
   DirectoryPage,
   GroupUser,
@@ -464,12 +464,28 @@ export function parseGroupUserPage(value: unknown): DirectoryPage<GroupUser> {
   });
 }
 
+export function parseAppAuthenticationPolicy(value: unknown): AppAuthenticationPolicy {
+ const p = obj(value, 'an authentication policy');
+ const policy = {
+  mode: oneOf(p, 'mode', ['reuse', 'fresh', 'max_age']),
+  primaryMaxAge: directoryCount(p, 'primaryMaxAge'),
+  factor: oneOf(p, 'factor', ['password', 'mfa', 'passkey']),
+  factorMaxAge: directoryCount(p, 'factorMaxAge'),
+ };
+ if (policy.primaryMaxAge > 2147483647 || policy.factorMaxAge > 2147483647 ||
+     (policy.mode === 'max_age' ? policy.primaryMaxAge === 0 : policy.primaryMaxAge !== 0) ||
+     (policy.factor === 'password' && policy.factorMaxAge !== 0)) return fail('valid authentication ages');
+ return policy;
+}
+
 export function parseAppRecord(value: unknown): AppRecord {
   const a = obj(value, 'an app record');
   const revision = directoryCount(a, 'revision');
   if (revision < 1) return fail('a positive revision');
   const record = {
     id: str(a, 'id'), revision,
+    authentication: parseAppAuthenticationPolicy(a.authentication),
+    authenticationRevision: directoryCount(a, 'authenticationRevision'),
     accessMode: oneOf(a, 'accessMode', ['all_active_users', 'assigned_only']),
     enabled: requiredBool(a, 'enabled'),
     clientId: str(a, 'clientId'), clientName: str(a, 'clientName'),

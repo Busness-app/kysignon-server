@@ -20,6 +20,7 @@ type AuthenticationRequest struct {
 	Fresh, Silent bool
 	MaxAge        *int64
 	ACR           string
+	AppPolicy     store.AppAuthenticationPolicy
 }
 
 func ParseAuthenticationRequest(q url.Values) (AuthenticationRequest, error) {
@@ -83,6 +84,9 @@ func ParseAuthenticationRequest(q url.Values) (AuthenticationRequest, error) {
 }
 
 func (p AuthenticationRequest) Satisfied(e store.AuthenticationEvidence, now time.Time) bool {
+	if p.AppPolicy.Mode != "" && p.AppPolicy.EvidenceReason(e, now) != "" {
+		return false
+	}
 	if p.Fresh {
 		return false
 	}
@@ -105,4 +109,11 @@ func (p AuthenticationRequest) Satisfied(e store.AuthenticationEvidence, now tim
 		}
 	}
 	return true
+}
+
+// App requirements and client requests combine restrictively.
+func (p AuthenticationRequest) WithAppPolicy(policy store.AppAuthenticationPolicy) AuthenticationRequest {
+	p.AppPolicy = policy
+	p.Fresh = p.Fresh || policy.Mode == "fresh"
+	return p
 }

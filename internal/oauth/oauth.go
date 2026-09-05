@@ -197,8 +197,16 @@ func (e *Engine) CreateAuthorizationCodeForInteraction(clientID, sessionID, redi
 	if session == nil {
 		return "", errors.New("active session required")
 	}
+	policy, err := e.store.ClientAuthenticationPolicy(clientID)
+	if err != nil {
+		return "", err
+	}
+	requirements = requirements.WithAppPolicy(policy)
+	if interactionHash != "" {
+		requirements.Fresh = false
+	}
 	if !requirements.Satisfied(session.AuthenticationEvidence, time.Now().UTC()) {
-		return "", errors.New("fresh authentication required")
+		return "", store.ErrAppAuthentication
 	}
 	rawCode, err := crypto.GenerateRandomHex(32)
 	if err != nil {

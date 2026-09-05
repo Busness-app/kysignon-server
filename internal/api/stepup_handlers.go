@@ -27,9 +27,11 @@ func stepUpOperation(operation string) string {
 	return operation
 }
 
+// The path is decoded URL.Path, so spaces and URL punctuation can be literal
+// characters in an existing client ID. Only the exact consuming path can spend it.
 func validStepUpOperation(operation string) bool {
 	method, path, ok := strings.Cut(operation, " ")
-	return ok && len(operation) <= 2048 && slices.Contains([]string{"GET", "POST", "PUT", "DELETE"}, method) && strings.HasPrefix(path, "/api/") && !strings.ContainsAny(path, " ?#\r\n")
+	return ok && len(operation) <= 2048 && slices.Contains([]string{"GET", "POST", "PUT", "DELETE"}, method) && strings.HasPrefix(path, "/api/") && !strings.ContainsAny(path, "\x00\r\n")
 }
 
 func recoveryOperation(operation string) bool {

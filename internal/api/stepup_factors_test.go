@@ -217,3 +217,18 @@ func TestTOTPStepUp(t *testing.T) {
 		t.Fatal(r.Body.String())
 	}
 }
+
+func TestStepUpSupportsExistingClientIDsWithSpaces(t *testing.T) {
+	f, cleanup := newStepUpFixture(t)
+	defer cleanup()
+	f.user.Role = "admin"
+	if err := f.store.UpdateUser(f.user); err != nil {
+		t.Fatal(err)
+	}
+	newClient(t, f.store, "app one", []string{"https://app.test/cb"}, []string{"openid"})
+	token := f.grant(t, "DELETE /api/admin/clients/app one")
+	r := f.do(t, "DELETE", "/api/admin/clients/app%20one", token)
+	if r.Code != 200 {
+		t.Fatalf("existing client cannot be deleted: %d %s", r.Code, r.Body.String())
+	}
+}

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  parseGroupPage,
+  parseGroupUserPage,
   parseApplications,
   parseAuditPage,
   parseAuthStep,
@@ -294,5 +296,22 @@ describe('parseSuccess', () => {
   it('refuses a response where success is not true', () => {
     expect(() => parseSuccess({ success: false })).toThrow(/success/);
     expect(() => parseSuccess({ error: 'step_up_required' })).toThrow(/success/);
+  });
+});
+
+
+describe('group directory pages', () => {
+  const group = { id: 'g1', name: 'Operations', description: '', member: true, memberCount: 3, createdAt: '2026-09-05T00:00:00Z', updatedAt: '2026-09-05T00:00:00Z' };
+  const page = { groups: [group], total: 4, limit: 25, offset: 0 };
+  it('preserves membership and pagination without interpreting names as roles', () => {
+    expect(parseGroupPage(page)).toEqual({ items: [group], total: 4, limit: 25, offset: 0 });
+    const member = { id: 'u1', username: 'ada', displayName: 'Ada', email: 'ada@example.test', status: 'disabled', member: false };
+    expect(parseGroupUserPage({ users: [member], total: 1, limit: 25, offset: 0 }).items).toEqual([member]);
+  });
+  it('rejects malformed membership and pagination', () => {
+    for (const invalid of [{ ...page, limit: 0 }, { ...page, offset: -1 }, { ...page, total: 1.5 }, { ...page, groups: [{ ...group, member: 'false' }] }, { ...page, groups: [{ ...group, memberCount: -1 }] }]) {
+      expect(() => parseGroupPage(invalid)).toThrow();
+    }
+    expect(() => parseGroupUserPage({ users: [{ ...user, status: 'unknown', member: false }], limit: 25, offset: 0, total: 1 })).toThrow();
   });
 });

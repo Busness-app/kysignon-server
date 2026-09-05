@@ -3,9 +3,9 @@ import { User } from '../types';
 import { apiJson, apiRequest, errorMessage } from '../api';
 import { isCancelled, useStepUp } from './StepUpPrompt';
 import { parseUsers } from '../parsers';
-import { Plus, RefreshCw, KeyRound, LogOut, Trash2, Edit, CheckCircle, XCircle } from 'lucide-react';
+import { Users, Plus, RefreshCw, KeyRound, LogOut, Trash2, Edit, CheckCircle, XCircle } from 'lucide-react';
 
-export const AdminUsers: React.FC = () => {
+export const AdminUsers: React.FC<{ onManageGroups: (user: User) => void }> = ({ onManageGroups }) => {
   const [users, setUsers] = useState<User[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -203,6 +203,9 @@ export const AdminUsers: React.FC = () => {
                 </td>
                 <td className="text-right">
                   <div className="action-buttons-wrap">
+                    <button className="icon-btn" onClick={() => onManageGroups(u)} title="Manage groups" aria-label={`Manage groups for ${u.username}`}>
+                      <Users size={15} />
+                    </button>
                     <button className="icon-btn" onClick={() => openEditModal(u)} title="Edit User">
                       <Edit size={15} />
                     </button>

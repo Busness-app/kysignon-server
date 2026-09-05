@@ -7,6 +7,7 @@ import { LoginView } from './components/LoginView';
 import { UserDashboard } from './components/UserDashboard';
 import { DeviceSettings } from './components/DeviceSettings';
 import { Appearance } from './components/Appearance';
+import { AdminGroups } from './components/AdminGroups';
 import { AdminUsers } from './components/AdminUsers';
 import { AdminSystems } from './components/AdminSystems';
 import { AdminClients } from './components/AdminClients';
@@ -18,6 +19,7 @@ export const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [groupUser, setGroupUser] = useState<User | null>(null);
 
   const checkSession = async () => {
     try {
@@ -69,7 +71,7 @@ export const App: React.FC = () => {
       <Sidebar
         user={currentUser}
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={tab => { setGroupUser(null); setActiveTab(tab); }}
         onLogout={handleLogout}
       />
 
@@ -89,7 +91,8 @@ export const App: React.FC = () => {
 
         {currentUser.role === 'admin' && (
           <>
-            {activeTab === 'admin-users' && <AdminUsers />}
+            {activeTab === 'admin-users' && <AdminUsers onManageGroups={user => { setGroupUser(user); setActiveTab('admin-groups'); }} />}
+            {activeTab === 'admin-groups' && <AdminGroups key={groupUser?.id ?? 'all'} user={groupUser} onClearUser={() => setGroupUser(null)} />}
             {activeTab === 'admin-systems' && <AdminSystems />}
             {activeTab === 'admin-clients' && <AdminClients />}
             {activeTab === 'admin-audit' && <AdminAudit />}

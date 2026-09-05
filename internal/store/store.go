@@ -62,6 +62,17 @@ func (s *Store) migrate() error {
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 
+ CREATE TABLE IF NOT EXISTS directory_groups (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  description TEXT NOT NULL DEFAULT '', created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL
+ );
+ CREATE TABLE IF NOT EXISTS group_memberships (
+  group_id TEXT NOT NULL REFERENCES directory_groups(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY(group_id,user_id)
+ );
+ CREATE INDEX IF NOT EXISTS idx_group_memberships_user ON group_memberships(user_id,group_id);
+
 	CREATE TABLE IF NOT EXISTS sessions (
 		id TEXT PRIMARY KEY,
 		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

@@ -8,6 +8,9 @@
  */
 import { isRecord } from './api';
 import type {
+  DirectoryGroup,
+  DirectoryPage,
+  GroupUser,
   Application,
   AuditEvent,
   BackupDrillResult,
@@ -425,4 +428,35 @@ export function parseAuthStep(value: unknown): AuthStep {
 export function parsePushStatus(value: unknown): string {
   const o = obj(value, 'a push poll response');
   return str(o, 'status');
+}
+
+function directoryCount(o: Record<string, unknown>, key: string): number {
+  const n = o[key];
+  return typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? n : fail(`nonnegative integer field "${key}"`);
+}
+function directoryMember(o: Record<string, unknown>): boolean {
+  return typeof o.member === 'boolean' ? o.member : fail('boolean field "member"');
+}
+function directoryPage<T>(value: unknown, key: string, parse: (item: unknown) => T): DirectoryPage<T> {
+  const o = obj(value, 'a directory page');
+  const limit = directoryCount(o, 'limit');
+  if (limit < 1 || limit > 100) fail('page limit between 1 and 100');
+  const items = list(o[key], parse);
+  if (items.length > limit) fail('no more items than the page limit');
+  return { items, limit, total: directoryCount(o, 'total'), offset: directoryCount(o, 'offset') };
+}
+export function parseGroupPage(value: unknown): DirectoryPage<DirectoryGroup> {
+  return directoryPage(value, 'groups', item => {
+    const o = obj(item, 'a group');
+    return { id: str(o, 'id'), name: str(o, 'name'), description: str(o, 'description'),
+      memberCount: directoryCount(o, 'memberCount'), member: directoryMember(o),
+      createdAt: str(o, 'createdAt'), updatedAt: str(o, 'updatedAt') };
+  });
+}
+export function parseGroupUserPage(value: unknown): DirectoryPage<GroupUser> {
+  return directoryPage(value, 'users', item => {
+    const o = obj(item, 'a group user');
+    return { id: str(o, 'id'), username: str(o, 'username'), displayName: str(o, 'displayName'),
+      email: str(o, 'email'), status: oneOf(o, 'status', ['active', 'disabled']), member: directoryMember(o) };
+  });
 }

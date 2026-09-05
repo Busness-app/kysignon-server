@@ -156,6 +156,38 @@ is [docs/RESTORE.md](docs/RESTORE.md).
 
 ---
 
+## Directory groups
+
+Administrators can create, rename and delete groups under **Groups**, manage each group's
+members, or open membership controls from a row in **Users**. Names are trimmed and unique
+under the directory's SQLite `NOCASE` collation; renaming preserves the group's stable ID.
+Membership does not change the user's global role. App assignment and SCIM group provisioning
+are subsequent roadmap steps.
+
+Group and membership mutations require a single-use step-up grant for their exact method
+and path and commit with their audit event. Repeated add/remove requests are idempotent;
+each accepted request is audited. Deleting a group or user removes its membership rows.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/admin/groups` | List groups; optional `userId` annotates each group's `member` flag for that user. |
+| `POST /api/admin/groups` | Create a group from `name` and `description`. |
+| `PUT /api/admin/groups/{id}` | Replace the name and description. |
+| `DELETE /api/admin/groups/{id}` | Delete the group and its memberships. |
+| `GET /api/admin/groups/{id}/members` | List members; `includeNonMembers=true` includes candidates to add. |
+| `PUT /api/admin/groups/{id}/members/{userId}` | Ensure the user is a member. |
+| `DELETE /api/admin/groups/{id}/members/{userId}` | Ensure the user is not a member. |
+
+Both list endpoints accept `limit` (1–100, default 25), `offset` (0–1,000,000, default 0),
+and `q` (up to 200 characters). Group search matches names; member search matches username,
+display name or email. Responses include `total`, `limit`, and `offset`, with results under
+`groups` or `users`. Counts and results share a database snapshot. Membership and deletion
+audits retain the group name and, for membership changes, the username captured in the
+mutation transaction. Names allow 1–128 characters, rejecting control/format marks,
+private-use characters, and whitespace other than ordinary spaces. Descriptions allow up
+to 2048 characters without Unicode format marks. All routes require an active administrator;
+member lists expose only public directory fields.
+
 ## Integration Requirements
 
 These rules are enforced strictly. Each is a constraint on how a client integrates.

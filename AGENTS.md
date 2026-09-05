@@ -59,6 +59,7 @@ Non-trivial logic must include one runnable check (unit test or minimal self-che
 ## Verification
 
 - CI runs Go formatting, build, vet, vulnerability scanning, and race-enabled tests.
+- App-access regression tests cover sole-grant group deletion revoking tokens and codes, and enabled/disabled previews with unfiltered loss counts and strict API boolean validation.
 - CI builds, audits, and tests the web app, and rejects stale committed `web/dist` assets.
 - CI audits and typechecks both push Workers and runs their shared and provider behavior tests.
 - CI builds the production image, probes `/readyz`, and verifies public HTTP issuers fail closed.

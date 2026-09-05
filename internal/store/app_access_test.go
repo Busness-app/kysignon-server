@@ -235,3 +235,63 @@ func TestAppAccessMigrationAndLinkSafety(t *testing.T) {
 		t.Fatal("restart lost assignments", err)
 	}
 }
+
+func TestAppAccessGroupDeletionRevokesSoleGrant(t *testing.T) {
+	s, u, a := appAccessFixture(t)
+	if err := s.CreateGroup(&Group{ID: "c", Name: "Only grant"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetGroupMembership("c", u.ID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAppAssignment(a.ID, "groups", "c", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	accessCode(t, s, u, "pending")
+	accessCode(t, s, u, "spent")
+	if ok, err := s.ConsumeAuthorizationCode("spent"); err != nil || !ok {
+		t.Fatalf("consume code: %v %v", ok, err)
+	}
+	if err := s.RecordIssuedToken(accessToken(u, "token", "spent")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteGroup("c", nil); err != nil {
+		t.Fatal(err)
+	}
+	if revoked, err := s.IsTokenRevoked("token"); err != nil || !revoked {
+		t.Errorf("group deletion retained token: revoked=%v err=%v", revoked, err)
+	}
+	if code, err := s.GetValidAuthorizationCode("pending"); err != nil || code != nil {
+		t.Errorf("group deletion retained pending code: %+v err=%v", code, err)
+	}
+	if err := s.SetAppAssignment(a.ID, "users", u.ID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordIssuedToken(accessToken(u, "raced-token", "spent")); !errors.Is(err, ErrAppAccessDenied) {
+		t.Fatalf("regrant revived spent code after group deletion: %v", err)
+	}
+}
+
+func TestAppAccessEnabledPreview(t *testing.T) {
+	s, _, a := appAccessFixture(t)
+	if err := s.SetAppPolicy(a.ID, "all_active_users", true, a.Revision, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{false, true} {
+		wantLoss := 1
+		if enabled {
+			wantLoss = 0
+		}
+		p, err := s.ListAppAccessUsers(a.ID, "", "", &enabled, 25, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.LosingAccess != wantLoss || len(p.Users) != 1 || !p.Users[0].Effective || p.Users[0].Preview != enabled || !p.App.Enabled {
+			t.Fatalf("enabled=%v: wrong preview: %+v", enabled, p)
+		}
+		p, err = s.ListAppAccessUsers(a.ID, "does-not-match", "", &enabled, 25, 0)
+		if err != nil || p.LosingAccess != wantLoss || p.Total != 0 {
+			t.Fatalf("enabled=%v: filtered loss count: %+v err=%v", enabled, p, err)
+		}
+	}
+}

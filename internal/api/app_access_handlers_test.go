@@ -147,3 +147,36 @@ func TestAppAssignmentOAuthAndLauncherEnforcement(t *testing.T) {
 		t.Fatal("missing assignment audit")
 	}
 }
+
+func TestAppAccessEnabledPreview(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := newUser(t, db, "admin")
+	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
+	newClient(t, db, "preview-app", []string{"https://app.example/cb"}, []string{"openid"})
+	apps, _, err := db.ListAppRecords("preview-app", 25, 0)
+	if err != nil || len(apps) != 1 {
+		t.Fatalf("app lookup: %+v %v", apps, err)
+	}
+	path := "/api/admin/app-registry/" + apps[0].ID + "/access-users?enabled="
+	for _, enabled := range []string{"false", "true"} {
+		r := adminRequestNoStepUp(t, srv, "GET", path+enabled, cookie, "")
+		var p store.AppAccessUsers
+		if r.Code != 200 {
+			t.Fatalf("preview status=%d: %s", r.Code, r.Body.String())
+		}
+		if err := json.Unmarshal(r.Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		wantLoss := 1
+		if enabled == "true" {
+			wantLoss = 0
+		}
+		if p.LosingAccess != wantLoss || len(p.Users) != 1 || !p.Users[0].Effective || p.Users[0].Preview != (enabled == "true") || !p.App.Enabled {
+			t.Fatalf("enabled=%s: wrong preview: %s", enabled, r.Body.String())
+		}
+	}
+	if r := adminRequestNoStepUp(t, srv, "GET", path+"maybe", cookie, ""); r.Code != 400 {
+		t.Fatalf("invalid enabled accepted: %d %s", r.Code, r.Body.String())
+	}
+}

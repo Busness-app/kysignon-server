@@ -3,9 +3,6 @@ package sync
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/syncauth"
 	"github.com/Busness-app/kysignon-server/internal/crypto"
 	"github.com/Busness-app/kysignon-server/internal/netguard"
 	"github.com/Busness-app/kysignon-server/internal/store"
@@ -528,13 +526,10 @@ func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, e
 		signPayload = []byte{}
 	}
 
-	// Sign the timestamp alongside the body for KySecurity HMAC authenticity
-	timestamp := time.Now().UTC().Format(time.RFC3339)
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(timestamp))
-	mac.Write([]byte("."))
-	mac.Write(signPayload)
-	signature := hex.EncodeToString(mac.Sum(nil))
+	headers, err := syncauth.Sign([]byte(secret), time.Now().UTC(), eventType, eventID, signPayload)
+	if err != nil {
+		return err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, method, targetURL, bodyReader)
 	if err != nil {
@@ -544,13 +539,9 @@ func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, e
 		req.Header.Set("Content-Type", "application/scim+json")
 	}
 	req.Header.Set("Accept", "application/scim+json, application/json")
-	req.Header.Set("Authorization", "Bearer "+secret)
-	req.Header.Set("X-KySignOn-Signature", signature)
-	req.Header.Set("X-KySignOn-Timestamp", timestamp)
-	req.Header.Set("X-KySignOn-Event-Type", eventType)
+	headers.Apply(req)
 	// A stable key per queued event. Retries reuse it, so a recipient that saw the request
 	// but whose response was lost can recognise the replay instead of acting twice.
-	req.Header.Set("X-KySignOn-Event-Id", eventID)
 	req.Header.Set("Idempotency-Key", eventID)
 
 	resp, err := e.httpClient.Do(req)

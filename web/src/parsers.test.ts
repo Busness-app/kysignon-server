@@ -335,3 +335,10 @@ it('validates effective-access decisions and preview metadata', () => {
  expect(() => parseAppAccessPage({ ...page, users: [{ ...user, reason: 'unknown' }] })).toThrow();
  expect(() => parseAppAccessPage({ ...page, losingAccess: -1 })).toThrow();
 });
+
+it('preserves a successful login when its authorization must restart', () => {
+  const result = parseAuthStep({ success: true, user, restartAuthorization: true });
+  expect(result.success).toBe(true);
+  expect(result.user?.id).toBe(user.id);
+  expect(result.restartAuthorization).toBe(true);
+});

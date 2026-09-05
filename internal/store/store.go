@@ -807,13 +807,20 @@ func (s *Store) CreateSessionForInteraction(sess *Session, interactionHash, brow
 			return ErrAuthorizationInteraction
 		}
 	}
-	query := `INSERT INTO sessions (id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at, primary_authenticated_at, factor_authenticated_at, factor_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO sessions (id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at, primary_authenticated_at, factor_authenticated_at, factor_method) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS(SELECT 1 FROM users WHERE id=? AND status='active')`
 	now := time.Now().UTC()
 	sess.CreatedAt = now
 	sess.LastActiveAt = now
-	_, err = tx.Exec(query, sess.ID, sess.UserID, sess.SessionTokenHash, sess.IPAddress, sess.UserAgent, sess.ExpiresAt, sess.CreatedAt, sess.LastActiveAt, sess.PrimaryAuthenticatedAt, sess.FactorAuthenticatedAt, sess.FactorMethod)
+	result, err := tx.Exec(query, sess.ID, sess.UserID, sess.SessionTokenHash, sess.IPAddress, sess.UserAgent, sess.ExpiresAt, sess.CreatedAt, sess.LastActiveAt, sess.PrimaryAuthenticatedAt, sess.FactorAuthenticatedAt, sess.FactorMethod, sess.UserID)
 	if err != nil {
 		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrAppAccessDenied
 	}
 	return tx.Commit()
 }

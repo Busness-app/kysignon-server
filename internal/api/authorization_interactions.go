@@ -1,7 +1,9 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"github.com/Busness-app/kysignon-server/internal/oauth"
 	"net/http"
 	"net/url"
@@ -14,16 +16,24 @@ import (
 
 const authorizationBrowserCookie = "kysignon_authorization_browser"
 
-func authorizationBrowserHash(r *http.Request) string {
+func (m *MiddlewareManager) authorizationBrowserHash(r *http.Request) string {
 	c, err := r.Cookie(authorizationBrowserCookie)
-	if err != nil || len(c.Value) != 64 {
+	if err != nil {
 		return ""
 	}
-	return crypto.HashSHA256(c.Value)
+	raw, signature, ok := strings.Cut(c.Value, ".")
+	if !ok || len(raw) != 64 {
+		return ""
+	}
+	expected := crypto.SignHMACSHA256(m.csrfKey, []byte("authorization-browser:"+raw))
+	if subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) != 1 {
+		return ""
+	}
+	return crypto.HashSHA256(raw)
 }
 
 func (h *OAuthHandler) beginInteraction(w http.ResponseWriter, r *http.Request, q url.Values) {
-	browserHash := authorizationBrowserHash(r)
+	browserHash := h.middleware.authorizationBrowserHash(r)
 	if browserHash == "" {
 		raw, err := crypto.GenerateRandomHex(32)
 		if err != nil {
@@ -31,7 +41,7 @@ func (h *OAuthHandler) beginInteraction(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		browserHash = crypto.HashSHA256(raw)
-		http.SetCookie(w, &http.Cookie{Name: authorizationBrowserCookie, Value: raw, Path: "/", HttpOnly: true, Secure: h.middleware.IsHTTPS(r) || strings.HasPrefix(h.oauthEngine.GetOIDCConfiguration().Issuer, "https://"), SameSite: http.SameSiteLaxMode})
+		http.SetCookie(w, &http.Cookie{Name: authorizationBrowserCookie, Value: raw + "." + crypto.SignHMACSHA256(h.middleware.csrfKey, []byte("authorization-browser:"+raw)), Path: "/", HttpOnly: true, Secure: h.middleware.IsHTTPS(r) || strings.HasPrefix(h.oauthEngine.GetOIDCConfiguration().Issuer, "https://"), SameSite: http.SameSiteLaxMode})
 	}
 	raw, err := crypto.GenerateRandomHex(32)
 	if err != nil {
@@ -45,7 +55,11 @@ func (h *OAuthHandler) beginInteraction(w http.ResponseWriter, r *http.Request, 
 		i.OriginalSessionID = sess.ID
 	}
 	if err := h.store.CreateAuthorizationInteraction(i); err != nil {
-		http.Error(w, `{"error":"interaction_unavailable","error_description":"Too many sign-in requests; wait a few minutes and restart"}`, 429)
+		if errors.Is(err, store.ErrAuthorizationInteraction) {
+			redirectError(w, r, q.Get("redirect_uri"), q.Get("state"), "temporarily_unavailable", "Too many sign-in requests; wait a few minutes and restart")
+		} else {
+			redirectError(w, r, q.Get("redirect_uri"), q.Get("state"), "server_error", "Could not start sign-in")
+		}
 		return
 	}
 	h.audit.Record("oauth.interaction", i.UserID, "", q.Get("client_id"), "client", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"reason": "interaction_started"})
@@ -60,7 +74,7 @@ func (h *OAuthHandler) CancelInteraction(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"invalid_request"}`, 400)
 		return
 	}
-	if err := h.store.CancelAuthorizationInteraction(crypto.HashSHA256(req.Interaction), authorizationBrowserHash(r)); err != nil {
+	if err := h.store.CancelAuthorizationInteraction(crypto.HashSHA256(req.Interaction), h.middleware.authorizationBrowserHash(r)); err != nil {
 		stepUpInternalError(w)
 		return
 	}
@@ -68,7 +82,7 @@ func (h *OAuthHandler) CancelInteraction(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *OAuthHandler) InteractionDetails(w http.ResponseWriter, r *http.Request) {
-	i, err := h.store.GetAuthorizationInteraction(crypto.HashSHA256(r.PathValue("id")), authorizationBrowserHash(r))
+	i, err := h.store.GetAuthorizationInteraction(crypto.HashSHA256(r.PathValue("id")), h.middleware.authorizationBrowserHash(r))
 	if err != nil || i.SessionID != "" {
 		http.Error(w, `{"error":"invalid_interaction","error_description":"Sign-in expired; restart from the application"}`, 400)
 		return

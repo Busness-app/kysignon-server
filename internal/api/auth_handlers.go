@@ -66,14 +66,15 @@ type LoginRequest struct {
 }
 
 type LoginResponse struct {
-	Success     bool     `json:"success"`
-	MFARequired bool     `json:"mfaRequired,omitempty"`
-	MFAToken    string   `json:"mfaToken,omitempty"`
-	MFAMethods  []string `json:"mfaMethods,omitempty"`
-	ChallengeID string   `json:"challengeId,omitempty"`
-	MatchDigits string   `json:"matchDigits,omitempty"`
-	DecoyDigits []string `json:"decoyDigits,omitempty"`
-	User        any      `json:"user,omitempty"`
+	RestartAuthorization bool     `json:"restartAuthorization,omitempty"`
+	Success              bool     `json:"success"`
+	MFARequired          bool     `json:"mfaRequired,omitempty"`
+	MFAToken             string   `json:"mfaToken,omitempty"`
+	MFAMethods           []string `json:"mfaMethods,omitempty"`
+	ChallengeID          string   `json:"challengeId,omitempty"`
+	MatchDigits          string   `json:"matchDigits,omitempty"`
+	DecoyDigits          []string `json:"decoyDigits,omitempty"`
+	User                 any      `json:"user,omitempty"`
 }
 
 // Login handles primary username/password verification.
@@ -112,7 +113,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	interactionHash := ""
 	if req.Interaction != "" {
 		interactionHash = crypto.HashSHA256(req.Interaction)
-		i, err := h.store.GetAuthorizationInteraction(interactionHash, authorizationBrowserHash(r))
+		i, err := h.store.GetAuthorizationInteraction(interactionHash, h.middleware.authorizationBrowserHash(r))
 		if err != nil || i.SessionID != "" || (i.UserID != "" && i.UserID != user.ID) {
 			auth.DummyVerify(req.Password)
 			http.Error(w, `{"error":"invalid_interaction","error_description":"Restart authorization with the original account and browser"}`, 400)
@@ -236,11 +237,15 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 		ExpiresAt:              expiresAt,
 	}
 
-	if err := h.store.CreateSessionForInteraction(sess, interactionHash, authorizationBrowserHash(r)); err != nil {
-		if errors.Is(err, store.ErrAuthorizationInteraction) {
-			http.Error(w, `{"error":"invalid_interaction","error_description":"Sign-in expired or was cancelled; restart authorization"}`, 400)
-			return
-		}
+	restartAuthorization := false
+	err = h.store.CreateSessionForInteraction(sess, interactionHash, h.middleware.authorizationBrowserHash(r))
+	if errors.Is(err, store.ErrAuthorizationInteraction) {
+		// Proof has already succeeded and may have spent a recovery code. Preserve
+		// that login without granting the cancelled/expired authorization request.
+		err = h.store.CreateSession(sess)
+		restartAuthorization = true
+	}
+	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -270,7 +275,8 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(LoginResponse{
-		Success: true,
+		RestartAuthorization: restartAuthorization,
+		Success:              true,
 		User: map[string]any{
 			"id":          user.ID,
 			"username":    user.Username,

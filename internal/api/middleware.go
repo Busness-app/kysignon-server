@@ -198,53 +198,43 @@ func (m *MiddlewareManager) SecurityHeaders(next http.Handler) http.Handler {
 func (m *MiddlewareManager) RateLimit(bucket string, maxTokens, refillRate float64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := m.ClientIP(r)
-			key := bucket + ":" + ip
-
-			now := m.now()
-			m.rateLimitersMutex.Lock()
-			m.sweepLimiters(now)
-			limiter, exists := m.rateLimiters[key]
-			if !exists {
-				// At capacity, refuse the new bucket rather than evicting a live one.
-				// Evicting under pressure hands a fresh full allowance to exactly the
-				// clients being throttled, so a botnet could reset its own limits on demand.
-				// Shedding new arrivals is the failure mode that does not reward the attack.
-				if len(m.rateLimiters) >= m.maxLimiters {
-					m.rateLimitersMutex.Unlock()
-					http.Error(w, `{"error":"rate_limit_exceeded","error_description":"Too many requests"}`, http.StatusTooManyRequests)
-					return
-				}
-				limiter = &RateLimiter{
-					tokens:     maxTokens,
-					maxTokens:  maxTokens,
-					refillRate: refillRate,
-					lastRefill: now,
-				}
-				m.rateLimiters[key] = limiter
-			}
-			m.rateLimitersMutex.Unlock()
-
-			limiter.mu.Lock()
-			elapsed := now.Sub(limiter.lastRefill).Seconds()
-			limiter.tokens += elapsed * limiter.refillRate
-			if limiter.tokens > limiter.maxTokens {
-				limiter.tokens = limiter.maxTokens
-			}
-			limiter.lastRefill = now
-
-			if limiter.tokens < 1.0 {
-				limiter.mu.Unlock()
+			if !m.allowRateLimit(bucket+":"+m.ClientIP(r), maxTokens, refillRate) {
 				http.Error(w, `{"error":"rate_limit_exceeded","error_description":"Too many requests"}`, http.StatusTooManyRequests)
 				return
 			}
-
-			limiter.tokens -= 1.0
-			limiter.mu.Unlock()
-
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// Protocol endpoints can reuse the same bounded limiter and send their own error.
+func (m *MiddlewareManager) allowRateLimit(key string, maxTokens, refillRate float64) bool {
+	now := m.now()
+	m.rateLimitersMutex.Lock()
+	m.sweepLimiters(now)
+	limiter, exists := m.rateLimiters[key]
+	if !exists {
+		// Keep live buckets at capacity: evicting them would reset an attacker's allowance.
+		if len(m.rateLimiters) >= m.maxLimiters {
+			m.rateLimitersMutex.Unlock()
+			return false
+		}
+		limiter = &RateLimiter{tokens: maxTokens, maxTokens: maxTokens, refillRate: refillRate, lastRefill: now}
+		m.rateLimiters[key] = limiter
+	}
+	m.rateLimitersMutex.Unlock()
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	limiter.tokens += now.Sub(limiter.lastRefill).Seconds() * limiter.refillRate
+	if limiter.tokens > limiter.maxTokens {
+		limiter.tokens = limiter.maxTokens
+	}
+	limiter.lastRefill = now
+	if limiter.tokens < 1 {
+		return false
+	}
+	limiter.tokens--
+	return true
 }
 
 // authenticate resolves the session cookie to a live session and active user, or returns

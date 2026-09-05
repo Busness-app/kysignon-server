@@ -137,3 +137,64 @@ func TestAuthorizationInteractionCapacityAndMigration(t *testing.T) {
 		t.Fatal("expired rows consumed capacity", err)
 	}
 }
+
+func TestAuthorizationInteractionEvictsOnlyAnonymousPending(t *testing.T) {
+	s, _, _ := appAccessFixture(t)
+	now := time.Now().UTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	statement, err := tx.Prepare(`INSERT INTO authorization_interactions(hash,browser_hash,user_id,session_id,request,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statement.Close()
+	for n := range 10000 {
+		id := fmt.Sprint(n)
+		user, session := "", ""
+		if n == 0 {
+			user = "owned"
+		}
+		if n == 1 {
+			session = "completed"
+		}
+		if _, err := statement.Exec(id, id, user, session, "client_id=client", now.Add(time.Duration(n-10000)*time.Millisecond), now.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAuthorizationInteraction(&AuthorizationInteraction{Hash: "new", BrowserHash: "new", Request: "client_id=client", CreatedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal("anonymous requests exhausted global capacity", err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM authorization_interactions`).Scan(&count); err != nil || count != 10000 {
+		t.Fatal("capacity changed", count, err)
+	}
+	for _, id := range []string{"0", "1", "new"} {
+		if _, err := s.GetAuthorizationInteraction(id, id); err != nil {
+			t.Fatal("protected/new row lost", id, err)
+		}
+	}
+	if _, err := s.GetAuthorizationInteraction("2", "2"); !errors.Is(err, ErrAuthorizationInteraction) {
+		t.Fatal("oldest anonymous pending row retained", err)
+	}
+}
+
+func TestCompletedLoginCannotCreateDisabledUserSession(t *testing.T) {
+	s, u, _ := appAccessFixture(t)
+	if _, err := s.db.Exec(`UPDATE users SET status='disabled' WHERE id=?`, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC()
+	err := s.CreateSession(&Session{ID: "fallback", UserID: u.ID, SessionTokenHash: "fallback", ExpiresAt: at.Add(time.Hour), AuthenticationEvidence: AuthenticationEvidence{PrimaryAuthenticatedAt: &at}})
+	if !errors.Is(err, ErrAppAccessDenied) {
+		t.Fatal("disabled user signed in", err)
+	}
+	if sess, err := s.GetSessionByID("fallback"); err != nil || sess != nil {
+		t.Fatal("disabled user retained session", err)
+	}
+}

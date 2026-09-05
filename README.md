@@ -289,12 +289,21 @@ two supported request classes. Passkey-only app policy is planned in PR05b.
 
 Interactive login uses the existing password, TOTP, push, passkey and recovery screens.
 A five-minute, single-use interaction binds the original validated request (including
-client, redirect, scope, PKCE, nonce and state) to an HttpOnly browser cookie and the
+client, redirect, scope, PKCE, nonce and state) to a signed HttpOnly browser cookie and the
 resulting login session. A signed-in user must re-authenticate as that same account.
 Up to ten interactions can be outstanding per browser, with a server-wide cap of 10000.
-Expired interactions are cleaned on creation. A different tab's login cannot satisfy
+Expired interactions are cleaned on creation. At capacity, only the oldest anonymous,
+unfinished interactions are evicted; account-bound requests and completed proofs are
+preserved. Authorization allows a burst of 300 requests with five requests/second refill
+per signed browser identity, falling back to IP for requests without a valid cookie.
+Throttling uses `temporarily_unavailable` after validating the redirect URI; database
+failures use `server_error`. A different tab's login cannot satisfy
 another interaction; if the browser's session changes, restart from the app. Cancel
-sign-in burns the interaction and returns to the dashboard. Concurrent completion and
+sign-in burns the interaction and returns to the dashboard. If password/MFA verification
+has already completed when its interaction expires or is cancelled, the valid login is
+preserved and the UI asks the user to restart from the application. The new session
+cannot resume the cancelled request; a spent recovery code still bought a valid login.
+Concurrent completion and
 cancellation serialize at the database; a code already issued cannot be recalled by
 cancelling the former interaction. Administrative step-up grants are never accepted.
 

@@ -152,7 +152,7 @@ func TestAuthorizationSilentAndAge(t *testing.T) {
 }
 
 func TestAuthorizationInteractionMFA(t *testing.T) {
-	for _, method := range []string{"totp", "recovery", "cancelled"} {
+	for _, method := range []string{"totp", "recovery", "cancelled", "cancelled_recovery"} {
 		t.Run(method, func(t *testing.T) {
 			srv, db, _, _, _, cleanup := setupTestServer(t)
 			defer cleanup()
@@ -187,19 +187,25 @@ func TestAuthorizationInteractionMFA(t *testing.T) {
 			if err != nil || token.InteractionHash != crypto.HashSHA256(raw) {
 				t.Fatalf("MFA binding: %+v %v", token, err)
 			}
-			if method == "cancelled" {
+			if strings.HasPrefix(method, "cancelled") {
 				browser("POST", "/api/auth/authorization/cancel", map[string]string{"interaction": raw})
 			}
 			code := testTOTPCode(t, secret)
 			path := "/api/auth/mfa/totp/verify"
-			if method == "recovery" {
+			if method == "recovery" || method == "cancelled_recovery" {
 				path = "/api/auth/mfa/recovery/verify"
 				code = recovery[0]
 			}
 			r = browser("POST", path, map[string]string{"mfaToken": begun.MFAToken, "code": code})
-			if method == "cancelled" {
-				if r.Code != 400 {
-					t.Fatalf("cancelled MFA issued session: %d %s", r.Code, r.Body.String())
+			if strings.HasPrefix(method, "cancelled") {
+				if r.Code != 200 || !strings.Contains(r.Body.String(), `"restartAuthorization":true`) {
+					t.Fatalf("completed MFA lost login: %d %s", r.Code, r.Body.String())
+				}
+				if r := browser("GET", "/api/auth/me", nil); r.Code != 200 {
+					t.Fatal("completed MFA not authenticated")
+				}
+				if r := browser("GET", "/oauth/authorize?interaction="+raw, nil); r.Code != 400 {
+					t.Fatal("cancelled interaction revived")
 				}
 				return
 			}
@@ -216,5 +222,57 @@ func TestAuthorizationInteractionMFA(t *testing.T) {
 				t.Fatal("TOTP did not satisfy MFA", location)
 			}
 		})
+	}
+}
+
+func TestAuthorizationRateLimitUsesProtocolErrors(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	newClient(t, db, "app", []string{"https://app.example/cb"}, []string{"openid"})
+	path := "/oauth/authorize?client_id=app&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&response_type=code&scope=openid&code_challenge=challenge&code_challenge_method=S256&prompt=none"
+	now := time.Now()
+	srv.middleware.now = func() time.Time { return now }
+	browser := interactionBrowser(t, srv)
+	if r := browser("GET", strings.Replace(path, "prompt=none", "prompt=login", 1), nil); r.Code != 302 {
+		t.Fatal("browser cookie not issued")
+	}
+	for n := range 302 {
+		r := adminRequestNoStepUp(t, srv, "GET", path, "", "")
+		location, _ := url.Parse(r.Header().Get("Location"))
+		if r.Code != 302 || location.Host != "app.example" || location.Query().Get("error") == "" {
+			t.Fatalf("request %d: %d %s", n+1, r.Code, r.Body.String())
+		}
+		if n == 301 && location.Query().Get("error") != "temporarily_unavailable" {
+			t.Fatal("throttle not exercised")
+		}
+	}
+	r := browser("GET", path, nil)
+	location, _ := url.Parse(r.Header().Get("Location"))
+	if location.Query().Get("error") != "login_required" {
+		t.Fatal("another browser exhausted this browser's allowance")
+	}
+	req := httptest.NewRequest("GET", path, nil)
+	req.AddCookie(&http.Cookie{Name: authorizationBrowserCookie, Value: strings.Repeat("f", 64) + ".forged"})
+	r = httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(r, req)
+	location, _ = url.Parse(r.Header().Get("Location"))
+	if location.Query().Get("error") != "temporarily_unavailable" {
+		t.Fatal("forged browser cookie bypassed IP limit")
+	}
+}
+
+func TestAuthorizationInteractionDatabaseError(t *testing.T) {
+	srv, db, _, _, engine, cleanup := setupTestServer(t)
+	defer cleanup()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h := NewOAuthHandler(db, engine, srv.audit, srv.middleware)
+	r := httptest.NewRecorder()
+	// beginInteraction is called only after these routing fields are validated.
+	h.beginInteraction(r, httptest.NewRequest("GET", "/oauth/authorize", nil), url.Values{"client_id": {"app"}, "redirect_uri": {"https://app.example/cb"}, "state": {"kept"}})
+	location, _ := url.Parse(r.Header().Get("Location"))
+	if r.Code != 302 || location.Query().Get("error") != "server_error" || location.Query().Get("state") != "kept" {
+		t.Fatalf("database outage reported as throttling: %d %s", r.Code, r.Header().Get("Location"))
 	}
 }

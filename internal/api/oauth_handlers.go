@@ -83,7 +83,7 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		interactionHash = crypto.HashSHA256(raw)
-		i, err := h.store.GetAuthorizationInteraction(interactionHash, authorizationBrowserHash(r))
+		i, err := h.store.GetAuthorizationInteraction(interactionHash, h.middleware.authorizationBrowserHash(r))
 		sess := GetSessionFromContext(r.Context())
 		if err != nil || sess == nil || i.SessionID != sess.ID {
 			http.Error(w, `{"error":"invalid_interaction","error_description":"Sign-in expired or changed in another tab; restart authorization"}`, 400)
@@ -128,6 +128,16 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		h.audit.Record("oauth.authorize", "", "", clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "denied",
 			map[string]any{"reason": "redirect_uri_not_registered", "redirectUri": redirectURI})
 		http.Error(w, `{"error":"invalid_redirect_uri","error_description":"Redirect URI does not match a registered URI for this client"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Validate the callback before rate-limit errors enter the OIDC error channel.
+	limiterKey := "ip:" + h.middleware.ClientIP(r)
+	if browser := h.middleware.authorizationBrowserHash(r); browser != "" {
+		limiterKey = "browser:" + browser
+	}
+	if !h.middleware.allowRateLimit("authorize:"+limiterKey, 300, 5) {
+		redirectError(w, r, redirectURI, state, "temporarily_unavailable", "Too many authorization requests; try again shortly")
 		return
 	}
 

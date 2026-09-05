@@ -34,6 +34,14 @@ func (s *Store) CreateAuthorizationInteraction(i *AuthorizationInteraction) erro
 	if _, err = tx.Exec(`DELETE FROM authorization_interactions WHERE expires_at<=?`, time.Now().UTC()); err != nil {
 		return err
 	}
+	// Anonymous cookie churn cannot turn the global memory bound into a login
+	// outage. Reclaim only the oldest pending, unowned requests under pressure;
+	// signed-in requests and completed proofs must never be evicted.
+	if _, err = tx.Exec(`DELETE FROM authorization_interactions WHERE hash IN (
+ SELECT hash FROM authorization_interactions WHERE session_id='' AND user_id=''
+ ORDER BY created_at,hash LIMIT MAX(0,(SELECT COUNT(*) FROM authorization_interactions)-9999))`); err != nil {
+		return err
+	}
 	// Bound concurrent tabs per browser, and the total number of outstanding interactions.
 	result, err := tx.Exec(`INSERT INTO authorization_interactions(hash,browser_hash,user_id,original_session_id,request,created_at,expires_at)
  SELECT ?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM authorization_interactions WHERE browser_hash=?)<10

@@ -27,6 +27,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
   }, [interaction]);
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [authorizationRestarted, setAuthorizationRestarted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // MFA State
@@ -73,7 +74,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
           setMfaMode('totp');
         }
       } else if (resp.success) {
-        finishLogin(resp.user);
+        finishLogin(resp.user, resp.restartAuthorization);
       }
     } catch (err) {
       setError(errorMessage(err, 'Authentication failed'));
@@ -82,9 +83,14 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
     }
   };
 
-  const finishLogin = (user: User | undefined) => {
+  const finishLogin = (user: User | undefined, restartAuthorization = false) => {
     if (!user) {
       setError('The server reported a successful sign-in but returned no account');
+      return;
+    }
+    if (restartAuthorization) {
+      setMfaRequired(false);
+      setAuthorizationRestarted(true);
       return;
     }
     if (interaction) {
@@ -124,7 +130,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
             body: JSON.stringify({ mfaToken, challengeId }),
           });
           if (finish.success) {
-            finishLogin(finish.user);
+            finishLogin(finish.user, finish.restartAuthorization);
           }
         } else if (status === 'denied' || status === 'expired') {
           clearInterval(interval);
@@ -166,7 +172,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
         body: JSON.stringify({ mfaToken, code: totpCode }),
       });
       if (resp.success) {
-        finishLogin(resp.user);
+        finishLogin(resp.user, resp.restartAuthorization);
       }
     } catch (err) {
       setError(errorMessage(err, 'Invalid TOTP code'));
@@ -190,7 +196,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
         body: JSON.stringify({ mfaToken, ...assertion }),
       });
       if (resp.success) {
-        finishLogin(resp.user);
+        finishLogin(resp.user, resp.restartAuthorization);
       }
     } catch (err) {
       setError(errorMessage(err, 'Passkey sign-in failed'));
@@ -212,7 +218,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
         body: JSON.stringify({ mfaToken, code: recoveryCode }),
       });
       if (resp.success) {
-        finishLogin(resp.user);
+        finishLogin(resp.user, resp.restartAuthorization);
       }
     } catch (err) {
       setError(errorMessage(err, 'Invalid recovery code'));
@@ -234,6 +240,14 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
 
   const canUseWebauthn = mfaMethods.includes('webauthn') && isPasskeySupported();
   const spinner = <RefreshCw className="spin" size={16} />;
+
+  if (authorizationRestarted) return (
+    <div className="login-page"><div className="login-col"><div className="login-card">
+      <h1>You’re signed in</h1>
+      <p role="status">The application’s sign-in request expired or was cancelled. Return to the application and start sign-in again.</p>
+      <a className="primary-btn" href="/">Go to your dashboard</a>
+    </div></div></div>
+  );
 
   return (
     <div className="login-page">

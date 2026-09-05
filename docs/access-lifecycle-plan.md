@@ -1,4 +1,5 @@
 **Repo:** kysignon-server
+**PR:** #31 — https://github.com/Busness-app/kysignon-server/pull/31
 **Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/mfa-enrollment-policy)
 
 # KySignOn access and identity lifecycle implementation plan
@@ -10,7 +11,7 @@ PR 02 merged as GitHub PR #25; PR 03 merged as GitHub PR #26. PR 04 is split int
 PR05 is split into 05a (OIDC re-authentication requests and bound interactions, merged as GitHub PR #29)
 and 05b (administrator per-app policies, factor freshness and policy revision enforcement,
 merged as GitHub PR #30). PR06 is split into 06a (organization/admin enrollment policy,
-implemented on `feat/mfa-enrollment-policy`) and 06b (group-specific requirements, planned).
+implemented as GitHub PR #31 on `feat/mfa-enrollment-policy`, in review) and 06b (group-specific requirements, planned).
 PRs 07–23 and D1–D4 remain planned.
 PR numbers below are sequence labels, not GitHub PR numbers.
 

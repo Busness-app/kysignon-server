@@ -194,8 +194,8 @@ Administrators can use **App connections** to associate an OAuth client, launche
 and provisioning system that belong to the same application. Review the connection names
 and IDs, then confirm the link with step-up authentication. **Unlink** separates one
 connection again. Each app has at most one connection of each type; overlapping types and
-stale selections are rejected. Linking/unlinking commits with its audit record. Linking requires matching access settings
-and no assignments on either app; unlinking copies the access settings and assignments.
+stale selections are rejected. Linking/unlinking commits with its audit record. Linking requires matching access and authentication settings
+and no assignments on either app; unlinking copies both policies and assignments.
 
 Existing connections initially receive separate stable app IDs, even when their names or
 URLs match. Linking retains the selected app ID and all original connection IDs, client
@@ -285,7 +285,8 @@ The first value is the requested minimum; MFA can satisfy password assurance.
 Recovery codes do not satisfy MFA. Unsupported values, unsupported prompt modes,
 combined prompts, duplicate parameters, malformed ages, and alternate `request`,
 `request_uri`, or `claims` inputs return `invalid_request`. Discovery advertises the
-two supported request classes. Passkey-only app policy is planned in PR05b.
+two supported request classes. Administrator passkey requirements strengthen either class
+without changing the documented ID-token claim values.
 
 Interactive login uses the existing password, TOTP, push, passkey and recovery screens.
 A five-minute, single-use interaction binds the original validated request (including
@@ -312,9 +313,41 @@ Concurrent completion and
 cancellation serialize at the database; a code already issued cannot be recalled by
 cancelling the former interaction. Administrative step-up grants are never accepted.
 
-Per-app administrator policies, policy revision checks, and independent factor freshness
-remain PR05b; clients can request stronger authentication now, but server-configured
-per-app re-authentication is not yet available.
+Choose **App connections → Authentication** on an OAuth app to configure:
+
+- **Reuse SSO**, **Maximum password age**, or **Fresh sign-in every authorization**.
+- Password with existing enrollment rules, mandatory ordinary MFA, or password plus
+  passkey. Recovery never meets mandatory MFA; TOTP and push cannot meet passkey policy.
+- An independent maximum second-factor age. Zero means no additional factor age limit;
+  positive ages are whole seconds up to 2147483647. Expired evidence uses the existing
+  full password/second-factor flow, with each proof retaining its actual verification time.
+
+Client requests can strengthen these settings but cannot weaken them. Silent requests
+with insufficient evidence return `login_required`. An account missing a required factor
+receives an enrollment explanation after password verification; sign in normally to the
+account dashboard to enroll before restarting from the app. A passkey here means a
+verified WebAuthn second factor, not a guarantee about hardware or device-local storage.
+Existing apps default to reuse SSO with existing enrollment rules; legacy unknown proof
+can still reuse ordinary SSO but cannot satisfy freshness, mandatory MFA or passkey policy.
+
+`PUT /api/admin/app-registry/{id}/authentication-policy` accepts `revision` (the app's
+current revision) and `policy`: `mode` (`reuse`, `max_age`, `fresh`), `primaryMaxAge`,
+`factor` (`password`, `mfa`, `passkey`), and `factorMaxAge`. Maximum-age mode requires a
+positive primary age; other modes require zero. Password-only requirements require zero
+factor age. The route requires an OAuth connection, administrator rights, CSRF and
+operation-bound step-up. Lists expose `authentication` and `authenticationRevision`.
+
+Every actual policy change increments its policy revision and atomically cancels that
+client's pending/completed interactions, deletes pending/spent codes, revokes registered
+tokens, and records the audit. Even a relaxation invalidates old grants; reverting a
+policy never revives them. Code creation rechecks current policy in its transaction;
+token registration checks the app identity, policy revision and the earliest password or
+factor deadline atomically. Other apps and the central login session remain usable.
+Offline JWT consumers may accept a token for up to 15 minutes, and destination app cookies
+may last longer; these settings apply when an app initiates OAuth authorization.
+Launcher visibility and provisioning scope remain governed by their existing controls.
+On first upgrade, old pending codes and interactions restart without deleting existing
+sessions or already-issued tokens. Subsequent startups preserve live requests.
 
 **Authentication claims describe the login that established the session.** `auth_time`
 is the time the password was verified, preserved across later SSO redirects. The second

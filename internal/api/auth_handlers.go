@@ -3,7 +3,9 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"github.com/Busness-app/kysignon-server/internal/oauth"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/Busness-app/kysignon-server/internal/audit"
@@ -111,6 +113,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	interactionHash := ""
+	var interaction *store.AuthorizationInteraction
 	if req.Interaction != "" {
 		interactionHash = crypto.HashSHA256(req.Interaction)
 		i, err := h.store.GetAuthorizationInteraction(interactionHash, h.middleware.authorizationBrowserHash(r))
@@ -119,6 +122,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"invalid_interaction","error_description":"Restart authorization with the original account and browser"}`, 400)
 			return
 		}
+		interaction = i
 	}
 
 	// Per-account lockout. The per-IP limiter cannot see a spray distributed across hosts.
@@ -174,6 +178,35 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(passkeys) > 0 {
 		methodTypes = append(methodTypes, "webauthn")
+	}
+
+	if interaction != nil {
+		q, err := url.ParseQuery(interaction.Request)
+		if err != nil {
+			stepUpInternalError(w)
+			return
+		}
+		requirements, err := oauth.ParseAuthenticationRequest(q)
+		if err != nil {
+			stepUpInternalError(w)
+			return
+		}
+		policy, err := h.store.ClientAuthenticationPolicy(q.Get("client_id"))
+		if err != nil {
+			stepUpInternalError(w)
+			return
+		}
+		if policy.Factor == "passkey" {
+			methodTypes = nil
+			hasPush = false
+			if len(passkeys) > 0 {
+				methodTypes = []string{"webauthn"}
+			}
+		}
+		if len(methodTypes) == 0 && (policy.Factor != "password" || requirements.ACR == oauth.MFAACR) {
+			http.Error(w, `{"error":"factor_enrollment_required","error_description":"This application requires an enrolled authenticator, or a passkey for passkey-only policy. Sign in to your dashboard to enroll, then restart from the application."}`, 403)
+			return
+		}
 	}
 
 	if len(methodTypes) > 0 {

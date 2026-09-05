@@ -1,5 +1,6 @@
 **Repo:** kysignon-server
-**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/oidc-reauth)
+**PR:** #30 — https://github.com/Busness-app/kysignon-server/pull/30
+**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/app-auth-policy)
 
 # KySignOn access and identity lifecycle implementation plan
 
@@ -7,9 +8,9 @@ Date: 2026-09-05. Status: implementation started. PR 01 merged as GitHub PR #24;
 PR 02 merged as GitHub PR #25; PR 03 merged as GitHub PR #26. PR 04 is split into
 04a (application identity and explicit linking, merged as GitHub PR #27) and
 04b (assignments and enforcement, merged as GitHub PR #28).
-PR05 is split into 05a (OIDC re-authentication requests and bound interactions, in
-implementation on `feat/oidc-reauth`) and 05b (administrator per-app policies, factor
-freshness and policy revision enforcement). PRs 06–23 and D1–D4 remain planned.
+PR05 is split into 05a (OIDC re-authentication requests and bound interactions, merged as GitHub PR #29)
+and 05b (administrator per-app policies, factor freshness and policy revision enforcement,
+implemented as GitHub PR #30 on `feat/app-auth-policy`, in review). PRs 06–23 and D1–D4 remain planned.
 PR numbers below are sequence labels, not GitHub PR numbers.
 
 ## Outcome and scope

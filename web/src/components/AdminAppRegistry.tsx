@@ -3,6 +3,7 @@ import { apiRequest, errorMessage } from '../api';
 import { parseAppRecordPage } from '../parsers';
 import type { AppRecord } from '../types';
 import { pageSize, Pager, useDirectoryPage } from './DirectoryPage';
+import { AdminAppAuthentication } from './AdminAppAuthentication';
 import { AdminAppAccess } from './AdminAppAccess';
 import { isCancelled, useStepUp } from './StepUpPrompt';
 
@@ -19,6 +20,7 @@ function compatible(a: AppRecord, b: AppRecord) {
 }
 
 export function AdminAppRegistry({ onManageLaunchers }: { onManageLaunchers: () => void }) {
+  const [authenticationApp, setAuthenticationApp] = useState<AppRecord | null>(null);
   const [accessApp, setAccessApp] = useState<AppRecord | null>(null);
   const [query, setQuery] = useState('');
   const [offset, setOffset] = useState(0);
@@ -43,6 +45,7 @@ export function AdminAppRegistry({ onManageLaunchers }: { onManageLaunchers: () 
       if (!isCancelled(err)) { setMutationError(errorMessage(err, 'Could not change app links')); setTarget(null); setSource(null); reload(); }
     } finally { setBusy(false); }
   };
+  if (authenticationApp) return <AdminAppAuthentication app={authenticationApp} onClose={() => { setAuthenticationApp(null); reload(); }} />;
   if (accessApp) return <AdminAppAccess app={accessApp} onClose={() => { setAccessApp(null); reload(); }} onChanged={reload} />;
   return <div className="admin-page">
     <div className="page-header"><div><h1 className="page-title">App connections</h1><button className="secondary-btn" onClick={onManageLaunchers}>Manage launcher cards</button>
@@ -55,7 +58,7 @@ export function AdminAppRegistry({ onManageLaunchers }: { onManageLaunchers: () 
       <div className="modal-body"><p>Retained app ID: <code style={{ overflowWrap: 'anywhere' }}>{target.id}</code></p><Connections app={target} />
         {source ? <><h3>Add connections from {recordName(source)}</h3><Connections app={source} />
           <p>Source app ID: <code style={{ overflowWrap: 'anywhere' }}>{source.id}</code></p>
-          <p>Connection IDs and credentials are preserved. Linking requires matching access settings and no assignments on either app. Unlinking copies current access settings and assignments.</p>
+          <p>Connection IDs and credentials are preserved. Linking requires matching access and authentication settings and no assignments on either app. Unlinking copies current access and authentication settings and assignments.</p>
           <div className="modal-footer"><button className="primary-btn" disabled={busy} onClick={() => mutate(target, 'link', { sourceId: source.id, targetRevision: target.revision, sourceRevision: source.revision }, `Link app ${source.id} (${recordName(source)}) into ${target.id} (${recordName(target)}).`)}>Confirm link</button>
           <button className="secondary-btn" disabled={busy} onClick={() => setSource(null)}>Choose another</button></div>
         </> : <p>Select a compatible app below. Each app can have one connection of each type.</p>}
@@ -66,7 +69,7 @@ export function AdminAppRegistry({ onManageLaunchers }: { onManageLaunchers: () 
         <input id="app-record-search" className="form-input" maxLength={200} value={query} disabled={busy} onChange={e => { setQuery(e.target.value); setOffset(0); }} /></div>
       <div className="table-card"><table className="admin-table" style={{ minWidth: '36rem' }}><thead><tr><th>App ID</th><th>Connections</th><th>Access</th><th>Actions</th></tr></thead>
         <tbody>{page?.items.map(app => <tr key={app.id}>
-          <td style={{ maxWidth: '14rem', overflowWrap: 'anywhere' }}><code>{app.id}</code></td><td><Connections app={app} /></td><td>{app.enabled ? (app.accessMode === 'all_active_users' ? 'All active users' : 'Assigned users only') : 'Disabled'}<button className="secondary-btn sm" disabled={busy} onClick={() => setAccessApp(app)}>Manage access</button></td>
+          <td style={{ maxWidth: '14rem', overflowWrap: 'anywhere' }}><code>{app.id}</code></td><td><Connections app={app} /></td><td>{app.enabled ? (app.accessMode === 'all_active_users' ? 'All active users' : 'Assigned users only') : 'Disabled'}<button className="secondary-btn sm" disabled={busy} onClick={() => setAccessApp(app)}>Manage access</button>{app.clientId && <button className="secondary-btn sm" disabled={busy} onClick={() => setAuthenticationApp(app)}>Authentication</button>}</td>
           <td>{target ? <button className="secondary-btn sm" disabled={busy || !compatible(target, app)} onClick={() => setSource(app)}>{app.id === target.id ? 'Selected app' : compatible(target, app) ? 'Select connections' : 'Overlapping types'}</button>
             : <div className="action-buttons-wrap"><button className="secondary-btn sm" disabled={busy} onClick={() => { setTarget(app); setMutationError(null); }}>Link another connection</button>
               {[app.clientId, app.launcherId, app.systemId].filter(Boolean).length > 1 && (['client', 'launcher', 'system'] satisfies Array<'client' | 'launcher' | 'system'>).map(kind => {

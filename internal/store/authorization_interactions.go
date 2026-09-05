@@ -11,8 +11,8 @@ var ErrAuthorizationInteraction = errors.New("authorization interaction expired,
 // AuthorizationInteraction contains only a validated authorization request. The browser
 // binding is independent of the login cookie, which rotates after re-authentication.
 type AuthorizationInteraction struct {
-	Hash, BrowserHash, UserID, OriginalSessionID, SessionID, Request string
-	CreatedAt, ExpiresAt                                             time.Time
+	Hash, BrowserHash, UserID, OriginalSessionID, SessionID, Request, ClientID string
+	CreatedAt, ExpiresAt                                                       time.Time
 }
 
 // Repair rows created before account limits existed. Prefer preserving completed
@@ -39,6 +39,18 @@ func (s *Store) migrateAuthorizationInteractions() error {
  CREATE INDEX IF NOT EXISTS idx_authorization_interactions_expiry ON authorization_interactions(expires_at);
  CREATE INDEX IF NOT EXISTS idx_authorization_interactions_user ON authorization_interactions(user_id);`)
 	if err != nil {
+		return err
+	}
+	var exists int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('authorization_interactions') WHERE name='client_id'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		if _, err = tx.Exec(`ALTER TABLE authorization_interactions ADD COLUMN client_id TEXT NOT NULL DEFAULT ''; DELETE FROM authorization_interactions;`); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_authorization_interactions_client ON authorization_interactions(client_id)`); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`DELETE FROM authorization_interactions WHERE expires_at<=?`, time.Now().UTC()); err != nil {
@@ -78,10 +90,10 @@ func (s *Store) CreateAuthorizationInteraction(i *AuthorizationInteraction) erro
 		return err
 	}
 	// Bound concurrent tabs per browser and per account, independent of cookie rotation.
-	result, err := tx.Exec(`INSERT INTO authorization_interactions(hash,browser_hash,user_id,original_session_id,request,created_at,expires_at)
- SELECT ?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM authorization_interactions WHERE browser_hash=?)<10
+	result, err := tx.Exec(`INSERT INTO authorization_interactions(hash,browser_hash,user_id,original_session_id,request,created_at,expires_at,client_id)
+ SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM authorization_interactions WHERE browser_hash=?)<10
  AND (?='' OR (SELECT COUNT(*) FROM authorization_interactions WHERE user_id=?)<10)
- AND (SELECT COUNT(*) FROM authorization_interactions)<10000`, i.Hash, i.BrowserHash, i.UserID, i.OriginalSessionID, i.Request, i.CreatedAt, i.ExpiresAt, i.BrowserHash, i.UserID, i.UserID)
+ AND (SELECT COUNT(*) FROM authorization_interactions)<10000`, i.Hash, i.BrowserHash, i.UserID, i.OriginalSessionID, i.Request, i.CreatedAt, i.ExpiresAt, i.ClientID, i.BrowserHash, i.UserID, i.UserID)
 	if err != nil {
 		return err
 	}
@@ -97,8 +109,8 @@ func (s *Store) CreateAuthorizationInteraction(i *AuthorizationInteraction) erro
 
 func (s *Store) GetAuthorizationInteraction(hash, browserHash string) (*AuthorizationInteraction, error) {
 	i := &AuthorizationInteraction{}
-	err := s.db.QueryRow(`SELECT hash,browser_hash,user_id,original_session_id,session_id,request,created_at,expires_at FROM authorization_interactions i
- WHERE hash=? AND browser_hash=? AND expires_at>? AND (original_session_id='' OR EXISTS(SELECT 1 FROM sessions WHERE id=i.original_session_id AND expires_at>?))`, hash, browserHash, time.Now().UTC(), time.Now().UTC()).Scan(&i.Hash, &i.BrowserHash, &i.UserID, &i.OriginalSessionID, &i.SessionID, &i.Request, &i.CreatedAt, &i.ExpiresAt)
+	err := s.db.QueryRow(`SELECT hash,browser_hash,user_id,original_session_id,session_id,request,created_at,expires_at,client_id FROM authorization_interactions i
+ WHERE hash=? AND browser_hash=? AND expires_at>? AND (original_session_id='' OR EXISTS(SELECT 1 FROM sessions WHERE id=i.original_session_id AND expires_at>?))`, hash, browserHash, time.Now().UTC(), time.Now().UTC()).Scan(&i.Hash, &i.BrowserHash, &i.UserID, &i.OriginalSessionID, &i.SessionID, &i.Request, &i.CreatedAt, &i.ExpiresAt, &i.ClientID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAuthorizationInteraction
 	}

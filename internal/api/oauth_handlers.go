@@ -159,6 +159,12 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, r, redirectURI, state, "invalid_request", err.Error())
 		return
 	}
+	policy, err := h.store.ClientAuthenticationPolicy(clientID)
+	if err != nil {
+		redirectError(w, r, redirectURI, state, "server_error", "Could not check authentication policy")
+		return
+	}
+	requirements = requirements.WithAppPolicy(policy)
 	if interactionHash != "" {
 		requirements.Fresh = false
 	}
@@ -193,6 +199,10 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	code, err := h.oauthEngine.CreateAuthorizationCodeForInteraction(
 		clientID, session.ID, redirectURI, grantedScope, codeChallenge, codeChallengeMethod, nonce, requirements, interactionHash)
 	if err != nil {
+		if errors.Is(err, store.ErrAppAuthentication) || errors.Is(err, store.ErrAuthorizationInteraction) {
+			redirectError(w, r, redirectURI, state, "login_required", "Application requirements changed; restart sign-in")
+			return
+		}
 		if errors.Is(err, store.ErrAppAccessDenied) {
 			h.audit.Record("oauth.authorize", user.ID, user.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": "app_access_denied"})
 			redirectError(w, r, redirectURI, state, "access_denied", "You do not have access to this application")

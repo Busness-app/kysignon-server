@@ -289,7 +289,7 @@ func (s *Store) ListAppAccessGroups(id, query string, limit, offset int) ([]AppA
 }
 
 func ensureAppLinkPoliciesTx(tx *sql.Tx, target, source AppRecord) error {
-	if target.AccessMode != source.AccessMode || target.Enabled != source.Enabled {
+	if target.AccessMode != source.AccessMode || target.Enabled != source.Enabled || target.Authentication != source.Authentication {
 		return fmt.Errorf("%w: access settings differ", ErrAppLinkConflict)
 	}
 	var count int

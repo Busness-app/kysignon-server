@@ -220,6 +220,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("PUT /api/admin/app-registry/{id}/access-policy", adminStepUpM(http.HandlerFunc(adminH.SetAppPolicy)))
 	mux.Handle("PUT /api/admin/app-registry/{id}/assignments/{kind}/{principal}", adminStepUpM(http.HandlerFunc(adminH.SetAppAssignment)))
 	mux.Handle("DELETE /api/admin/app-registry/{id}/assignments/{kind}/{principal}", adminStepUpM(http.HandlerFunc(adminH.SetAppAssignment)))
+	mux.Handle("PUT /api/admin/app-registry/{id}/authentication-policy", adminStepUpM(http.HandlerFunc(adminH.SetAppAuthenticationPolicy)))
 	mux.Handle("GET /api/admin/app-registry", adminM(http.HandlerFunc(adminH.ListAppRecords)))
 	mux.Handle("POST /api/admin/app-registry/{id}/link", adminStepUpM(http.HandlerFunc(adminH.LinkAppRecords)))
 	mux.Handle("POST /api/admin/app-registry/{id}/unlink", adminStepUpM(http.HandlerFunc(adminH.UnlinkAppRecord)))

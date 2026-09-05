@@ -13,14 +13,14 @@ interface LoginViewProps {
 
 export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
   const interaction = new URLSearchParams(window.location.search).get('interaction');
-  const [interactionDetails, setInteractionDetails] = useState<{ appName: string; username: string; requiresMFA: boolean } | null>(null);
+  const [interactionDetails, setInteractionDetails] = useState<{ appName: string; username: string; requiresMFA: boolean; requiresPasskey: boolean } | null>(null);
   const [username, setUsername] = useState('');
   useEffect(() => {
     if (!interaction) return;
     let active = true;
     apiJson('/api/auth/authorization/' + encodeURIComponent(interaction), value => {
-      if (!isRecord(value) || typeof value.appName !== 'string' || typeof value.username !== 'string' || typeof value.requiresMFA !== 'boolean') throw new Error('Invalid sign-in request');
-      return { appName: value.appName, username: value.username, requiresMFA: value.requiresMFA };
+      if (!isRecord(value) || typeof value.appName !== 'string' || typeof value.username !== 'string' || typeof value.requiresMFA !== 'boolean' || typeof value.requiresPasskey !== 'boolean') throw new Error('Invalid sign-in request');
+      return { appName: value.appName, username: value.username, requiresMFA: value.requiresMFA, requiresPasskey: value.requiresPasskey };
     }).then(details => { if (active) { setInteractionDetails(details); setUsername(details.username); } })
       .catch(err => { if (active) setError(errorMessage(err, 'Could not load sign-in request')); });
     return () => { active = false; };
@@ -66,7 +66,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
           setChallengeId(resp.challengeId);
           setMatchDigits(resp.matchDigits);
         }
-        if (resp.mfaMethods.includes('webauthn') && isPasskeySupported()) {
+        if (resp.mfaMethods.includes('webauthn') && (isPasskeySupported() || interactionDetails?.requiresPasskey)) {
           setMfaMode('webauthn');
         } else if (resp.challengeId && resp.matchDigits) {
           setMfaMode('push');
@@ -270,7 +270,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
           {!mfaRequired && (
             <form onSubmit={handlePasswordSubmit} className="login-form">
               <h2>{interaction ? 'Verify your sign-in' : 'Sign in'}</h2>
-              {interactionDetails && <p className="text-muted">Continue to {interactionDetails.appName}. {interactionDetails.requiresMFA ? 'Use your password and an enrolled authenticator or passkey. Recovery codes do not meet this request.' : 'Enter your password and complete any enrolled second factor.'}</p>}
+              {interactionDetails && <p className="text-muted">Continue to {interactionDetails.appName}. {interactionDetails.requiresPasskey ? 'Use your password and an enrolled passkey. Other factors do not meet this request.' : interactionDetails.requiresMFA ? 'Use your password and an enrolled authenticator or passkey. Recovery codes do not meet this request.' : 'Enter your password and complete any enrolled second factor.'}</p>}
               <div className="form-group">
                 <label className="form-label" htmlFor="username">Username</label>
                 <input
@@ -306,17 +306,18 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
           {mfaRequired && mfaMode === 'webauthn' && (
             <div className="login-form">
               <h2>Use a passkey</h2>
+              {!isPasskeySupported() && <p role="alert">This browser cannot use passkeys. Open the application in a browser with passkey support.</p>}
               <p className="text-muted">Your browser will ask for a fingerprint, face, or security key.</p>
               <div className="match"><ScanFace size={56} /></div>
-              <button type="button" className="primary-btn full-width" onClick={submitPasskey} disabled={loading}>
+              <button type="button" className="primary-btn full-width" onClick={submitPasskey} disabled={loading || !isPasskeySupported()}>
                 {loading ? spinner : 'Continue with passkey'}
               </button>
               <div className="mfa-alt-links">
                 {matchDigits && (
                   <button type="button" className="text-btn" onClick={() => setMfaMode('push')}>Approve on your phone instead</button>
                 )}
-                <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>Enter a six-digit code</button>
-                <button type="button" className="text-btn" onClick={() => setMfaMode('recovery')}>Use a recovery code</button>
+                {!interactionDetails?.requiresPasskey && mfaMethods.includes('totp') && <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>Enter a six-digit code</button>}
+                {!interactionDetails?.requiresMFA && <button type="button" className="text-btn" onClick={() => setMfaMode('recovery')}>Use a recovery code</button>}
               </div>
             </div>
           )}
@@ -334,7 +335,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                 {canUseWebauthn && (
                   <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>Use a passkey instead</button>
                 )}
-                <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>Enter a six-digit code</button>
+                {!interactionDetails?.requiresPasskey && mfaMethods.includes('totp') && <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>Enter a six-digit code</button>}
               </div>
             </div>
           )}
@@ -366,7 +367,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                 {matchDigits && (
                   <button type="button" className="text-btn" onClick={() => setMfaMode('push')}>Approve on your phone instead</button>
                 )}
-                <button type="button" className="text-btn" onClick={() => setMfaMode('recovery')}>Use a recovery code</button>
+                {!interactionDetails?.requiresMFA && <button type="button" className="text-btn" onClick={() => setMfaMode('recovery')}>Use a recovery code</button>}
               </div>
             </form>
           )}
@@ -394,7 +395,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
                 {canUseWebauthn && (
                   <button type="button" className="text-btn" onClick={() => setMfaMode('webauthn')}>Use a passkey instead</button>
                 )}
-                <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>Enter a six-digit code</button>
+                {!interactionDetails?.requiresPasskey && mfaMethods.includes('totp') && <button type="button" className="text-btn" onClick={() => setMfaMode('totp')}>Enter a six-digit code</button>}
               </div>
             </form>
           )}

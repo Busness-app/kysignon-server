@@ -160,7 +160,16 @@ export interface DirectoryPage<T> {
   offset: number;
 }
 
+export interface AppAuthenticationPolicy {
+ mode: 'reuse' | 'fresh' | 'max_age';
+ primaryMaxAge: number;
+ factor: 'password' | 'mfa' | 'passkey';
+ factorMaxAge: number;
+}
+
 export interface AppRecord {
+ authentication: AppAuthenticationPolicy;
+ authenticationRevision: number;
   accessMode: 'all_active_users' | 'assigned_only';
   enabled: boolean;
   id: string;

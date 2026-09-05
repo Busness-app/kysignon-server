@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/Busness-app/ky-primitives/syncauth"
 	"github.com/Busness-app/kysignon-server/internal/crypto"
 	"github.com/Busness-app/kysignon-server/internal/netguard"
 	"github.com/Busness-app/kysignon-server/internal/store"
@@ -99,6 +101,16 @@ func TestDirectSCIMSystemCreationAndRecovery(t *testing.T) {
 	}
 }
 
+func TestKyBookmarksLegacyPresetUsesSignedWebhook(t *testing.T) {
+	sys := &store.PairedSystem{SystemType: "kybookmarks", CallbackURL: "https://bookmarks.example.com/scim/v2"}
+	for _, eventType := range []string{"user.created", "user.updated", "user.deleted"} {
+		method, target, bodyRequired := resolveSCIMURL(sys, eventType, "user-1")
+		if method != http.MethodPost || target != "https://bookmarks.example.com/api/sync/events" || !bodyRequired {
+			t.Errorf("%s resolved to %s %s body=%v", eventType, method, target, bodyRequired)
+		}
+	}
+}
+
 func TestAccountSyncWebhookDispatch(t *testing.T) {
 	engine, dbStore, adminUser, cleanup := setupTestSyncEngine(t)
 	defer cleanup()
@@ -173,6 +185,7 @@ func TestAccountSyncSCIMPayloadAndHeaders(t *testing.T) {
 	var receivedContentType string
 	var receivedAuthHeader string
 	var receivedSCIMUser SCIMUserResource
+	var verifyErr error
 
 	sharedSecret := "mock-hmac-secret-32-chars-long!"
 
@@ -180,8 +193,13 @@ func TestAccountSyncSCIMPayloadAndHeaders(t *testing.T) {
 		atomic.AddInt32(&receivedCount, 1)
 		receivedContentType = r.Header.Get("Content-Type")
 		receivedAuthHeader = r.Header.Get("Authorization")
-
-		_ = json.NewDecoder(r.Body).Decode(&receivedSCIMUser)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			verifyErr = err
+		} else {
+			_, verifyErr = syncauth.Verify([]byte(sharedSecret), syncauth.FromRequest(r), body, syncauth.Options{})
+			_ = json.Unmarshal(body, &receivedSCIMUser)
+		}
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer mockSCIMServer.Close()
@@ -213,8 +231,11 @@ func TestAccountSyncSCIMPayloadAndHeaders(t *testing.T) {
 	if receivedContentType != "application/scim+json" {
 		t.Fatalf("expected application/scim+json content-type, got %s", receivedContentType)
 	}
-	if receivedAuthHeader != "Bearer "+sharedSecret {
-		t.Fatalf("expected Bearer authorization header, got %s", receivedAuthHeader)
+	if receivedAuthHeader != "" {
+		t.Fatalf("sync secret leaked through Authorization: %q", receivedAuthHeader)
+	}
+	if verifyErr != nil {
+		t.Fatalf("receiver could not verify canonical syncauth headers: %v", verifyErr)
 	}
 	if len(receivedSCIMUser.Schemas) == 0 || receivedSCIMUser.Schemas[0] != SCIMUserSchema {
 		t.Fatalf("expected SCIM schema %s, got %+v", SCIMUserSchema, receivedSCIMUser.Schemas)

@@ -31,7 +31,7 @@ const PRESET_METADATA: Record<
   },
   kybookmarks: {
     defaultName: 'KyBookmarks',
-    defaultUrl: 'https://bookmarks.example.com/scim/v2',
+    defaultUrl: 'https://bookmarks.example.com/api/sync/events',
   },
   kynotes: {
     defaultName: 'KyNotes',

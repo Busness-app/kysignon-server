@@ -4,7 +4,7 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 
 ## Core Capabilities & Responsibilities
 
-1. **Central User Directory & Replication**: KySignOn is the source of truth for accounts. When an admin creates, updates, or disables an account, it automatically replicates to paired KySecurity products via SCIM 2.0 signed sync events.
+1. **Central User Directory & Replication**: KySignOn is the source of truth for accounts. When an admin creates, updates, or disables an account, it automatically replicates to paired KySecurity products via bare SCIM 2.0 user bodies signed with `ky-primitives/syncauth`; event type and event ID are part of the signature, and the sync secret is never sent in `Authorization`.
 2. **Direct SCIM 2.0 Service Connection**: Admin configures downstream KySecurity and 3rd-party product servers directly with their SCIM Base URL and Bearer token for automated RESTful CRUD replication.
 3. **OpenID Connect & OAuth 2.0**: Standard authorization-code flow with PKCE, RS256 ID tokens, and JWKS discovery.
 4. **Native Device Pairing & Push MFA**: Natively hosts device pairing (`/api/notifications/native/register`) using 90s PIN/QR codes, push challenge dispatch through FCM/APNs relay Workers with 2-digit number matching, and TOTP/recovery code support.
@@ -77,4 +77,4 @@ Non-trivial logic must include one runnable check (unit test or minimal self-che
 
 ## Child DOX Index
 
-- [internal/backup/AGENTS.md](file:///home/yoshi/busness.app/kysignon-server/internal/backup/AGENTS.md): Feature 0 disaster recovery: sealed capsules, KyRecovery pairing and deposit, restore drills.
+- [internal/backup/AGENTS.md](file:///home/yoshi/busness.app/kysignon-server/internal/backup/AGENTS.md): adapter over ky-primitives/recoveryclient: what KySignOn seals, its drill checks, store/key/config glue.

@@ -4,13 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,7 +152,7 @@ func TestDrillProvesARestoreIsUsable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := backup.RunRestoreDrill(context.Background(), payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, backup.RecoveryKey{})
+	result, err := backup.RunRestoreDrill(context.Background(), cfg.DataDir, payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, backup.RecoveryKey{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +178,7 @@ func TestDrillProvesARestoreIsUsable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err = backup.RunRestoreDrill(context.Background(), payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, pinned)
+	result, err = backup.RunRestoreDrill(context.Background(), cfg.DataDir, payload.ServiceName, payload.AppVersion, payload.Files, payload.Dependencies, payload.VerificationRecipe, pinned)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,26 +212,6 @@ func TestDepositSealsToThePinnedKeyAndRecordsTheReceipt(t *testing.T) {
 	}
 }
 
-func TestBackupNeedsAKeyAndSomewhereToGo(t *testing.T) {
-	cfg, st := instance(t)
-	fake := &fakeStore{}
-	if _, err := backup.RunBackup(context.Background(), cfg, st, st, fake, "1.0.0"); !errors.Is(err, backup.ErrNotPaired) {
-		t.Fatalf("no key: %v", err)
-	}
-	priv, _ := recoverykey.Generate()
-	if err := backup.StoreRecoveryKey(cfg.DataDir, st, backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := backup.RunBackup(context.Background(), cfg, st, st, fake, "1.0.0"); !errors.Is(err, backup.ErrNoDestination) {
-		t.Fatalf("key only, nowhere to go: %v", err)
-	}
-	if fake.container != nil {
-		t.Error("bytes were sent without a pairing")
-	}
-}
-
-// An instance with no KyRecovery still gets backups: a pinned key plus a local directory.
-// The directory holds the newest keep capsules, each openable only with the suite shares.
 func TestLocalCopiesWithoutKyRecovery(t *testing.T) {
 	cfg, st := instance(t)
 	cfg.BackupDir = filepath.Join(t.TempDir(), "capsules")
@@ -276,121 +252,33 @@ func TestLocalCopiesWithoutKyRecovery(t *testing.T) {
 	}
 }
 
+func TestLegacyLocalCopyIsMigratedWithoutTouchingForeignFiles(t *testing.T) {
+	dir := t.TempDir()
+	legacy := "KySignOn-cap-KySignOn-123456789.kycap"
+	foreign := "KySignOn-operator-export.kycap"
+	if err := os.WriteFile(filepath.Join(dir, legacy), []byte("sealed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, foreign), []byte("foreign"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	copies, err := backup.ListLocalCopies(dir, "KySignOn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copies) != 1 || copies[0].Name != "KySignOn.cap-KySignOn-123456789.kycap" {
+		t.Fatalf("migrated copies = %+v", copies)
+	}
+	if _, err := os.Stat(filepath.Join(dir, legacy)); !os.IsNotExist(err) {
+		t.Fatalf("legacy filename still exists: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, foreign)); err != nil || string(got) != "foreign" {
+		t.Fatalf("foreign file changed: %q, %v", got, err)
+	}
+}
+
 // The directory may already hold capsules the operator put there: another service's, an
 // export, a restore staged. Pruning touches only what this instance wrote.
-func TestPruneLeavesForeignCapsulesAlone(t *testing.T) {
-	cfg, st := instance(t)
-	cfg.BackupDir = t.TempDir()
-	cfg.BackupKeep = 2
-	foreign := filepath.Join(cfg.BackupDir, "foreign.kycap")
-	otherApp := filepath.Join(cfg.BackupDir, "KyNotes-cap-KyNotes-1.kycap")
-	for _, f := range []string{foreign, otherApp} {
-		if err := os.WriteFile(f, []byte("not ours"), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	priv, _ := recoverykey.Generate()
-	if err := backup.StoreRecoveryKey(cfg.DataDir, st, backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 3; i++ {
-		if _, err := backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{}, "1.0.0"); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	for _, f := range []string{foreign, otherApp} {
-		if b, err := os.ReadFile(f); err != nil || string(b) != "not ours" {
-			t.Errorf("%s: %v %q", f, err, b)
-		}
-	}
-	copies, _ := backup.ListLocalCopies(cfg.BackupDir, cfg.AppName)
-	if len(copies) != 2 {
-		t.Errorf("listed %+v", copies)
-	}
-	for _, c := range copies {
-		if !strings.HasPrefix(c.Name, "KySignOn-") {
-			t.Errorf("listed a file this instance did not write: %s", c.Name)
-		}
-	}
-}
-
-// A dead local disk must not stop the off-site copy.
-func TestLocalFailureDoesNotCancelTheDeposit(t *testing.T) {
-	cfg, st := instance(t)
-	cfg.BackupDir = filepath.Join(t.TempDir(), "file-not-dir")
-	if err := os.WriteFile(cfg.BackupDir, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	cfg.BackupKeep = 7
-	pair(t, cfg, st)
-	fake := &fakeStore{}
-	res, err := backup.RunBackup(context.Background(), cfg, st, st, fake, "1.0.0")
-	if err != nil || res.Receipt == nil || fake.container == nil || res.LocalError == "" || res.LocalPath != "" {
-		t.Fatalf("%+v %v", res, err)
-	}
-	_, outcome, details := backup.Outcome(res, err)
-	if outcome != "success" || details["local_error"] == nil || details["deposited"] != true {
-		t.Errorf("%s %v", outcome, details)
-	}
-}
-
-// A paired instance with a directory gets both. A deposit KyRecovery refuses still leaves the
-// local copy, and the outcome says so.
-func TestPairedRunWritesLocallyAndDeposits(t *testing.T) {
-	cfg, st := instance(t)
-	cfg.BackupDir = t.TempDir()
-	cfg.BackupKeep = 7
-	pair(t, cfg, st)
-	res, err := backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{}, "1.0.0")
-	if err != nil || res.Receipt == nil || res.LocalPath == "" {
-		t.Fatalf("%+v %v", res, err)
-	}
-	res, err = backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{err: fmt.Errorf("%w: down", backup.ErrRemote)}, "1.0.0")
-	if !errors.Is(err, backup.ErrRemote) || res.LocalPath == "" || res.Receipt != nil {
-		t.Fatalf("%+v %v", res, err)
-	}
-	_, outcome, details := backup.Outcome(res, err)
-	if outcome != "failure" || details["local_path"] == nil || details["deposited"] != nil {
-		t.Errorf("%s %v", outcome, details)
-	}
-}
-
-// The schedule is the admin's setting, falling back to the environment default; a run
-// stamps the attempt so the next one is an interval away whether or not it worked.
-func TestScheduleCountsFromTheLastAttempt(t *testing.T) {
-	cfg, st := instance(t)
-	cfg.BackupDepositInterval = 24 * time.Hour
-	if d, err := backup.Interval(cfg, st); err != nil || d != 24*time.Hour {
-		t.Fatalf("default %v %v", d, err)
-	}
-	for _, bad := range []int64{300, -3600, 36028797018963968, int64(backup.MaxInterval/time.Second) + 1} {
-		if err := backup.SetInterval(st, bad); !errors.Is(err, backup.ErrBadInterval) {
-			t.Errorf("%d accepted: %v", bad, err)
-		}
-	}
-	if err := backup.SetInterval(st, 3600); err != nil {
-		t.Fatal(err)
-	}
-	next, on, err := backup.NextRun(cfg, st)
-	if err != nil || !on || next.After(time.Now()) {
-		t.Fatalf("never run: due now, got %v %v %v", next, on, err)
-	}
-	_, _ = backup.RunBackup(context.Background(), cfg, st, st, &fakeStore{}, "1.0.0") // fails: no key
-	next, on, err = backup.NextRun(cfg, st)
-	if err != nil || !on || next.Before(time.Now().Add(59*time.Minute)) {
-		t.Fatalf("after a failed attempt: %v %v %v", next, on, err)
-	}
-	if err := backup.SetInterval(st, 0); err != nil {
-		t.Fatal(err)
-	}
-	if _, on, _ := backup.NextRun(cfg, st); on {
-		t.Error("off, still scheduled")
-	}
-}
-
-// The token is the standing credential to the service holding every identity backup. It must
-// not sit in the settings table in the clear, and must not decrypt under another key.
 func TestRecoveryTokenIsNeverStoredInTheClear(t *testing.T) {
 	cfg, st := instance(t)
 	pair(t, cfg, st)
@@ -410,166 +298,6 @@ func TestRecoveryTokenIsNeverStoredInTheClear(t *testing.T) {
 	}
 }
 
-func TestStoreRecoveryKeyRefusesASecondKey(t *testing.T) {
-	cfg, st := instance(t)
-	pair(t, cfg, st)
-	other, _ := recoverykey.Generate()
-	err := backup.StoreRecoveryKey(cfg.DataDir, st, backup.RecoveryKey{Public: other.Public(), Threshold: 2, TotalShares: 3})
-	if err == nil || !errors.Is(err, os.ErrExist) {
-		t.Fatalf("re-pair to a different key: %v", err)
-	}
-}
-
-// recorder answers every request with one canned response and keeps the last request seen.
-type recorder struct {
-	status int
-	body   func(sent []byte) string
-	last   *http.Request
-	sent   []byte
-}
-
-func (r *recorder) RoundTrip(req *http.Request) (*http.Response, error) {
-	r.last = req
-	r.sent, _ = io.ReadAll(req.Body)
-	return &http.Response{StatusCode: r.status, Body: io.NopCloser(strings.NewReader(r.body(r.sent))), Header: http.Header{}}, nil
-}
-
-func receiptFor(container []byte, id string) string {
-	sum := sha256.Sum256(container)
-	return fmt.Sprintf(`{"capsule_id":%q,"digest":%q,"size_bytes":%d,"deposited_at":"2026-09-04T10:00:00Z"}`, id, hex.EncodeToString(sum[:]), len(container))
-}
-
-// kyrecovery pins the service name the claim sends and refuses every later deposit whose
-// manifest names another, so the claim must carry the same value Seal is given.
-func TestClaimPairingSendsTheServiceName(t *testing.T) {
-	priv, _ := recoverykey.Generate()
-	pub := base64.StdEncoding.EncodeToString(priv.Public().Bytes())
-	rec := &recorder{status: http.StatusOK, body: func([]byte) string {
-		return fmt.Sprintf(`{"api_token":"tok","recovery_public_key":%q,"threshold":2,"total_shares":3}`, pub)
-	}}
-	client := backup.NewClientWithTransportForTest(rec)
-	res, err := client.ClaimPairing(context.Background(), "https://recovery.example.test", " 123456 ", "KySignOn", "KySignOn")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sent map[string]string
-	_ = json.Unmarshal(rec.sent, &sent)
-	if sent["service_name"] != "KySignOn" || sent["pairing_code"] != "123456" {
-		t.Errorf("claim body %v", sent)
-	}
-	if res.Key.Public.ID() != priv.Public().ID() || res.APIToken != "tok" {
-		t.Errorf("result %+v", res)
-	}
-}
-
-func TestDepositChecksTheReceiptAgainstTheBytesSent(t *testing.T) {
-	container := []byte("kycap/3 bytes")
-	ok := backup.NewClientWithTransportForTest(&recorder{status: http.StatusCreated, body: func(sent []byte) string { return receiptFor(sent, "cap-1") }})
-	rcpt, err := ok.Deposit(context.Background(), "https://recovery.example.test", "tok", container)
-	if err != nil || rcpt.CapsuleID != "cap-1" {
-		t.Fatalf("%v %+v", err, rcpt)
-	}
-	for name, body := range map[string]func([]byte) string{
-		"wrong digest":  func([]byte) string { return receiptFor([]byte("other"), "cap-1") },
-		"no capsule id": func(sent []byte) string { return receiptFor(sent, "") },
-	} {
-		c := backup.NewClientWithTransportForTest(&recorder{status: http.StatusCreated, body: body})
-		if _, err := c.Deposit(context.Background(), "https://recovery.example.test", "tok", container); !errors.Is(err, backup.ErrRemote) {
-			t.Errorf("%s: %v", name, err)
-		}
-	}
-	huge := "<html>" + strings.Repeat("x", 64<<10) + "\x00\x07"
-	c := backup.NewClientWithTransportForTest(&recorder{status: http.StatusBadGateway, body: func([]byte) string { return huge }})
-	_, err = c.Deposit(context.Background(), "https://recovery.example.test", "tok", container)
-	if err == nil || len(err.Error()) > 400 || strings.ContainsAny(err.Error(), "\x00\x07") {
-		t.Fatalf("error not bounded: %d bytes", len(fmt.Sprint(err)))
-	}
-	for _, u := range []string{"http://recovery.example.test", "https://127.0.0.1:8095", "https://10.0.0.5", "https://user:pw@recovery.example.test"} {
-		if _, err := ok.Deposit(context.Background(), u, "tok", container); err == nil || errors.Is(err, backup.ErrRemote) {
-			t.Errorf("%s: %v", u, err)
-		}
-	}
-}
-
-func TestOutcomeNamesADepositTheStoreHolds(t *testing.T) {
-	m := capsule.Manifest{UnverifiedManifest: capsule.UnverifiedManifest{CapsuleID: "cap-1"}}
-	res := backup.Result{Manifest: m, SizeBytes: 3, Receipt: &backup.Receipt{CapsuleID: "cap-1", Digest: "abc", SizeBytes: 3}}
-	action, outcome, details := backup.Outcome(res, fmt.Errorf("%w: cap-1: disk full", backup.ErrReceiptUnrecorded))
-	if action != "admin.backup_run" || outcome != "success" || details["deposited"] != true || !strings.Contains(fmt.Sprint(details["receipt_unrecorded"]), "disk full") {
-		t.Errorf("%s %s %v", action, outcome, details)
-	}
-	_, outcome, details = backup.Outcome(backup.Result{Manifest: m}, errors.New("deposit rejected (503): "+strings.Repeat("x", 5000)))
-	if outcome != "failure" || len(fmt.Sprint(details["error"])) > 300 {
-		t.Errorf("%s %v", outcome, details)
-	}
-}
-
-// A redirect is a validated destination handing the capsule to a host the operator never
-// named, and Go would replay the POST body on a 308. None are followed.
-func TestDepositRefusesRedirects(t *testing.T) {
-	calls := 0
-	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		return &http.Response{StatusCode: http.StatusPermanentRedirect, Header: http.Header{"Location": []string{"https://other.example/steal"}},
-			Body: io.NopCloser(strings.NewReader(""))}, nil
-	})
-	client := backup.NewClientWithTransportForTest(rt)
-	_, err := client.Deposit(context.Background(), "https://recovery.example.test", "tok", []byte("kycap"))
-	if err == nil || !strings.Contains(err.Error(), "redirect") {
-		t.Fatalf("redirect followed or not named: %v", err)
-	}
-	if calls != 1 {
-		t.Errorf("transport saw %d requests, want 1", calls)
-	}
-	if _, err := client.ClaimPairing(context.Background(), "https://recovery.example.test", "123456", "KySignOn", "KySignOn"); err == nil {
-		t.Error("claim followed a redirect")
-	}
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-// Carrier-grade NAT is every Tailscale address; benchmarking, class E and NAT64 are not
-// places a capsule goes either.
-func TestRecoveryURLRefusesReservedRanges(t *testing.T) {
-	for _, u := range []string{"https://100.64.0.1", "https://100.127.255.254", "https://192.0.0.9", "https://198.18.0.1", "https://240.0.0.1", "https://[64:ff9b::a00:1]", "https://192.168.1.91", "https://10.0.0.5"} {
-		if err := backup.ValidateRecoveryURL(u, false); err == nil {
-			t.Errorf("%s accepted", u)
-		}
-	}
-	if err := backup.ValidateRecoveryURL("https://203.0.113.10", false); err != nil {
-		t.Errorf("a public address refused: %v", err)
-	}
-	for _, u := range []string{"https://recovery.example.test/?x=1", "https://recovery.example.test/#frag", "https://recovery.example.test?"} {
-		if err := backup.ValidateRecoveryURL(u, false); err == nil {
-			t.Errorf("%s accepted; the API path would land on the wrong URL", u)
-		}
-	}
-}
-
-// The opt-in is for a KyRecovery on the operator's own network: LAN and Tailscale addresses
-// become reachable, and nothing else changes. Plain HTTP and loopback stay refused.
-func TestPrivateRecoveryOptIn(t *testing.T) {
-	for _, u := range []string{"https://192.168.1.91", "https://10.0.0.5", "https://100.64.0.1", "https://203.0.113.10", "https://kyrecovery.lan"} {
-		if err := backup.ValidateRecoveryURL(u, true); err != nil {
-			t.Errorf("%s refused with the opt-in: %v", u, err)
-		}
-	}
-	for _, u := range []string{"http://192.168.1.91", "https://127.0.0.1", "https://[::1]", "https://0.0.0.0", "https://169.254.1.1", "https://240.0.0.1", "https://user:pw@192.168.1.91"} {
-		if err := backup.ValidateRecoveryURL(u, true); err == nil {
-			t.Errorf("%s accepted even with the opt-in", u)
-		}
-	}
-	// The refusal names the switch to flip.
-	_, err := backup.NewKyRecoveryClient(false).Deposit(context.Background(), "https://192.168.1.91", "tok", []byte("x"))
-	if err == nil || !strings.Contains(err.Error(), "KYSIGNON_BACKUP_ALLOW_PRIVATE_RECOVERY") {
-		t.Errorf("default client on a LAN address: %v", err)
-	}
-}
-
-// A paired instance whose recovery.pub is gone has stopped backing up; that is a failure to
-// report, not the quiet skip a never-paired instance gets.
 func TestALostKeyPinIsNotSilentlyUnpaired(t *testing.T) {
 	cfg, st := instance(t)
 	pair(t, cfg, st)
@@ -618,5 +346,43 @@ func TestClearPairingRemovesRowsAndKeepsThePin(t *testing.T) {
 	}
 	if _, err := st.GetSetting("kyrecovery_url"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("url row: %v", err)
+	}
+}
+
+// A token sealed by the pre-lib code path, with the same label, must open through the adapter:
+// this is what keeps the live pairing working across the swap.
+func TestAPairingSealedBeforeTheLibStillOpens(t *testing.T) {
+	cfg, st := instance(t)
+	priv, _ := recoverykey.Generate()
+	if err := backup.StoreRecoveryKey(cfg.DataDir, st, backup.RecoveryKey{Public: priv.Public(), Threshold: 2, TotalShares: 3}); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := crypto.EncryptAESGCM(crypto.DeriveKey(cfg.EncryptionKey, "kysignon:setting:kyrecovery_token"), []byte("kyrec_live_old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting("kyrecovery_url", "https://recovery.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting("kyrecovery_token_enc", sealed); err != nil {
+		t.Fatal(err)
+	}
+	p, err := backup.LoadPairing(cfg.DataDir, st, cfg.EncryptionKey)
+	if err != nil || p.Token != "kyrec_live_old" {
+		t.Fatalf("%v %+v", err, p)
+	}
+}
+
+// The store's not-found must read as the lib's, or a never-paired instance would look broken.
+func TestSettingsAdapterMapsNotFound(t *testing.T) {
+	cfg, st := instance(t)
+	if _, err := backup.LoadRecoveryKey(cfg.DataDir, st); !errors.Is(err, backup.ErrNotPaired) {
+		t.Fatalf("fresh store: %v", err)
+	}
+	if backup.HasPairing(st) {
+		t.Fatal("fresh store paired")
+	}
+	if err := backup.ClearPairing(st); !errors.Is(err, backup.ErrNotPaired) {
+		t.Fatalf("clear on fresh store: %v", err)
 	}
 }

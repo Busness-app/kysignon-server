@@ -298,9 +298,9 @@ to ten requests, preferring completed proofs; affected requests must restart aut
 Expired interactions are cleaned on creation. At capacity, only the oldest anonymous,
 unfinished interactions are evicted; account-bound requests and completed proofs are
 preserved within the account bound. Every authorization request spends an IP allowance
-of 300 requests with five requests/second refill. A signed browser identity also has a
-tighter allowance of 60 requests with one request/second refill; rotating cookies cannot
-reset the source allowance.
+of 300 requests with five requests/second refill. Browser identities never allocate
+rate-limit buckets, so rotating cookies cannot reset the source allowance or fill the
+shared limiter map. The separate interaction caps still apply per browser and account.
 Throttling uses `temporarily_unavailable` after validating the redirect URI; database
 failures use `server_error`. A different tab's login cannot satisfy
 another interaction; if the browser's session changes, restart from the app. Cancel

@@ -132,13 +132,9 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate the callback before rate-limit errors enter the OIDC error channel.
-	// Every request spends the source allowance; issued cookie rotation cannot
-	// multiply it. The browser bucket is an additional, tighter constraint.
-	allowedRate := h.middleware.allowRateLimit("authorize:ip:"+h.middleware.ClientIP(r), 300, 5)
-	if browser := h.middleware.authorizationBrowserHash(r); allowedRate && browser != "" {
-		allowedRate = h.middleware.allowRateLimit("authorize:browser:"+browser, 60, 1)
-	}
-	if !allowedRate {
+	// Keep shared limiter keys address-derived: rotating browser identities must
+	// neither reset the source allowance nor allocate additional buckets.
+	if !h.middleware.allowRateLimit("authorize:ip:"+h.middleware.ClientIP(r), 300, 5) {
 		redirectError(w, r, redirectURI, state, "temporarily_unavailable", "Too many authorization requests; try again shortly")
 		return
 	}

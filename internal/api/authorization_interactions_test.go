@@ -312,29 +312,46 @@ func TestAuthorizationRateLimitSignedCookieRotation(t *testing.T) {
 	}
 }
 
-func TestAuthorizationRateLimitBrowserIsAdditional(t *testing.T) {
+func TestAuthorizationRateLimitCookiesCannotExhaustSharedMap(t *testing.T) {
 	srv, db, _, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 	newClient(t, db, "app", []string{"https://app.example/cb"}, []string{"openid"})
 	now := time.Now()
 	srv.middleware.now = func() time.Time { return now }
+	// Exercise shared-map saturation without allocating the production-sized map.
+	srv.middleware.maxLimiters = 16
 	path := "/oauth/authorize?client_id=app&redirect_uri=https%3A%2F%2Fapp.example%2Fcb&response_type=code&scope=openid&code_challenge=challenge&code_challenge_method=S256&prompt=none"
-	browser := interactionBrowser(t, srv)
-	browser("GET", strings.Replace(path, "prompt=none", "prompt=login", 1), nil)
-	for n := range 61 {
-		r := browser("GET", path, nil)
-		location, _ := url.Parse(r.Header().Get("Location"))
-		want := "login_required"
-		if n == 60 {
-			want = "temporarily_unavailable"
-		}
-		if location.Query().Get("error") != want {
-			t.Fatalf("browser request %d: %s", n+1, r.Header().Get("Location"))
+	cookies := []*http.Cookie{}
+	for range 32 {
+		r := adminRequestNoStepUp(t, srv, "GET", strings.Replace(path, "prompt=none", "prompt=login", 1), "", "")
+		for _, c := range r.Result().Cookies() {
+			if c.Name == authorizationBrowserCookie {
+				cookies = append(cookies, c)
+			}
 		}
 	}
-	r := adminRequestNoStepUp(t, srv, "GET", path, "", "")
-	location, _ := url.Parse(r.Header().Get("Location"))
-	if location.Query().Get("error") != "login_required" {
-		t.Fatal("browser's tighter limit exhausted source allowance")
+	if len(cookies) != 32 {
+		t.Fatalf("minted %d cookies", len(cookies))
+	}
+	for _, cookie := range cookies {
+		req := httptest.NewRequest("GET", path, nil)
+		req.AddCookie(cookie)
+		r := httptest.NewRecorder()
+		srv.httpServer.Handler.ServeHTTP(r, req)
+	}
+	if count := srv.middleware.TrackedLimiters(); count != 1 {
+		t.Errorf("one source allocated %d buckets by rotating cookies", count)
+	}
+	// The same pressure must not deny a fresh source a login bucket.
+	csrf := srv.middleware.IssueCSRFToken("")
+	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"username":"unknown","password":"wrong"}`))
+	req.RemoteAddr = "198.51.100.42:12345"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	req.AddCookie(&http.Cookie{Name: "kysignon_csrf", Value: csrf})
+	r := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(r, req)
+	if r.Code != 401 {
+		t.Fatalf("new source could not attempt login: %d %s", r.Code, r.Body.String())
 	}
 }

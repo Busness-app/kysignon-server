@@ -133,3 +133,29 @@ export interface BackupStatus {
   app_name: string;
   app_version: string;
 }
+
+export interface DirectoryGroup {
+  id: string;
+  name: string;
+  description: string;
+  memberCount: number;
+  member: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GroupUser {
+  id: string;
+  username: string;
+  displayName: string;
+  email: string;
+  status: 'active' | 'disabled';
+  member: boolean;
+}
+
+export interface DirectoryPage<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}

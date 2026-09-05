@@ -186,6 +186,14 @@ func (s *Server) routes() *http.ServeMux {
 		return adminM(s.requireStepUp(h))
 	}
 
+	mux.Handle("GET /api/admin/groups", adminM(http.HandlerFunc(adminH.ListGroups)))
+	mux.Handle("POST /api/admin/groups", adminStepUpM(http.HandlerFunc(adminH.CreateGroup)))
+	mux.Handle("PUT /api/admin/groups/{id}", adminStepUpM(http.HandlerFunc(adminH.UpdateGroup)))
+	mux.Handle("DELETE /api/admin/groups/{id}", adminStepUpM(http.HandlerFunc(adminH.DeleteGroup)))
+	mux.Handle("GET /api/admin/groups/{id}/members", adminM(http.HandlerFunc(adminH.ListGroupUsers)))
+	mux.Handle("PUT /api/admin/groups/{id}/members/{userId}", adminStepUpM(http.HandlerFunc(adminH.SetGroupMembership)))
+	mux.Handle("DELETE /api/admin/groups/{id}/members/{userId}", adminStepUpM(http.HandlerFunc(adminH.SetGroupMembership)))
+
 	mux.Handle("GET /api/admin/users", adminM(http.HandlerFunc(adminH.ListUsers)))
 	mux.Handle("POST /api/admin/users", adminStepUpM(http.HandlerFunc(adminH.CreateUser)))
 	mux.Handle("PUT /api/admin/users/{id}", adminStepUpM(http.HandlerFunc(adminH.UpdateUser)))

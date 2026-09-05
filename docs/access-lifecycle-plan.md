@@ -1,11 +1,11 @@
 **Repo:** kysignon-server
-**Worktree:** /home/yoshi/busness.app/kysignon-server (branch master)
+**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/admin-groups)
 
 # KySignOn access and identity lifecycle implementation plan
 
-Date: 2026-09-05. Status: implementation started. PR 01 merged as GitHub PR #24.
-PR 02 is implemented on `feat/complete-step-up`; CI and review determine readiness
-to merge. PRs 03–23 and D1–D4 remain planned.
+Date: 2026-09-05. Status: implementation started. PR 01 merged as GitHub PR #24;
+PR 02 merged as GitHub PR #25. PR 03 is implemented on `feat/admin-groups`; CI and
+review determine readiness to merge. PRs 04–23 and D1–D4 remain planned.
 PR numbers below are sequence labels, not GitHub PR numbers.
 
 ## Outcome and scope

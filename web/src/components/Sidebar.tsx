@@ -20,6 +20,7 @@ const ACCOUNT: Item[] = [
 
 const ADMIN: Item[] = [
   ['admin-users', 'Users', Users],
+  ['admin-groups', 'Groups', Users],
   ['admin-systems', 'Suite sync', RefreshCw],
   ['admin-clients', 'OAuth clients', Key],
   ['admin-audit', 'Audit log', FileText],

@@ -15,6 +15,8 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 
 ## Security Invariants
 
+- Directory groups have stable IDs and unique names; explicit membership never grants global administrator status. Admin group/member lists are searched and paginated. Every group or membership mutation requires operation-bound step-up and commits with its audit record; individual membership writes are idempotent and preserve concurrent edits. Foreign-key cascades remove memberships when a user or group is deleted. App access and SCIM group provisioning remain separate roadmap steps.
+
 - Public deployments require an HTTPS issuer and secure session cookies; loopback HTTP is development-only.
 - Account creation and updates write their replication outbox events in the same database transaction. The final active administrator cannot be deleted, disabled, or demoted.
 - Sensitive API and OAuth responses are `no-store`; registered redirect and launcher URLs must be HTTPS, except loopback HTTP for development.

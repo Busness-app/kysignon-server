@@ -272,6 +272,50 @@ disabling a user, resetting their MFA, changing their password, or revoking thei
 invalidates all of theirs. Services that validate tokens offline against JWKS cannot see a
 revocation until expiry — call `/oauth/userinfo` where revocation must take effect at once.
 
+**Authorization re-authentication (PR05a).** Ordinary requests reuse SSO. Following
+[OpenID Connect authentication requests](https://openid.net/specs/openid-connect-core-1_0.html#AuthRequest),
+`prompt=login` and `max_age=0` require a new password and any enrolled second factor
+for each authorization request. A positive `max_age` (whole seconds, at most
+2147483647) limits password age at authorization and again when the code is exchanged.
+`prompt=none` never opens a login screen; missing or insufficient authentication returns
+`login_required` to the validated redirect URI with the original state.
+
+`acr_values` supports `urn:kysignon:acr:password` and `urn:kysignon:acr:mfa`.
+The first value is the requested minimum; MFA can satisfy password assurance.
+Recovery codes do not satisfy MFA. Unsupported values, unsupported prompt modes,
+combined prompts, duplicate parameters, malformed ages, and alternate `request`,
+`request_uri`, or `claims` inputs return `invalid_request`. Discovery advertises the
+two supported request classes. Passkey-only app policy is planned in PR05b.
+
+Interactive login uses the existing password, TOTP, push, passkey and recovery screens.
+A five-minute, single-use interaction binds the original validated request (including
+client, redirect, scope, PKCE, nonce and state) to a signed HttpOnly browser cookie and the
+resulting login session. A signed-in user must re-authenticate as that same account.
+Up to ten interactions can be outstanding per browser and per account, with a server-wide
+cap of 10000. Completing an anonymous login assigns its interaction to that account and
+enforces the same bound. Upgrade and capacity recovery trim pre-existing account overages
+to ten requests, preferring completed proofs; affected requests must restart authorization.
+Expired interactions are cleaned on creation. At capacity, only the oldest anonymous,
+unfinished interactions are evicted; account-bound requests and completed proofs are
+preserved within the account bound. Every authorization request spends an IP allowance
+of 300 requests with five requests/second refill. Browser identities never allocate
+rate-limit buckets, so rotating cookies cannot reset the source allowance or fill the
+shared limiter map. The separate interaction caps still apply per browser and account.
+Throttling uses `temporarily_unavailable` after validating the redirect URI; database
+failures use `server_error`. A different tab's login cannot satisfy
+another interaction; if the browser's session changes, restart from the app. Cancel
+sign-in burns the interaction and returns to the dashboard. If password/MFA verification
+has already completed when its interaction expires or is cancelled, the valid login is
+preserved and the UI asks the user to restart from the application. The new session
+cannot resume the cancelled request; a spent recovery code still bought a valid login.
+Concurrent completion and
+cancellation serialize at the database; a code already issued cannot be recalled by
+cancelling the former interaction. Administrative step-up grants are never accepted.
+
+Per-app administrator policies, policy revision checks, and independent factor freshness
+remain PR05b; clients can request stronger authentication now, but server-configured
+per-app re-authentication is not yet available.
+
 **Authentication claims describe the login that established the session.** `auth_time`
 is the time the password was verified, preserved across later SSO redirects. The second
 factor's verification time is recorded separately; completing MFA or issuing a token
@@ -288,8 +332,9 @@ does not refresh the password's age. ID tokens expose these method/context value
 These are KySignOn context classes, not NIST assurance levels or assertions that keys
 are hardware-backed. Recovery does not claim ordinary MFA. The standard method names
 follow [RFC 8176](https://www.rfc-editor.org/rfc/rfc8176.html); the URNs are local contracts.
-Per-app freshness policies and OIDC `prompt`/`max_age` enforcement are subsequent steps
-in [the access lifecycle plan](docs/access-lifecycle-plan.md).
+Administrator per-app freshness policies remain PR05b in
+[the access lifecycle plan](docs/access-lifecycle-plan.md); OIDC request enforcement is
+implemented as described above.
 
 Existing sessions survive the upgrade but omit `auth_time`, `amr` and `acr` until a new
 login supplies evidence. Pending legacy authorization codes and MFA flows are invalidated;

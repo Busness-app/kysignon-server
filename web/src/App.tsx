@@ -63,7 +63,7 @@ export const App: React.FC = () => {
     );
   }
 
-  if (!currentUser) {
+  if (!currentUser || (window.location.pathname === '/login' && new URLSearchParams(window.location.search).has('interaction'))) {
     return <LoginView onLoginSuccess={(u) => { setCurrentUser(u); checkSession(); }} />;
   }
 

@@ -1,14 +1,15 @@
 **Repo:** kysignon-server
-**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/app-assignments)
+**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/oidc-reauth)
 
 # KySignOn access and identity lifecycle implementation plan
 
 Date: 2026-09-05. Status: implementation started. PR 01 merged as GitHub PR #24;
 PR 02 merged as GitHub PR #25; PR 03 merged as GitHub PR #26. PR 04 is split into
 04a (application identity and explicit linking, merged as GitHub PR #27) and
-04b (assignments and enforcement, implemented on `feat/app-assignments`). CI and review
-determine 04b readiness.
-PRs 05–23 and D1–D4 remain planned.
+04b (assignments and enforcement, merged as GitHub PR #28).
+PR05 is split into 05a (OIDC re-authentication requests and bound interactions, in
+implementation on `feat/oidc-reauth`) and 05b (administrator per-app policies, factor
+freshness and policy revision enforcement). PRs 06–23 and D1–D4 remain planned.
 PR numbers below are sequence labels, not GitHub PR numbers.
 
 ## Outcome and scope
@@ -195,6 +196,14 @@ membership after code issuance blocks exchange; an alternative grant preserves a
 ID/secret-preserving migrations and merge/link collision checks pass.
 
 ### PR 05 — Per-app re-authentication policies
+
+Split for independent review:
+- **05a — OIDC re-authentication:** strict `prompt`, `max_age`, supported assurance
+  requests, silent protocol errors, bounded one-use login interactions, and proof age
+  enforcement at token registration. Reuse the existing login and MFA screens.
+- **05b — Administrator policy:** per-app settings and UI, independent factor age,
+  password-plus-passkey requirements, policy revisions, and stricter-policy invalidation
+  at code exchange. Complete the acceptance criteria below across both increments.
 
 Depends on: 01, 02, 04. Touch: policy decision, authorize/login flow, app policy UI.
 

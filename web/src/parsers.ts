@@ -401,6 +401,7 @@ export function parseDrillResult(value: unknown): BackupDrillResult {
 /** Login and MFA responses share a status-plus-optional-user shape. */
 /** Mirrors the server's LoginResponse, which every MFA step also answers with. */
 export interface AuthStep {
+  restartAuthorization?: boolean;
   success: boolean;
   user?: User;
   mfaRequired: boolean;
@@ -415,6 +416,7 @@ export function parseAuthStep(value: unknown): AuthStep {
   const o = obj(value, 'an authentication response');
   return {
     success: bool(o, 'success'),
+    restartAuthorization: o.restartAuthorization === true,
     user: isRecord(o.user) ? parseUser(o.user) : undefined,
     mfaRequired: o.mfaRequired === true,
     mfaMethods: strArray(o.mfaMethods),

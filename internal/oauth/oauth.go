@@ -40,6 +40,7 @@ func NewEngine(s *store.Store, km *crypto.JWTKeyManager, issuerURL string) *Engi
 
 // OIDCConfiguration returns RFC 8414 / OpenID Connect Discovery metadata.
 type OIDCConfiguration struct {
+	ACRValuesSupported               []string `json:"acr_values_supported"`
 	Issuer                           string   `json:"issuer"`
 	AuthorizationEndpoint            string   `json:"authorization_endpoint"`
 	TokenEndpoint                    string   `json:"token_endpoint"`
@@ -61,6 +62,7 @@ func (e *Engine) SupportsRevocation() bool { return true }
 
 func (e *Engine) GetOIDCConfiguration() OIDCConfiguration {
 	cfg := OIDCConfiguration{
+		ACRValuesSupported:               []string{PasswordACR, MFAACR},
 		Issuer:                           e.issuerURL,
 		AuthorizationEndpoint:            e.issuerURL + "/oauth/authorize",
 		TokenEndpoint:                    e.issuerURL + "/oauth/token",
@@ -167,6 +169,10 @@ func (e *Engine) CreateAuthorizationCode(clientID, sessionID, redirectURI, scope
 // CreateAuthorizationCodeWithNonce is CreateAuthorizationCode plus the OIDC nonce, which
 // is echoed into the ID token so a client can detect replay.
 func (e *Engine) CreateAuthorizationCodeWithNonce(clientID, sessionID, redirectURI, scope, challenge, method, nonce string) (string, error) {
+	return e.CreateAuthorizationCodeForInteraction(clientID, sessionID, redirectURI, scope, challenge, method, nonce, AuthenticationRequest{}, "")
+}
+
+func (e *Engine) CreateAuthorizationCodeForInteraction(clientID, sessionID, redirectURI, scope, challenge, method, nonce string, requirements AuthenticationRequest, interactionHash string) (string, error) {
 	client, err := e.store.GetOAuthClientByID(clientID)
 	if err != nil {
 		return "", err
@@ -191,12 +197,16 @@ func (e *Engine) CreateAuthorizationCodeWithNonce(clientID, sessionID, redirectU
 	if session == nil {
 		return "", errors.New("active session required")
 	}
+	if !requirements.Satisfied(session.AuthenticationEvidence, time.Now().UTC()) {
+		return "", errors.New("fresh authentication required")
+	}
 	rawCode, err := crypto.GenerateRandomHex(32)
 	if err != nil {
 		return "", err
 	}
 
 	item := &store.AuthorizationCode{
+		InteractionHash:        interactionHash,
 		SessionID:              session.ID,
 		AuthenticationEvidence: session.AuthenticationEvidence,
 		ID:                     uuid.New().String(),
@@ -209,6 +219,10 @@ func (e *Engine) CreateAuthorizationCodeWithNonce(clientID, sessionID, redirectU
 		CodeChallengeMethod:    method,
 		Nonce:                  nonce,
 		ExpiresAt:              time.Now().UTC().Add(AuthorizationCodeTTL),
+	}
+	if requirements.MaxAge != nil {
+		until := session.PrimaryAuthenticatedAt.Add(time.Duration(*requirements.MaxAge) * time.Second)
+		item.AuthenticationExpiresAt = &until
 	}
 	if err := e.store.CreateAuthorizationCode(item); err != nil {
 		return "", err

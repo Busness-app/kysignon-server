@@ -352,7 +352,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateAppRegistry(); err != nil {
 		return err
 	}
-	return s.migrateAppAccess()
+	if err := s.migrateAppAccess(); err != nil {
+		return err
+	}
+	return s.migrateAuthorizationInteractions()
 }
 
 // migrateSyncEventLease adds the delivery lease column to pre-existing databases.
@@ -782,12 +785,44 @@ func insertSyncEvents(tx *sql.Tx, events []AccountSyncEvent, now time.Time) erro
 
 // Session Management
 func (s *Store) CreateSession(sess *Session) error {
-	query := `INSERT INTO sessions (id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at, primary_authenticated_at, factor_authenticated_at, factor_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	return s.CreateSessionForInteraction(sess, "", "")
+}
+
+func (s *Store) CreateSessionForInteraction(sess *Session, interactionHash, browserHash string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if interactionHash != "" {
+		result, err := tx.Exec(`UPDATE authorization_interactions SET session_id=?,user_id=? WHERE hash=? AND browser_hash=? AND session_id='' AND expires_at>? AND (user_id='' OR user_id=?) AND (SELECT COUNT(*) FROM authorization_interactions WHERE user_id=? AND hash<>?)<10 AND created_at<=? AND EXISTS(SELECT 1 FROM users WHERE id=? AND status='active') AND (original_session_id='' OR EXISTS(SELECT 1 FROM sessions WHERE id=authorization_interactions.original_session_id AND expires_at>?))`, sess.ID, sess.UserID, interactionHash, browserHash, time.Now().UTC(), sess.UserID, sess.UserID, interactionHash, sess.PrimaryAuthenticatedAt, sess.UserID, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrAuthorizationInteraction
+		}
+	}
+	query := `INSERT INTO sessions (id, user_id, session_token_hash, ip_address, user_agent, expires_at, created_at, last_active_at, primary_authenticated_at, factor_authenticated_at, factor_method) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS(SELECT 1 FROM users WHERE id=? AND status='active')`
 	now := time.Now().UTC()
 	sess.CreatedAt = now
 	sess.LastActiveAt = now
-	_, err := s.db.Exec(query, sess.ID, sess.UserID, sess.SessionTokenHash, sess.IPAddress, sess.UserAgent, sess.ExpiresAt, sess.CreatedAt, sess.LastActiveAt, sess.PrimaryAuthenticatedAt, sess.FactorAuthenticatedAt, sess.FactorMethod)
-	return err
+	result, err := tx.Exec(query, sess.ID, sess.UserID, sess.SessionTokenHash, sess.IPAddress, sess.UserAgent, sess.ExpiresAt, sess.CreatedAt, sess.LastActiveAt, sess.PrimaryAuthenticatedAt, sess.FactorAuthenticatedAt, sess.FactorMethod, sess.UserID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrAppAccessDenied
+	}
+	return tx.Commit()
 }
 
 // GetSessionByTokenHash returns a session within both its absolute and idle lifetime, or
@@ -1493,24 +1528,24 @@ func (s *Store) DeleteExpiredMFAChallenges() error {
 
 // MFA Tokens
 func (s *Store) CreateMFAToken(t *MFAToken) error {
-	query := `INSERT INTO mfa_tokens (id, user_id, token_hash, challenge_id, expires_at, created_at, primary_authenticated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO mfa_tokens (id, user_id, token_hash, challenge_id, expires_at, created_at, primary_authenticated_at, interaction_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	t.CreatedAt = time.Now().UTC()
 	var challengeID any
 	if t.ChallengeID != "" {
 		challengeID = t.ChallengeID
 	}
-	_, err := s.db.Exec(query, t.ID, t.UserID, t.TokenHash, challengeID, t.ExpiresAt, t.CreatedAt, t.PrimaryAuthenticatedAt)
+	_, err := s.db.Exec(query, t.ID, t.UserID, t.TokenHash, challengeID, t.ExpiresAt, t.CreatedAt, t.PrimaryAuthenticatedAt, t.InteractionHash)
 	return err
 }
 
 // GetValidMFAToken returns an unused, unexpired token that still has attempts left.
 func (s *Store) GetValidMFAToken(tokenHash string, maxAttempts int) (*MFAToken, error) {
-	query := `SELECT id, user_id, token_hash, challenge_id, attempts, expires_at, used_at, created_at, primary_authenticated_at
+	query := `SELECT id, user_id, token_hash, challenge_id, attempts, expires_at, used_at, created_at, primary_authenticated_at, interaction_hash
 	          FROM mfa_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? AND attempts < ?`
 	t := &MFAToken{}
 	var challengeID sql.NullString
 	err := s.db.QueryRow(query, tokenHash, time.Now().UTC(), maxAttempts).
-		Scan(&t.ID, &t.UserID, &t.TokenHash, &challengeID, &t.Attempts, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt, &t.PrimaryAuthenticatedAt)
+		Scan(&t.ID, &t.UserID, &t.TokenHash, &challengeID, &t.Attempts, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt, &t.PrimaryAuthenticatedAt, &t.InteractionHash)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1885,11 +1920,29 @@ func revokeClientTokensTx(tx *sql.Tx, clientID string, now time.Time) error {
 
 // Authorization Codes
 func (s *Store) CreateAuthorizationCode(code *AuthorizationCode) error {
-	query := `INSERT INTO authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, created_at, session_id, primary_authenticated_at, factor_authenticated_at, factor_method) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if code.InteractionHash != "" {
+		result, err := tx.Exec(`DELETE FROM authorization_interactions WHERE hash=? AND session_id=? AND expires_at>?`, code.InteractionHash, code.SessionID, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrAuthorizationInteraction
+		}
+	}
+	query := `INSERT INTO authorization_codes (id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, created_at, session_id, primary_authenticated_at, factor_authenticated_at, factor_method, authentication_expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS
  (SELECT 1 FROM effective_app_access e JOIN app_registry a ON a.id=e.app_id JOIN oauth_clients c ON c.id=a.client_id
  JOIN sessions sess ON sess.user_id=e.user_id WHERE c.id=? AND c.enabled AND e.user_id=? AND sess.id=? AND sess.expires_at>?)`
 	code.CreatedAt = time.Now().UTC()
-	result, err := s.db.Exec(query, code.ID, code.CodeHash, code.ClientID, code.UserID, code.RedirectURI, code.Scope, code.CodeChallenge, code.CodeChallengeMethod, code.Nonce, code.ExpiresAt, code.CreatedAt, code.SessionID, code.PrimaryAuthenticatedAt, code.FactorAuthenticatedAt, code.FactorMethod, code.ClientID, code.UserID, code.SessionID, code.CreatedAt)
+	result, err := tx.Exec(query, code.ID, code.CodeHash, code.ClientID, code.UserID, code.RedirectURI, code.Scope, code.CodeChallenge, code.CodeChallengeMethod, code.Nonce, code.ExpiresAt, code.CreatedAt, code.SessionID, code.PrimaryAuthenticatedAt, code.FactorAuthenticatedAt, code.FactorMethod, code.AuthenticationExpiresAt, code.ClientID, code.UserID, code.SessionID, code.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -1900,13 +1953,13 @@ func (s *Store) CreateAuthorizationCode(code *AuthorizationCode) error {
 	if n != 1 {
 		return ErrAppAccessDenied
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) GetValidAuthorizationCode(codeHash string) (*AuthorizationCode, error) {
-	query := `SELECT id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, used_at, created_at, session_id, primary_authenticated_at, factor_authenticated_at, factor_method FROM authorization_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`
+	query := `SELECT id, code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at, used_at, created_at, session_id, primary_authenticated_at, factor_authenticated_at, factor_method, authentication_expires_at FROM authorization_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`
 	code := &AuthorizationCode{}
-	err := s.db.QueryRow(query, codeHash, time.Now().UTC()).Scan(&code.ID, &code.CodeHash, &code.ClientID, &code.UserID, &code.RedirectURI, &code.Scope, &code.CodeChallenge, &code.CodeChallengeMethod, &code.Nonce, &code.ExpiresAt, &code.UsedAt, &code.CreatedAt, &code.SessionID, &code.PrimaryAuthenticatedAt, &code.FactorAuthenticatedAt, &code.FactorMethod)
+	err := s.db.QueryRow(query, codeHash, time.Now().UTC()).Scan(&code.ID, &code.CodeHash, &code.ClientID, &code.UserID, &code.RedirectURI, &code.Scope, &code.CodeChallenge, &code.CodeChallengeMethod, &code.Nonce, &code.ExpiresAt, &code.UsedAt, &code.CreatedAt, &code.SessionID, &code.PrimaryAuthenticatedAt, &code.FactorAuthenticatedAt, &code.FactorMethod, &code.AuthenticationExpiresAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1939,9 +1992,9 @@ func (s *Store) RecordIssuedToken(t *IssuedToken) error {
 	query := `INSERT INTO issued_tokens (jti, user_id, client_id, expires_at, created_at, session_id)
  SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS
  (SELECT 1 FROM sessions JOIN users ON users.id = sessions.user_id
- WHERE sessions.id = ? AND sessions.user_id = ? AND sessions.expires_at > ? AND users.status = 'active') AND EXISTS (SELECT 1 FROM effective_app_access e JOIN app_registry a ON a.id=e.app_id JOIN oauth_clients c ON c.id=a.client_id WHERE e.user_id=? AND c.id=? AND c.enabled) AND (?='' OR EXISTS(SELECT 1 FROM authorization_codes ac WHERE ac.id=? AND ac.session_id=? AND ac.client_id=? AND ac.user_id=? AND ac.used_at IS NOT NULL AND ac.expires_at>?))`
+ WHERE sessions.id = ? AND sessions.user_id = ? AND sessions.expires_at > ? AND users.status = 'active') AND EXISTS (SELECT 1 FROM effective_app_access e JOIN app_registry a ON a.id=e.app_id JOIN oauth_clients c ON c.id=a.client_id WHERE e.user_id=? AND c.id=? AND c.enabled) AND (?='' OR EXISTS(SELECT 1 FROM authorization_codes ac WHERE ac.id=? AND ac.session_id=? AND ac.client_id=? AND ac.user_id=? AND ac.used_at IS NOT NULL AND ac.expires_at>? AND (ac.authentication_expires_at IS NULL OR ac.authentication_expires_at>=?)))`
 	t.CreatedAt = time.Now().UTC()
-	res, err := s.db.Exec(query, t.JTI, t.UserID, t.ClientID, t.ExpiresAt, t.CreatedAt, t.SessionID, t.SessionID, t.UserID, t.CreatedAt, t.UserID, t.ClientID, t.AuthorizationCodeID, t.AuthorizationCodeID, t.SessionID, t.ClientID, t.UserID, t.CreatedAt)
+	res, err := s.db.Exec(query, t.JTI, t.UserID, t.ClientID, t.ExpiresAt, t.CreatedAt, t.SessionID, t.SessionID, t.UserID, t.CreatedAt, t.UserID, t.ClientID, t.AuthorizationCodeID, t.AuthorizationCodeID, t.SessionID, t.ClientID, t.UserID, t.CreatedAt, t.CreatedAt)
 	if err != nil {
 		return err
 	}

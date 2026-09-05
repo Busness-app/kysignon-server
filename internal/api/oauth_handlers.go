@@ -3,12 +3,13 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Busness-app/kysignon-server/internal/audit"
+	"github.com/Busness-app/kysignon-server/internal/crypto"
 	"github.com/Busness-app/kysignon-server/internal/oauth"
 	"github.com/Busness-app/kysignon-server/internal/store"
 )
@@ -65,7 +66,42 @@ func redirectError(w http.ResponseWriter, r *http.Request, redirectURI, state, c
 
 // Authorize handles OIDC/OAuth2 authorization request.
 func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+	w.Header().Set("Cache-Control", "no-store")
+	if len(r.URL.RawQuery) > 8192 {
+		http.Error(w, `{"error":"invalid_request"}`, 400)
+		return
+	}
+	q, parseErr := url.ParseQuery(r.URL.RawQuery)
+	if parseErr != nil {
+		http.Error(w, `{"error":"invalid_request"}`, 400)
+		return
+	}
+	interactionHash := ""
+	if raw := q.Get("interaction"); raw != "" {
+		if len(q) != 1 || len(q["interaction"]) != 1 || len(raw) != 64 {
+			http.Error(w, `{"error":"invalid_request"}`, 400)
+			return
+		}
+		interactionHash = crypto.HashSHA256(raw)
+		i, err := h.store.GetAuthorizationInteraction(interactionHash, h.middleware.authorizationBrowserHash(r))
+		sess := GetSessionFromContext(r.Context())
+		if err != nil || sess == nil || i.SessionID != sess.ID {
+			http.Error(w, `{"error":"invalid_interaction","error_description":"Sign-in expired or changed in another tab; restart authorization"}`, 400)
+			return
+		}
+		q, parseErr = url.ParseQuery(i.Request)
+		if parseErr != nil {
+			stepUpInternalError(w)
+			return
+		}
+	}
+	// Reject duplicate routing parameters before trusting a redirect destination.
+	for _, key := range []string{"client_id", "redirect_uri", "response_type"} {
+		if len(q[key]) != 1 {
+			http.Error(w, `{"error":"invalid_request"}`, 400)
+			return
+		}
+	}
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
 	responseType := q.Get("response_type")
@@ -95,6 +131,14 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the callback before rate-limit errors enter the OIDC error channel.
+	// Keep shared limiter keys address-derived: rotating browser identities must
+	// neither reset the source allowance nor allocate additional buckets.
+	if !h.middleware.allowRateLimit("authorize:ip:"+h.middleware.ClientIP(r), 300, 5) {
+		redirectError(w, r, redirectURI, state, "temporarily_unavailable", "Too many authorization requests; try again shortly")
+		return
+	}
+
 	if codeChallenge == "" && client.ClientType == "public" {
 		redirectError(w, r, redirectURI, state, "invalid_request", "PKCE (S256) is required for public clients")
 		return
@@ -110,13 +154,21 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user is logged in
-	user := GetUserFromContext(r.Context())
-	session := GetSessionFromContext(r.Context())
+	requirements, err := oauth.ParseAuthenticationRequest(q)
+	if err != nil {
+		redirectError(w, r, redirectURI, state, "invalid_request", err.Error())
+		return
+	}
+	if interactionHash != "" {
+		requirements.Fresh = false
+	}
+	user, session := GetUserFromContext(r.Context()), GetSessionFromContext(r.Context())
 	if user == nil || session == nil {
-		// return_to is a same-origin path; the login UI must not follow anything else.
-		loginURL := fmt.Sprintf("/login?return_to=%s", url.QueryEscape(r.URL.RequestURI()))
-		http.Redirect(w, r, loginURL, http.StatusFound)
+		if requirements.Silent {
+			redirectError(w, r, redirectURI, state, "login_required", "Sign-in is required")
+			return
+		}
+		h.beginInteraction(w, r, q)
 		return
 	}
 
@@ -130,8 +182,16 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		redirectError(w, r, redirectURI, state, "access_denied", "You do not have access to this application")
 		return
 	}
-	code, err := h.oauthEngine.CreateAuthorizationCodeWithNonce(
-		clientID, session.ID, redirectURI, grantedScope, codeChallenge, codeChallengeMethod, nonce)
+	if !requirements.Satisfied(session.AuthenticationEvidence, time.Now().UTC()) {
+		if requirements.Silent || interactionHash != "" {
+			redirectError(w, r, redirectURI, state, "login_required", "Authentication does not meet the requested age or assurance")
+			return
+		}
+		h.beginInteraction(w, r, q)
+		return
+	}
+	code, err := h.oauthEngine.CreateAuthorizationCodeForInteraction(
+		clientID, session.ID, redirectURI, grantedScope, codeChallenge, codeChallengeMethod, nonce, requirements, interactionHash)
 	if err != nil {
 		if errors.Is(err, store.ErrAppAccessDenied) {
 			h.audit.Record("oauth.authorize", user.ID, user.Username, clientID, "client", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": "app_access_denied"})

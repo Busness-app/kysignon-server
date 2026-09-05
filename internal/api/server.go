@@ -166,6 +166,8 @@ func (s *Server) routes() *http.ServeMux {
 
 	// OAuth & OIDC. OptionalAuth is the same session check RequireAuth uses, so an
 	// expired session cannot authorise an SSO redirect.
+	mux.HandleFunc("GET /api/auth/authorization/{id}", oauthH.InteractionDetails)
+	mux.Handle("POST /api/auth/authorization/cancel", s.middleware.RateLimit("authorization_cancel", 20, 1)(http.HandlerFunc(oauthH.CancelInteraction)))
 	mux.Handle("GET /oauth/authorize", s.middleware.OptionalAuth(http.HandlerFunc(oauthH.Authorize)))
 	mux.Handle("POST /oauth/token", s.middleware.RateLimit("oauth_token", 30, 1.0)(http.HandlerFunc(oauthH.Token)))
 	mux.Handle("GET /oauth/userinfo", s.middleware.RateLimit("oauth_userinfo", 120, 2.0)(http.HandlerFunc(oauthH.Userinfo)))

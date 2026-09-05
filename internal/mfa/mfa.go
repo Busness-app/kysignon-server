@@ -531,12 +531,17 @@ const MFATokenTTL = 5 * time.Minute
 // IssueMFAToken mints a single-use token recording that the primary factor passed for this
 // user. Only the hash is stored, so a leaked database cannot be used to complete a login.
 func (e *Engine) IssueMFAToken(userID, challengeID string, primaryAt time.Time) (string, error) {
+	return e.IssueMFATokenForInteraction(userID, challengeID, primaryAt, "")
+}
+
+func (e *Engine) IssueMFATokenForInteraction(userID, challengeID string, primaryAt time.Time, interactionHash string) (string, error) {
 	raw, err := crypto.GenerateRandomHex(32)
 	if err != nil {
 		return "", err
 	}
 
 	token := &store.MFAToken{
+		InteractionHash:        interactionHash,
 		PrimaryAuthenticatedAt: &primaryAt,
 		ID:                     uuid.New().String(),
 		UserID:                 userID,

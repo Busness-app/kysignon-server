@@ -60,19 +60,21 @@ func (h *AuthHandler) GetCSRFToken(w http.ResponseWriter, r *http.Request) {
 }
 
 type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Interaction string `json:"interaction"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
 }
 
 type LoginResponse struct {
-	Success     bool     `json:"success"`
-	MFARequired bool     `json:"mfaRequired,omitempty"`
-	MFAToken    string   `json:"mfaToken,omitempty"`
-	MFAMethods  []string `json:"mfaMethods,omitempty"`
-	ChallengeID string   `json:"challengeId,omitempty"`
-	MatchDigits string   `json:"matchDigits,omitempty"`
-	DecoyDigits []string `json:"decoyDigits,omitempty"`
-	User        any      `json:"user,omitempty"`
+	RestartAuthorization bool     `json:"restartAuthorization,omitempty"`
+	Success              bool     `json:"success"`
+	MFARequired          bool     `json:"mfaRequired,omitempty"`
+	MFAToken             string   `json:"mfaToken,omitempty"`
+	MFAMethods           []string `json:"mfaMethods,omitempty"`
+	ChallengeID          string   `json:"challengeId,omitempty"`
+	MatchDigits          string   `json:"matchDigits,omitempty"`
+	DecoyDigits          []string `json:"decoyDigits,omitempty"`
+	User                 any      `json:"user,omitempty"`
 }
 
 // Login handles primary username/password verification.
@@ -106,6 +108,17 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		h.audit.Record("auth.login", user.ID, user.Username, user.ID, "user", ip, ua, "denied", map[string]any{"reason": "user_disabled"})
 		http.Error(w, `{"error":"invalid_credentials","error_description":"Invalid username or password"}`, http.StatusUnauthorized)
 		return
+	}
+
+	interactionHash := ""
+	if req.Interaction != "" {
+		interactionHash = crypto.HashSHA256(req.Interaction)
+		i, err := h.store.GetAuthorizationInteraction(interactionHash, h.middleware.authorizationBrowserHash(r))
+		if err != nil || i.SessionID != "" || (i.UserID != "" && i.UserID != user.ID) {
+			auth.DummyVerify(req.Password)
+			http.Error(w, `{"error":"invalid_interaction","error_description":"Restart authorization with the original account and browser"}`, 400)
+			return
+		}
 	}
 
 	// Per-account lockout. The per-IP limiter cannot see a spray distributed across hosts.
@@ -185,7 +198,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 		// The token is persisted and bound to this user and challenge. The user identity is
 		// read back from that record on completion; it is never parsed from client input.
-		mfaToken, err := h.mfaEngine.IssueMFAToken(user.ID, challengeID, primaryAt)
+		mfaToken, err := h.mfaEngine.IssueMFATokenForInteraction(user.ID, challengeID, primaryAt, interactionHash)
 		if err != nil {
 			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 			return
@@ -199,10 +212,10 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// No MFA enrolled, issue session directly
-	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: &primaryAt})
+	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: &primaryAt}, interactionHash)
 }
 
-func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Request, user *store.User, evidence store.AuthenticationEvidence) {
+func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Request, user *store.User, evidence store.AuthenticationEvidence, interactionHash string) {
 	rawToken, err := crypto.GenerateRandomHex(32)
 	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
@@ -224,7 +237,15 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 		ExpiresAt:              expiresAt,
 	}
 
-	if err := h.store.CreateSession(sess); err != nil {
+	restartAuthorization := false
+	err = h.store.CreateSessionForInteraction(sess, interactionHash, h.middleware.authorizationBrowserHash(r))
+	if errors.Is(err, store.ErrAuthorizationInteraction) {
+		// Proof has already succeeded and may have spent a recovery code. Preserve
+		// that login without granting the cancelled/expired authorization request.
+		err = h.store.CreateSession(sess)
+		restartAuthorization = true
+	}
+	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -254,7 +275,8 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(LoginResponse{
-		Success: true,
+		RestartAuthorization: restartAuthorization,
+		Success:              true,
 		User: map[string]any{
 			"id":          user.ID,
 			"username":    user.Username,
@@ -332,7 +354,7 @@ func (h *AuthHandler) VerifyTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: &factorAt, FactorMethod: "totp"})
+	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: &factorAt, FactorMethod: "totp"}, token.InteractionHash)
 }
 
 // VerifyRecoveryCode verifies a one-time recovery code and finishes login.
@@ -364,7 +386,7 @@ func (h *AuthHandler) VerifyRecoveryCode(w http.ResponseWriter, r *http.Request)
 
 	h.audit.Record("auth.mfa_recovery_consumed", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 	_ = h.store.ClearFailedLogins(user.ID)
-	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: &factorAt, FactorMethod: "recovery"})
+	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: &factorAt, FactorMethod: "recovery"}, token.InteractionHash)
 }
 
 type PushPollRequest struct {
@@ -440,7 +462,7 @@ func (h *AuthHandler) FinishPushLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.audit.Record("auth.mfa_push_approved", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
-	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: challenge.VerifiedAt, FactorMethod: "push"})
+	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: challenge.VerifiedAt, FactorMethod: "push"}, token.InteractionHash)
 }
 
 type PushRespondRequest struct {

@@ -51,16 +51,20 @@ kysignon restore -capsule cap-KySignOn-XXXXXXXX.kycap -to ./restored
 ```
 
 With Docker Compose, from the repository directory, mount the capsule and an empty target
-directory into a one-off container. The image's entrypoint is the binary, so the subcommand
-goes straight after the service name; `--no-deps` keeps the real server down:
+directory into a one-off container. Create the target yourself at mode 700 and run the
+container as your own user, so the extraction can write into it and what comes out is owned
+by you, not by root and not by the image's user. The image's entrypoint is the binary, so the
+subcommand goes straight after the service name; `--no-deps` keeps the real server down:
 
 ```bash
-mkdir restored
-docker compose run --rm --no-deps \
+mkdir -m 700 restored
+docker compose run --rm --no-deps --user "$(id -u):$(id -g)" \
   -v "$PWD/cap-KySignOn-XXXXXXXX.kycap:/in.kycap:ro" \
   -v "$PWD/restored:/restored" \
   kysignon-server restore -capsule /in.kycap -to /restored
 ```
+
+The bare binary needs none of this: it creates a missing target itself at mode 700.
 
 The command prompts:
 
@@ -207,10 +211,36 @@ against the restored server.
    what happened after the capsule: disabled accounts, rotated passwords, deleted or rotated
    OAuth clients, removed paired systems, reset MFA.
 3. If the reason for the restore was a suspected compromise rather than hardware loss, treat
-   the restored keys as exposed. Rotate the RSA signing key and the secret key, which
-   invalidates every token and session, re-issue OAuth client secrets, and make every admin
-   re-enrol factors. A restore from before a compromise brings the attacker's access back
-   with the service unless you do this.
+   the restored keys as exposed and rotate the two that can be rotated. A restore from before
+   a compromise brings the attacker's access back with the service unless you do this.
+
+   **Never rotate `encryption.key`.** Every TOTP secret, every paired-system token and the
+   KyRecovery pairing token are encrypted under it. Remove it and every user's second factor
+   and the pairing are gone for good, on a server you just recovered. It sits beside the two
+   files below; leave it there.
+
+   File form (the default). Stop the service, remove the signing key and the secret key, and
+   start; both are regenerated on start when missing:
+
+   ```bash
+   docker compose down
+   docker compose run --rm --no-deps --user root --entrypoint sh kysignon-server \
+     -c 'rm /data/jwt_rs256.key /data/secret.key && ls -A /data'
+   docker compose up -d
+   docker compose logs kysignon-server | head -20
+   ```
+
+   The listing must still show `encryption.key` and `kysignon.db`. Environment form: if
+   `KYSIGNON_SECRET_KEY` is set, replace its value with `openssl rand -hex 32` written
+   straight into `.env`, not echoed, then `docker compose up -d`; the RSA key is always a file.
+
+   What this does: every session and CSRF token is invalid, so everyone signs in again;
+   every access and ID token ever issued is invalid; OIDC clients pick up the new signing key
+   from the JWKS endpoint on their next fetch, and any that cache it will reject tokens until
+   they do. TOTP keeps working, passkeys keep working, and Disaster recovery still shows the
+   key pinned. Then re-issue each OAuth client's secret from OAuth clients, and have every
+   admin re-enrol their factors. Confirm with a Back up now so the recovered server has a
+   capsule that reflects the rotation.
 
 ## Afterwards
 

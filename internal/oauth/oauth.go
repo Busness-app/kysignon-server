@@ -72,7 +72,7 @@ func (e *Engine) GetOIDCConfiguration() OIDCConfiguration {
 		ScopesSupported:                  []string{"openid", "profile", "email"},
 		TokenEndpointAuthMethods:         []string{"client_secret_post", "client_secret_basic", "none"},
 		CodeChallengeMethodsSupported:    []string{"S256"},
-		ClaimsSupported: []string{"sub", "iss", "aud", "exp", "iat", "jti", "nonce", "auth_time",
+		ClaimsSupported: []string{"sub", "iss", "aud", "exp", "iat", "jti", "nonce", "auth_time", "amr", "acr",
 			"preferred_username", "name", "email", "role"},
 	}
 	if e.SupportsRevocation() {
@@ -160,13 +160,13 @@ func (e *Engine) GrantedScope(clientID, requested string) (string, error) {
 }
 
 // CreateAuthorizationCode creates a short-lived, single-use authorization code.
-func (e *Engine) CreateAuthorizationCode(clientID, userID, redirectURI, scope, challenge, method string) (string, error) {
-	return e.CreateAuthorizationCodeWithNonce(clientID, userID, redirectURI, scope, challenge, method, "")
+func (e *Engine) CreateAuthorizationCode(clientID, sessionID, redirectURI, scope, challenge, method string) (string, error) {
+	return e.CreateAuthorizationCodeWithNonce(clientID, sessionID, redirectURI, scope, challenge, method, "")
 }
 
 // CreateAuthorizationCodeWithNonce is CreateAuthorizationCode plus the OIDC nonce, which
 // is echoed into the ID token so a client can detect replay.
-func (e *Engine) CreateAuthorizationCodeWithNonce(clientID, userID, redirectURI, scope, challenge, method, nonce string) (string, error) {
+func (e *Engine) CreateAuthorizationCodeWithNonce(clientID, sessionID, redirectURI, scope, challenge, method, nonce string) (string, error) {
 	client, err := e.store.GetOAuthClientByID(clientID)
 	if err != nil {
 		return "", err
@@ -184,22 +184,31 @@ func (e *Engine) CreateAuthorizationCodeWithNonce(clientID, userID, redirectURI,
 		return "", fmt.Errorf("unsupported code_challenge_method %q; only S256 is accepted", method)
 	}
 
+	session, err := e.store.GetSessionByID(sessionID)
+	if err != nil {
+		return "", err
+	}
+	if session == nil {
+		return "", errors.New("active session required")
+	}
 	rawCode, err := crypto.GenerateRandomHex(32)
 	if err != nil {
 		return "", err
 	}
 
 	item := &store.AuthorizationCode{
-		ID:                  uuid.New().String(),
-		CodeHash:            crypto.HashSHA256(rawCode),
-		ClientID:            clientID,
-		UserID:              userID,
-		RedirectURI:         redirectURI,
-		Scope:               scope,
-		CodeChallenge:       challenge,
-		CodeChallengeMethod: method,
-		Nonce:               nonce,
-		ExpiresAt:           time.Now().UTC().Add(AuthorizationCodeTTL),
+		SessionID:              session.ID,
+		AuthenticationEvidence: session.AuthenticationEvidence,
+		ID:                     uuid.New().String(),
+		CodeHash:               crypto.HashSHA256(rawCode),
+		ClientID:               clientID,
+		UserID:                 session.UserID,
+		RedirectURI:            redirectURI,
+		Scope:                  scope,
+		CodeChallenge:          challenge,
+		CodeChallengeMethod:    method,
+		Nonce:                  nonce,
+		ExpiresAt:              time.Now().UTC().Add(AuthorizationCodeTTL),
 	}
 	if err := e.store.CreateAuthorizationCode(item); err != nil {
 		return "", err
@@ -300,7 +309,7 @@ func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redi
 
 	// Register the token before handing it out, so revocation has something to revoke.
 	if err := e.store.RecordIssuedToken(&store.IssuedToken{
-		JTI: accessJTI, UserID: user.ID, ClientID: clientID, ExpiresAt: exp,
+		JTI: accessJTI, UserID: user.ID, ClientID: clientID, ExpiresAt: exp, SessionID: authCode.SessionID,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to record issued token: %w", err)
 	}
@@ -328,7 +337,6 @@ func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redi
 			"exp":                exp.Unix(),
 			"iat":                now.Unix(),
 			"jti":                uuid.New().String(),
-			"auth_time":          authCode.CreatedAt.UTC().Unix(),
 			"token_use":          "id_token",
 			"username":           user.Username,
 			"preferred_username": user.Username,
@@ -336,6 +344,7 @@ func (e *Engine) ExchangeAuthorizationCode(codeStr, clientID, clientSecret, redi
 			"email":              user.Email,
 			"role":               user.Role,
 		}
+		addAuthenticationClaims(claims, authCode.AuthenticationEvidence)
 		if authCode.Nonce != "" {
 			claims["nonce"] = authCode.Nonce
 		}

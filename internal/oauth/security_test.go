@@ -104,7 +104,7 @@ func TestPublicClientCannotSkipPKCE(t *testing.T) {
 	testClient(t, db, "kynotes", "public", []string{"https://notes.urlxl.com/callback"}, []string{"openid"})
 	u := testUser(t, db)
 
-	code, err := e.CreateAuthorizationCode("kynotes", u.ID, "https://notes.urlxl.com/callback", "openid", "", "")
+	code, err := e.CreateAuthorizationCode("kynotes", oauthSession(t, db, u.ID), "https://notes.urlxl.com/callback", "openid", "", "")
 	if err == nil {
 		if _, err := e.ExchangeAuthorizationCode(code, "kynotes", "", "https://notes.urlxl.com/callback", ""); err == nil {
 			t.Error("a public client redeemed a code with no PKCE challenge and no secret")
@@ -121,7 +121,7 @@ func TestPKCEVerifierIsEnforced(t *testing.T) {
 	u := testUser(t, db)
 	verifier, challenge := pkcePair()
 
-	code, err := e.CreateAuthorizationCode("kynotes", u.ID, "https://notes.urlxl.com/callback", "openid", challenge, "S256")
+	code, err := e.CreateAuthorizationCode("kynotes", oauthSession(t, db, u.ID), "https://notes.urlxl.com/callback", "openid", challenge, "S256")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestPKCEVerifierIsEnforced(t *testing.T) {
 		t.Error("a wrong code_verifier was accepted")
 	}
 
-	code, _ = e.CreateAuthorizationCode("kynotes", u.ID, "https://notes.urlxl.com/callback", "openid", challenge, "S256")
+	code, _ = e.CreateAuthorizationCode("kynotes", oauthSession(t, db, u.ID), "https://notes.urlxl.com/callback", "openid", challenge, "S256")
 	if _, err := e.ExchangeAuthorizationCode(code, "kynotes", "", "https://notes.urlxl.com/callback", verifier); err != nil {
 		t.Errorf("the correct code_verifier was rejected: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestPlainPKCEIsRejected(t *testing.T) {
 	testClient(t, db, "kynotes", "public", []string{"https://notes.urlxl.com/callback"}, []string{"openid"})
 	u := testUser(t, db)
 
-	code, err := e.CreateAuthorizationCode("kynotes", u.ID, "https://notes.urlxl.com/callback", "openid", "plainsecret", "plain")
+	code, err := e.CreateAuthorizationCode("kynotes", oauthSession(t, db, u.ID), "https://notes.urlxl.com/callback", "openid", "plainsecret", "plain")
 	if err == nil {
 		if _, err := e.ExchangeAuthorizationCode(code, "kynotes", "", "https://notes.urlxl.com/callback", "plainsecret"); err == nil {
 			t.Error("plain PKCE was accepted")
@@ -170,17 +170,17 @@ func TestConfidentialClientRequiresCorrectSecret(t *testing.T) {
 	u := testUser(t, db)
 	verifier, challenge := pkcePair()
 
-	code, _ := e.CreateAuthorizationCode("kypost", u.ID, "https://mail.urlxl.com/callback", "openid", challenge, "S256")
+	code, _ := e.CreateAuthorizationCode("kypost", oauthSession(t, db, u.ID), "https://mail.urlxl.com/callback", "openid", challenge, "S256")
 	if _, err := e.ExchangeAuthorizationCode(code, "kypost", "", "https://mail.urlxl.com/callback", verifier); err == nil {
 		t.Error("a confidential client redeemed a code with an empty secret")
 	}
 
-	code, _ = e.CreateAuthorizationCode("kypost", u.ID, "https://mail.urlxl.com/callback", "openid", challenge, "S256")
+	code, _ = e.CreateAuthorizationCode("kypost", oauthSession(t, db, u.ID), "https://mail.urlxl.com/callback", "openid", challenge, "S256")
 	if _, err := e.ExchangeAuthorizationCode(code, "kypost", "wrong", "https://mail.urlxl.com/callback", verifier); err == nil {
 		t.Error("a confidential client redeemed a code with the wrong secret")
 	}
 
-	code, _ = e.CreateAuthorizationCode("kypost", u.ID, "https://mail.urlxl.com/callback", "openid", challenge, "S256")
+	code, _ = e.CreateAuthorizationCode("kypost", oauthSession(t, db, u.ID), "https://mail.urlxl.com/callback", "openid", challenge, "S256")
 	if _, err := e.ExchangeAuthorizationCode(code, "kypost", secret, "https://mail.urlxl.com/callback", verifier); err != nil {
 		t.Errorf("the correct client secret was rejected: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestConfidentialClientWithNoSecretCannotAuthenticate(t *testing.T) {
 	u := testUser(t, db)
 	verifier, challenge := pkcePair()
 
-	code, _ := e.CreateAuthorizationCode("broken", u.ID, "https://x.test/callback", "openid", challenge, "S256")
+	code, _ := e.CreateAuthorizationCode("broken", oauthSession(t, db, u.ID), "https://x.test/callback", "openid", challenge, "S256")
 	if _, err := e.ExchangeAuthorizationCode(code, "broken", "", "https://x.test/callback", verifier); err == nil {
 		t.Error("a confidential client with no stored secret was authenticated")
 	}
@@ -208,7 +208,7 @@ func TestAuthorizationCodeIsSingleUseUnderConcurrency(t *testing.T) {
 	verifier, challenge := pkcePair()
 
 	for attempt := 0; attempt < 25; attempt++ {
-		code, err := e.CreateAuthorizationCode("kydns", u.ID, "https://dns.urlxl.com/callback", "openid", challenge, "S256")
+		code, err := e.CreateAuthorizationCode("kydns", oauthSession(t, db, u.ID), "https://dns.urlxl.com/callback", "openid", challenge, "S256")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -253,7 +253,7 @@ func TestGrantedScopeIsIntersectedWithClientAllowlist(t *testing.T) {
 		}
 	}
 
-	code, _ := e.CreateAuthorizationCode("kynotes", u.ID, "https://notes.urlxl.com/callback", granted, challenge, "S256")
+	code, _ := e.CreateAuthorizationCode("kynotes", oauthSession(t, db, u.ID), "https://notes.urlxl.com/callback", granted, challenge, "S256")
 	resp, err := e.ExchangeAuthorizationCode(code, "kynotes", "", "https://notes.urlxl.com/callback", verifier)
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +282,7 @@ func TestUserinfoRejectsIDToken(t *testing.T) {
 	u := testUser(t, db)
 	verifier, challenge := pkcePair()
 
-	code, _ := e.CreateAuthorizationCode("kybookmarks", u.ID, "https://bookmarks.urlxl.com/callback", "openid profile", challenge, "S256")
+	code, _ := e.CreateAuthorizationCode("kybookmarks", oauthSession(t, db, u.ID), "https://bookmarks.urlxl.com/callback", "openid profile", challenge, "S256")
 	resp, err := e.ExchangeAuthorizationCode(code, "kybookmarks", "", "https://bookmarks.urlxl.com/callback", verifier)
 	if err != nil {
 		t.Fatal(err)
@@ -324,7 +324,7 @@ func TestNonceIsEchoedIntoIDToken(t *testing.T) {
 	u := testUser(t, db)
 	verifier, challenge := pkcePair()
 
-	code, err := e.CreateAuthorizationCodeWithNonce("kynotes", u.ID, "https://notes.urlxl.com/callback",
+	code, err := e.CreateAuthorizationCodeWithNonce("kynotes", oauthSession(t, db, u.ID), "https://notes.urlxl.com/callback",
 		"openid", challenge, "S256", "n-0S6_WzA2Mj")
 	if err != nil {
 		t.Fatal(err)
@@ -394,7 +394,7 @@ func TestFailedExchangeDoesNotBurnTheCode(t *testing.T) {
 	}
 
 	for _, attempt := range attempts {
-		code, err := e.CreateAuthorizationCode(client.ID, user.ID, "https://app.example.com/cb", "openid", challenge, "S256")
+		code, err := e.CreateAuthorizationCode(client.ID, oauthSession(t, db, user.ID), "https://app.example.com/cb", "openid", challenge, "S256")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -428,7 +428,7 @@ func TestValidCodeIsRedeemableExactlyOnceUnderRace(t *testing.T) {
 	user := testUser(t, db)
 	client := testClient(t, db, "spa", "public", []string{"https://app.example.com/cb"}, []string{"openid"})
 	verifier, challenge := pkcePair()
-	code, err := e.CreateAuthorizationCode(client.ID, user.ID, "https://app.example.com/cb", "openid", challenge, "S256")
+	code, err := e.CreateAuthorizationCode(client.ID, oauthSession(t, db, user.ID), "https://app.example.com/cb", "openid", challenge, "S256")
 	if err != nil {
 		t.Fatal(err)
 	}

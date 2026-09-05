@@ -111,7 +111,8 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 
 	// Check if user is logged in
 	user := GetUserFromContext(r.Context())
-	if user == nil {
+	session := GetSessionFromContext(r.Context())
+	if user == nil || session == nil {
 		// return_to is a same-origin path; the login UI must not follow anything else.
 		loginURL := fmt.Sprintf("/login?return_to=%s", url.QueryEscape(r.URL.RequestURI()))
 		http.Redirect(w, r, loginURL, http.StatusFound)
@@ -119,7 +120,7 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code, err := h.oauthEngine.CreateAuthorizationCodeWithNonce(
-		clientID, user.ID, redirectURI, grantedScope, codeChallenge, codeChallengeMethod, nonce)
+		clientID, session.ID, redirectURI, grantedScope, codeChallenge, codeChallengeMethod, nonce)
 	if err != nil {
 		redirectError(w, r, redirectURI, state, "server_error", "Could not issue an authorization code")
 		return

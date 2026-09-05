@@ -641,3 +641,12 @@ func TestAdminCreatePairedSystemSCIM(t *testing.T) {
 		t.Fatalf("unexpected callback URL: %s", listResp.Systems[0].CallbackURL)
 	}
 }
+
+func oauthSession(t *testing.T, db *store.Store, userID string) string {
+	t.Helper()
+	id := uuid.NewString()
+	if err := db.CreateSession(&store.Session{ID: id, UserID: userID, SessionTokenHash: uuid.NewString(), ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}

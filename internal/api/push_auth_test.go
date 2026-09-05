@@ -346,6 +346,11 @@ func TestPushHappyPathStillWorks(t *testing.T) {
 		t.Fatal("expected a session cookie after a fully signed push login")
 	}
 
+	sess := assertFactorEvidence(t, f.store, finishRec, "push")
+	approved, err := f.store.GetMFAChallenge(challengeID)
+	if err != nil || approved == nil || approved.VerifiedAt == nil || !sess.FactorAuthenticatedAt.Equal(*approved.VerifiedAt) {
+		t.Fatalf("push finish did not preserve approval time: %v", err)
+	}
 	// The token is spent; a replay must not mint a second session.
 	replayRec := f.post(t, "/api/auth/mfa/push/finish", map[string]string{
 		"mfaToken": mfaToken, "challengeId": challengeID,

@@ -358,7 +358,7 @@ func TestMFATokenIsSingleUseAndBound(t *testing.T) {
 	engine, _, user, cleanup := setupTestMFAEngine(t)
 	defer cleanup()
 
-	raw, err := engine.IssueMFAToken(user.ID, "challenge-abc")
+	raw, err := engine.IssueMFAToken(user.ID, "challenge-abc", time.Now().UTC())
 	if err != nil {
 		t.Fatalf("IssueMFAToken failed: %v", err)
 	}

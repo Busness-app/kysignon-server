@@ -130,6 +130,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	primaryAt := time.Now().UTC()
 	if err := h.store.ClearFailedLogins(user.ID); err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
@@ -184,7 +185,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 		// The token is persisted and bound to this user and challenge. The user identity is
 		// read back from that record on completion; it is never parsed from client input.
-		mfaToken, err := h.mfaEngine.IssueMFAToken(user.ID, challengeID)
+		mfaToken, err := h.mfaEngine.IssueMFAToken(user.ID, challengeID, primaryAt)
 		if err != nil {
 			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 			return
@@ -198,10 +199,10 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// No MFA enrolled, issue session directly
-	h.createSessionAndRespond(w, r, user)
+	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: &primaryAt})
 }
 
-func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Request, user *store.User) {
+func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Request, user *store.User, evidence store.AuthenticationEvidence) {
 	rawToken, err := crypto.GenerateRandomHex(32)
 	if err != nil {
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
@@ -214,12 +215,13 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 	expiresAt := time.Now().UTC().Add(h.sessionTTL)
 
 	sess := &store.Session{
-		ID:               uuid.New().String(),
-		UserID:           user.ID,
-		SessionTokenHash: tokenHash,
-		IPAddress:        ip,
-		UserAgent:        ua,
-		ExpiresAt:        expiresAt,
+		AuthenticationEvidence: evidence,
+		ID:                     uuid.New().String(),
+		UserID:                 user.ID,
+		SessionTokenHash:       tokenHash,
+		IPAddress:              ip,
+		UserAgent:              ua,
+		ExpiresAt:              expiresAt,
 	}
 
 	if err := h.store.CreateSession(sess); err != nil {
@@ -325,11 +327,12 @@ func (h *AuthHandler) VerifyTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	factorAt := time.Now().UTC()
 	if !h.spendMFAToken(w, token) {
 		return
 	}
 
-	h.createSessionAndRespond(w, r, user)
+	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: &factorAt, FactorMethod: "totp"})
 }
 
 // VerifyRecoveryCode verifies a one-time recovery code and finishes login.
@@ -354,13 +357,14 @@ func (h *AuthHandler) VerifyRecoveryCode(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	factorAt := time.Now().UTC()
 	if !h.spendMFAToken(w, token) {
 		return
 	}
 
 	h.audit.Record("auth.mfa_recovery_consumed", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 	_ = h.store.ClearFailedLogins(user.ID)
-	h.createSessionAndRespond(w, r, user)
+	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: &factorAt, FactorMethod: "recovery"})
 }
 
 type PushPollRequest struct {
@@ -419,12 +423,12 @@ func (h *AuthHandler) FinishPushLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, challengeUserID, err := h.mfaEngine.CheckPushChallenge(req.ChallengeID)
-	if err != nil || status != "approved" {
+	challenge, err := h.store.GetMFAChallenge(req.ChallengeID)
+	if err != nil || challenge == nil || challenge.Status != "approved" || challenge.VerifiedAt == nil || !challenge.ExpiresAt.After(time.Now().UTC()) {
 		http.Error(w, `{"error":"mfa_not_approved","error_description":"Push challenge is not approved"}`, http.StatusUnauthorized)
 		return
 	}
-	if challengeUserID != user.ID {
+	if challenge.UserID != user.ID {
 		h.audit.Record("auth.mfa_push_mismatch", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "denied",
 			map[string]any{"reason": "challenge_owner_mismatch", "challengeId": req.ChallengeID})
 		http.Error(w, `{"error":"mfa_not_approved","error_description":"Push challenge is not approved"}`, http.StatusUnauthorized)
@@ -436,7 +440,7 @@ func (h *AuthHandler) FinishPushLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.audit.Record("auth.mfa_push_approved", user.ID, user.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
-	h.createSessionAndRespond(w, r, user)
+	h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: token.PrimaryAuthenticatedAt, FactorAuthenticatedAt: challenge.VerifiedAt, FactorMethod: "push"})
 }
 
 type PushRespondRequest struct {

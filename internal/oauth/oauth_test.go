@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Busness-app/kysignon-server/internal/crypto"
 	"github.com/Busness-app/kysignon-server/internal/store"
@@ -99,7 +100,7 @@ func TestAuthorizationCodeExchangeWithPKCE(t *testing.T) {
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 
 	// Create Auth Code
-	code, err := engine.CreateAuthorizationCode(client.ID, user.ID, "https://kypost.local/callback", "openid profile", challenge, "S256")
+	code, err := engine.CreateAuthorizationCode(client.ID, oauthSession(t, dbStore, user.ID), "https://kypost.local/callback", "openid profile", challenge, "S256")
 	if err != nil {
 		t.Fatalf("CreateAuthorizationCode failed: %v", err)
 	}
@@ -128,4 +129,13 @@ func TestAuthorizationCodeExchangeWithPKCE(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected authorization code replay to be rejected")
 	}
+}
+
+func oauthSession(t *testing.T, db *store.Store, userID string) string {
+	t.Helper()
+	id := uuid.NewString()
+	if err := db.CreateSession(&store.Session{ID: id, UserID: userID, SessionTokenHash: uuid.NewString(), ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }

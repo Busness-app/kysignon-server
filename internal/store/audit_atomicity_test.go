@@ -185,8 +185,11 @@ func TestClientDeleteRollsBackWhenItsAuditRowCannotBeWritten(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.CreateSession(&Session{ID: "s1", UserID: "u1", SessionTokenHash: "token", ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.RecordIssuedToken(&IssuedToken{
-		JTI: "jti-1", UserID: "u1", ClientID: "c1",
+		JTI: "jti-1", UserID: "u1", ClientID: "c1", SessionID: "s1",
 		ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)

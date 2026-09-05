@@ -16,7 +16,16 @@ type User struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
+// AuthenticationEvidence records server-verified login facts. Nil timestamps mean
+// unknown (legacy sessions), never the time a session or token happened to be issued.
+type AuthenticationEvidence struct {
+	PrimaryAuthenticatedAt *time.Time `json:"-"`
+	FactorAuthenticatedAt  *time.Time `json:"-"`
+	FactorMethod           string     `json:"-"` // "", "totp", "push", "webauthn", "recovery"
+}
+
 type Session struct {
+	AuthenticationEvidence
 	ID               string    `json:"id"`
 	UserID           string    `json:"userId"`
 	SessionTokenHash string    `json:"-"`
@@ -89,27 +98,29 @@ type MFAMethod struct {
 }
 
 type MFAChallenge struct {
-	ID              string    `json:"id"`
-	UserID          string    `json:"userId"`
-	MethodType      string    `json:"methodType"`
-	MatchDigits     string    `json:"matchDigits"`
-	DecoyDigitsJSON string    `json:"decoyDigitsJson"`
-	Status          string    `json:"status"` // "pending", "approved", "denied", "expired"
-	ExpiresAt       time.Time `json:"expiresAt"`
-	CreatedAt       time.Time `json:"createdAt"`
+	VerifiedAt      *time.Time `json:"-"`
+	ID              string     `json:"id"`
+	UserID          string     `json:"userId"`
+	MethodType      string     `json:"methodType"`
+	MatchDigits     string     `json:"matchDigits"`
+	DecoyDigitsJSON string     `json:"decoyDigitsJson"`
+	Status          string     `json:"status"` // "pending", "approved", "denied", "expired"
+	ExpiresAt       time.Time  `json:"expiresAt"`
+	CreatedAt       time.Time  `json:"createdAt"`
 }
 
 // MFAToken is a single-use, server-side bearer token issued after primary password
 // verification and redeemed by exactly one second-factor completion.
 type MFAToken struct {
-	ID          string     `json:"id"`
-	UserID      string     `json:"userId"`
-	TokenHash   string     `json:"-"`
-	ChallengeID string     `json:"challengeId,omitempty"`
-	Attempts    int        `json:"-"`
-	ExpiresAt   time.Time  `json:"expiresAt"`
-	UsedAt      *time.Time `json:"usedAt,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
+	PrimaryAuthenticatedAt *time.Time `json:"-"`
+	ID                     string     `json:"id"`
+	UserID                 string     `json:"userId"`
+	TokenHash              string     `json:"-"`
+	ChallengeID            string     `json:"challengeId,omitempty"`
+	Attempts               int        `json:"-"`
+	ExpiresAt              time.Time  `json:"expiresAt"`
+	UsedAt                 *time.Time `json:"usedAt,omitempty"`
+	CreatedAt              time.Time  `json:"createdAt"`
 }
 
 type RecoveryCode struct {
@@ -135,6 +146,8 @@ type OAuthClient struct {
 }
 
 type AuthorizationCode struct {
+	AuthenticationEvidence
+	SessionID           string     `json:"-"`
 	ID                  string     `json:"id"`
 	CodeHash            string     `json:"-"`
 	ClientID            string     `json:"clientId"`
@@ -151,6 +164,7 @@ type AuthorizationCode struct {
 
 // IssuedToken records an access token so it can be revoked before it expires.
 type IssuedToken struct {
+	SessionID string     `json:"-"`
 	JTI       string     `json:"jti"`
 	UserID    string     `json:"userId"`
 	ClientID  string     `json:"clientId"`

@@ -20,6 +20,11 @@ type deliveryTransport struct {
 func (t *deliveryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	mutation := req.Method != http.MethodGet && req.Method != http.MethodHead
 	if mutation {
+		// Preserve the wire idempotency key, but do not let net/http replay a
+		// mutation internally after a lost response on a reused connection.
+		// The persisted delivery attempt must see that uncertainty first.
+		req = req.Clone(req.Context())
+		req.GetBody = nil
 		t.uncertain.Store(true)
 	}
 	resp, err := t.base.RoundTrip(req)

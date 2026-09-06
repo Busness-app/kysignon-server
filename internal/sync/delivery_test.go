@@ -2,8 +2,10 @@ package sync
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,5 +90,51 @@ func TestDeliveryOutcomeClassification(t *testing.T) {
 				t.Fatal("read cleared mutation uncertainty")
 			}
 		})
+	}
+}
+
+func TestDeliveryDoesNotReplayInsideHTTPTransport(t *testing.T) {
+	var writes atomic.Int32
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(204)
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		if writes.Add(1) == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			conn.Close()
+			return
+		}
+		w.WriteHeader(204)
+	}))
+	defer remote.Close()
+	tracker := &deliveryTransport{base: remote.Client().Transport}
+	if tracker.base == nil {
+		tracker.base = http.DefaultTransport
+	}
+	client := &http.Client{Transport: tracker}
+	// Prime a reused connection: net/http may transparently replay an idempotency-key
+	// POST after losing its response, before the dispatcher can observe uncertainty.
+	response, err := client.Get(remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	req, err := http.NewRequest(http.MethodPost, remote.URL, strings.NewReader(`{"active":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Idempotency-Key", "event")
+	response, err = client.Do(req)
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil || writes.Load() != 1 || !tracker.uncertain.Load() {
+		t.Fatalf("hidden retry: writes=%d error=%v uncertain=%v", writes.Load(), err, tracker.uncertain.Load())
 	}
 }

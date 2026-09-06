@@ -150,7 +150,8 @@ func (s *Store) ScheduleReconcileJobs(now time.Time) error {
 		return err
 	}
 	for _, id := range due {
-		if _, err := s.CreateReconcileJob(id, "repair", "schedule", nil); err != nil && !errors.Is(err, ErrReconcileBusy) {
+		audit := &AuditEvent{ID: uuid.NewString(), ActorUsername: "schedule", Action: "admin.reconcile_requested", TargetID: id, TargetType: "system", Outcome: "success", DetailsJSON: `{"kind":"repair","requestedBy":"schedule"}`}
+		if _, err := s.CreateReconcileJob(id, "repair", "schedule", audit); err != nil && !errors.Is(err, ErrReconcileBusy) {
 			return err
 		}
 	}
@@ -180,20 +181,28 @@ func (s *Store) ClaimReconcileJob(lease time.Duration) (*ReconcileJob, error) {
 	return job, tx.Commit()
 }
 
-func (s *Store) FinishReconcileJob(job *ReconcileJob, result any, runErr error) error {
+// FinishReconcileJob records the outcome and, for a repair, an audit event carrying the
+// counts of what it queued, in one transaction. Only local counts and fixed reasons are
+// written; remote text never reaches the audit log.
+func (s *Store) FinishReconcileJob(job *ReconcileJob, report *DriftReport, runErr error) error {
 	status, message := "done", ""
 	if runErr != nil {
 		status, message = "failed", runErr.Error()
 	}
 	body := ""
-	if result != nil {
-		b, err := json.Marshal(result)
+	if report != nil {
+		b, err := json.Marshal(report)
 		if err != nil {
 			return err
 		}
 		body = string(b)
 	}
-	r, err := s.db.Exec(`UPDATE sync_reconcile_jobs SET status=?,result_json=?,error=?,finished_at=?,lease_until=NULL,claim_token='' WHERE id=? AND claim_token=?`,
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	r, err := tx.Exec(`UPDATE sync_reconcile_jobs SET status=?,result_json=?,error=?,finished_at=?,lease_until=NULL,claim_token='' WHERE id=? AND claim_token=?`,
 		status, body, message, time.Now().UTC(), job.ID, job.ClaimToken)
 	if err != nil {
 		return err
@@ -201,7 +210,32 @@ func (s *Store) FinishReconcileJob(job *ReconcileJob, result any, runErr error) 
 	if n, _ := r.RowsAffected(); n != 1 {
 		return errors.New("reconciliation job changed")
 	}
-	return nil
+	if job.Kind == "repair" {
+		details := map[string]any{"jobId": job.ID, "requestedBy": job.RequestedBy, "status": status}
+		outcome := "success"
+		switch {
+		case runErr != nil:
+			outcome, details["reason"] = "failure", "job failed"
+		case report == nil || !report.Supported:
+			details["reason"] = "verification unsupported"
+		case !report.Complete:
+			details["reason"] = "listing incomplete"
+		}
+		if report != nil {
+			for k, v := range map[string]int{"listedUsers": report.ListedUsers, "unrelated": report.Unrelated, "missing": report.MissingCount, "stale": report.StaleCount, "orphaned": report.OrphanedCount, "groupsRequeued": report.GroupsRequeued, "groupsOrphaned": report.GroupsOrphaned, "mappingConflicts": report.MappingConflicts} {
+				details[k] = v
+			}
+			details["repaired"] = report.Repaired
+		}
+		b, err := json.Marshal(details)
+		if err != nil {
+			return err
+		}
+		if err = recordAuditTx(tx, &AuditEvent{ID: uuid.NewString(), ActorUsername: job.RequestedBy, Action: "admin.reconcile_completed", TargetID: job.SystemID, TargetType: "system", Outcome: outcome, DetailsJSON: string(b)}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListReconcileJobs(systemID string, limit int) ([]ReconcileJob, error) {
@@ -261,6 +295,9 @@ type DriftReport struct {
 	Orphaned       []DriftEntry `json:"orphaned"`
 	GroupsRequeued int          `json:"groupsRequeued"`
 	GroupsOrphaned int          `json:"groupsOrphaned"`
+	// MappingConflicts counts managed resources whose target ID disagrees with the stored
+	// mapping; they are observed but never re-linked or written through.
+	MappingConflicts int `json:"mappingConflicts"`
 	// ListingError explains an incomplete run without remote text or credentials.
 	ListingError string `json:"listingError,omitempty"`
 }
@@ -316,29 +353,49 @@ func (s *Store) ReconcileDrift(systemID string, listing RemoteListing, repair bo
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-	managed := func(kind, id string) (bool, error) {
-		var known bool
-		table := "users"
-		if kind == "group" {
-			table = "directory_groups"
+	wantedGroups := map[string]bool{}
+	var groups []desiredGroup
+	if listing.GroupsListed {
+		if groups, err = desiredGroupsTx(tx, systemID); err != nil {
+			return nil, err
 		}
-		err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM `+table+` WHERE id=?) OR EXISTS(SELECT 1 FROM sync_resource_state WHERE system_id=? AND resource_id=? AND kind=?)
- OR EXISTS(SELECT 1 FROM scim_user_links WHERE system_id=? AND local_id=? AND kind=?)`, id, systemID, id, kind, systemID, id, kind).Scan(&known)
+		for _, g := range groups {
+			wantedGroups[g.groupID] = true
+		}
+	}
+	// A resource is managed only through a relationship this connector already has:
+	// effective access, a held desired-state row, or a stored mapping. A target cannot
+	// name an arbitrary local user and thereby become its holder.
+	managed := func(kind, id string) (bool, error) {
+		if (kind == "user" && desired[id] != nil) || (kind == "group" && wantedGroups[id]) {
+			return true, nil
+		}
+		var known bool
+		err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sync_resource_state WHERE system_id=? AND resource_id=? AND kind=?)
+ OR EXISTS(SELECT 1 FROM scim_user_links WHERE system_id=? AND local_id=? AND kind=?)`, systemID, id, kind, systemID, id, kind).Scan(&known)
 		return known, err
 	}
-	link := func(kind, localID, remoteID string) error {
+	// Mappings are only written by repair. A target ID that disagrees with a stored
+	// mapping is observed and counted; nothing is written through it.
+	link := func(kind, localID, remoteID string) (bool, error) {
 		if remoteID == "" || remoteID == "." || remoteID == ".." {
-			return errors.New("invalid remote ID in listing")
+			return false, errors.New("invalid remote ID in listing")
+		}
+		var stored string
+		err := tx.QueryRow(`SELECT remote_id FROM scim_user_links WHERE system_id=? AND local_id=? AND kind=?`, systemID, localID, kind).Scan(&stored)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+		if stored != "" && stored != remoteID {
+			return false, nil
 		}
 		r, err := tx.Exec(`INSERT INTO scim_user_links(system_id,local_id,kind,remote_id) VALUES(?,?,?,?)
- ON CONFLICT(system_id,local_id) DO UPDATE SET remote_id=excluded.remote_id WHERE kind=excluded.kind AND (remote_id='' OR remote_id=excluded.remote_id)`, systemID, localID, kind, remoteID)
+ ON CONFLICT(system_id,local_id) DO UPDATE SET remote_id=excluded.remote_id WHERE kind=excluded.kind AND remote_id=''`, systemID, localID, kind, remoteID)
 		if err != nil {
-			return err
+			return false, err
 		}
-		if n, _ := r.RowsAffected(); n != 1 {
-			return errors.New("remote mapping conflicts with the listing")
-		}
-		return nil
+		n, _ := r.RowsAffected()
+		return n == 1 || stored == remoteID, nil
 	}
 	observe := func(kind, id, state string) error {
 		_, err := tx.Exec(`UPDATE sync_resource_state SET observed=?,observed_at=? WHERE system_id=? AND resource_id=? AND kind=?`, state, now, systemID, id, kind)
@@ -366,15 +423,23 @@ func (s *Store) ReconcileDrift(systemID string, listing RemoteListing, repair bo
 			continue
 		}
 		seen[remote.ExternalID] = true
-		if err = link("user", remote.ExternalID, remote.ID); err != nil {
-			return nil, err
-		}
 		state := "present_inactive"
 		if remote.Active {
 			state = "present_active"
 		}
+		linked := true
+		if repair {
+			if linked, err = link("user", remote.ExternalID, remote.ID); err != nil {
+				return nil, err
+			}
+			if !linked {
+				report.MappingConflicts++
+			}
+		}
 		u, wanted := desired[remote.ExternalID]
 		switch {
+		case !linked:
+			// Written through a disputed mapping, a repair could reach the wrong account.
 		case wanted && (!remote.Active || remote.UserName != u.Username || remote.DisplayName != u.DisplayName || remote.Email != u.Email):
 			appendDrift(&report.Stale, &report.StaleCount, DriftEntry{ID: u.ID, Username: u.Username, Reason: "attributes differ"})
 			if repair {
@@ -443,13 +508,7 @@ func (s *Store) ReconcileDrift(systemID string, listing RemoteListing, repair bo
 		}
 	}
 	if listing.GroupsListed && listing.Complete {
-		groups, err := desiredGroupsTx(tx, systemID)
-		if err != nil {
-			return nil, err
-		}
-		wantedGroups := map[string]bool{}
 		for _, g := range groups {
-			wantedGroups[g.groupID] = true
 			if repair {
 				hash, err := groupMembersHashTx(tx, g)
 				if err != nil {
@@ -474,8 +533,13 @@ func (s *Store) ReconcileDrift(systemID string, listing RemoteListing, repair bo
 			}
 			report.GroupsOrphaned++
 			if repair {
-				if err = link("group", remote.ExternalID, remote.ID); err != nil {
+				linked, err := link("group", remote.ExternalID, remote.ID)
+				if err != nil {
 					return nil, err
+				}
+				if !linked {
+					report.MappingConflicts++
+					continue
 				}
 				if err = hold("group", remote.ExternalID); err != nil {
 					return nil, err

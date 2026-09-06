@@ -31,6 +31,8 @@ type fakeSCIM struct {
 	// failPage, when set, answers 500 to that unfiltered listing page (1-based).
 	failPage int
 	pages    int
+	// pageDelay slows every unfiltered listing page.
+	pageDelay time.Duration
 }
 
 func newFakeSCIM() *fakeSCIM {
@@ -57,6 +59,11 @@ func (f *fakeSCIM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.pages == f.failPage {
 			w.WriteHeader(500)
 			return
+		}
+		if f.pageDelay > 0 {
+			f.mu.Unlock()
+			time.Sleep(f.pageDelay)
+			f.mu.Lock()
 		}
 		var all []any
 		if collection == "Users" {

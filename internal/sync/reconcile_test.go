@@ -52,14 +52,19 @@ func TestReconcileJobListsAndRepairsGenericSCIM(t *testing.T) {
 		}
 		others = append(others, o)
 	}
-	for _, x := range []*store.User{u, others[0], others[1]} {
+	for _, x := range []*store.User{u, others[0], others[1], others[2]} {
 		if err := s.SetAppAssignment(app.ID, "users", x.ID, true, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	drain(t, e)
+	// fourth loses access and is deactivated; the target later reactivates it by itself.
+	if err := s.SetAppAssignment(app.ID, "users", others[2].ID, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, e)
 	// Drift introduced behind KySignOn's back: one account deleted, one renamed, one
-	// revoked user left active, and an account nobody here manages.
+	// revoked user reactivated, and an account nobody here manages.
 	remote.mu.Lock()
 	for id, r := range remote.users {
 		switch r.ExternalID {
@@ -68,10 +73,11 @@ func TestReconcileJobListsAndRepairsGenericSCIM(t *testing.T) {
 		case others[0].ID:
 			r.DisplayName = "changed"
 			remote.users[id] = r
+		case others[2].ID:
+			r.Active = true
+			remote.users[id] = r
 		}
 	}
-	remote.next++
-	remote.users["orphan"] = scim.User{ID: "orphan", ExternalID: others[2].ID, UserName: "fourth", Active: true}
 	remote.users["foreign"] = scim.User{ID: "foreign", ExternalID: "nobody", UserName: "foreign", Active: true}
 	remote.mu.Unlock()
 
@@ -101,7 +107,9 @@ func TestReconcileJobListsAndRepairsGenericSCIM(t *testing.T) {
 	remote.pages, remote.failPage = 0, 0
 	remote.mu.Unlock()
 	repair := runJob(t, e, s, sys.ID, "repair")
-	if !repair.Repaired || repair.MissingCount != 1 || repair.StaleCount != 1 || repair.OrphanedCount != 1 {
+	// The incomplete run already queued the safe attribute repair, so only the
+	// destructive classes remain for the complete run.
+	if !repair.Repaired || repair.MissingCount != 1 || repair.OrphanedCount != 1 {
 		t.Fatalf("repair %+v", repair)
 	}
 	drain(t, e)
@@ -126,6 +134,55 @@ func TestReconcileJobListsAndRepairsGenericSCIM(t *testing.T) {
 			t.Fatalf("observation not recorded: %+v", r)
 		}
 	}
+}
+
+func TestReconcileJobDoesNotBlockDelivery(t *testing.T) {
+	e, s, u, cleanup := setupTestSyncEngine(t)
+	defer cleanup()
+	remote := newFakeSCIM()
+	srv := httptest.NewTLSServer(remote)
+	defer srv.Close()
+	e.httpClient = srv.Client()
+	sys, _, err := e.CreateSystem(&CreateSystemRequest{Name: "target", SystemType: "scim", CallbackURL: srv.URL + "/scim/v2", BearerToken: "target-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := appRecordFor(t, s, sys.ID)
+	for i := 0; i < 6; i++ {
+		o := &store.User{ID: uuid.NewString(), Username: "u" + uuid.NewString()[:6], DisplayName: "x", Email: uuid.NewString() + "@example.com", PasswordHash: "x", Role: "user", Status: "active"}
+		if err := s.CreateUser(o); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetAppAssignment(app.ID, "users", o.ID, true, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetAppAssignment(app.ID, "users", u.ID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, e)
+	// The target answers each listing page slowly; a revocation must not wait for it.
+	remote.mu.Lock()
+	remote.pageDelay = 300 * time.Millisecond
+	remote.mu.Unlock()
+	if _, err := s.CreateReconcileJob(sys.ID, "repair", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); e.runReconcileJobs(context.Background()) }()
+	if err := s.SetAppAssignment(app.ID, "users", u.ID, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	drain(t, e)
+	if got, _ := remote.userByExternal(u.ID); got.Active {
+		t.Fatal("revocation not delivered while listing ran")
+	}
+	jobs, _ := s.ListReconcileJobs(sys.ID, 1)
+	if time.Since(start) > 500*time.Millisecond || len(jobs) != 1 || jobs[0].Status != "running" {
+		t.Fatalf("delivery waited for the listing: %v %+v", time.Since(start), jobs)
+	}
+	<-done
 }
 
 func TestReconcileJobUnsupportedForSuiteWebhook(t *testing.T) {

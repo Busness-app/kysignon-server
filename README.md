@@ -614,14 +614,20 @@ are recorded, safe attribute repairs may be queued, and nothing is deactivated o
 inferred absent.
 
 Only accounts this connector manages are compared: resources whose `externalId` names a
-local user, a held desired-state row or a stored remote mapping. Everything else at the
-target is left alone and counted as unrelated. A complete run classifies each managed
+user with effective access to it, a held desired-state row or a stored remote mapping. A
+target cannot make itself the holder of an account by naming an arbitrary local user;
+everything else is left alone and counted as unrelated. A preview writes nothing but
+observations. Repair stores remote IDs learned from the listing; a target ID that
+disagrees with a stored mapping is counted as a conflict and never written through. A complete run classifies each managed
 account as **missing** (desired, absent), **stale** (desired, but inactive or with
 different userName, displayName or email) or **orphaned** (active at the target without
 effective access). Repair queues a create for missing, an update for stale, an inactive
 update for orphaned accounts, re-queues assigned groups and deletes managed groups that
 are no longer assigned. Repair always lists afresh; a preview is never applied later.
-Repair requires operation-bound step-up and records an audit event; a preview does not.
+Repair requires operation-bound step-up. Every repair, scheduled or requested, records an
+audit event when queued and another with its counts when it finishes; a preview records
+only its request. Listings run on their own worker with a two-minute budget per
+collection, so a slow target cannot delay outbound delivery to any connector.
 
 Signed suite webhooks have no read contract. Their jobs record every held account as
 **unsupported**, so an acknowledgment is never presented as an observed match.

@@ -19,6 +19,10 @@ const (
 	reconcileLease = 10 * time.Minute
 	listingPage    = 100
 	listingMax     = 20000
+	// A listing gets a wall-clock budget and a page budget of its own, so a slow target
+	// makes a run incomplete rather than holding the worker for the whole lease.
+	listingBudget = 2 * time.Minute
+	listingPages  = listingMax/listingPage + 10
 )
 
 type listedResource struct {
@@ -37,11 +41,16 @@ func (e *Engine) listSCIMCollection(ctx context.Context, c *scim.Client, collect
 	if err := validateSCIMConfig(c.BaseURL, c.Token); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, listingBudget)
+	defer cancel()
 	base, _ := url.Parse(c.BaseURL)
 	var out []listedResource
 	seen := map[string]bool{}
 	start, total := 1, -1
-	for {
+	for pages := 0; ; pages++ {
+		if pages >= listingPages {
+			return out, fmt.Errorf("%w: page budget exhausted", scim.ErrMalformedResponse)
+		}
 		u := base.JoinPath(collection)
 		u.RawQuery = url.Values{"startIndex": {strconv.Itoa(start)}, "count": {strconv.Itoa(listingPage)}}.Encode()
 		status, raw, err := e.scimRequest(ctx, c, http.MethodGet, u.String(), nil)
@@ -165,6 +174,21 @@ func (e *Engine) runReconcileJobs(ctx context.Context) {
 		}
 		if !ran {
 			return
+		}
+	}
+}
+
+// reconcileWorker runs listings on their own goroutine so a slow or hostile target can
+// never delay outbound delivery, in particular deprovisioning, to any connector.
+func (e *Engine) reconcileWorker(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			e.runReconcileJobs(ctx)
 		}
 	}
 }

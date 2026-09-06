@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ func TestReconcileJobsClaimLeaseAndInterrupt(t *testing.T) {
 		t.Fatalf("interrupted job not failed: %+v %v", jobs, err)
 	}
 	// A stale claim cannot finish a job it no longer owns.
-	if err := s.FinishReconcileJob(claimed, map[string]int{"n": 1}, nil); err == nil {
+	if err := s.FinishReconcileJob(claimed, &DriftReport{}, nil); err == nil {
 		t.Fatal("stale claim finished the job")
 	}
 	next, err := s.CreateReconcileJob("target", "repair", "admin", nil)
@@ -58,7 +59,7 @@ func TestReconcileJobsClaimLeaseAndInterrupt(t *testing.T) {
 		t.Fatal(err)
 	}
 	claimed, _ = s.ClaimReconcileJob(time.Minute)
-	if err := s.FinishReconcileJob(claimed, DriftReport{Supported: true}, nil); err != nil {
+	if err := s.FinishReconcileJob(claimed, &DriftReport{Supported: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 	jobs, _ = s.ListReconcileJobs("target", 10)
@@ -92,8 +93,22 @@ func TestScheduleReconcileJobs(t *testing.T) {
 		t.Fatalf("%+v", jobs)
 	}
 	claimed, _ := s.ClaimReconcileJob(time.Minute)
-	if err := s.FinishReconcileJob(claimed, nil, nil); err != nil {
+	if err := s.FinishReconcileJob(claimed, &DriftReport{Supported: true, Complete: true, Repaired: true, OrphanedCount: 2}, nil); err != nil {
 		t.Fatal(err)
+	}
+	// A scheduled repair leaves a durable trace of its request and its outcome.
+	events, _, err := s.ListAuditEvents(50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]string{}
+	for _, ev := range events {
+		if ev.TargetID == "target" {
+			seen[ev.Action] = ev.DetailsJSON
+		}
+	}
+	if !strings.Contains(seen["admin.reconcile_requested"], `"requestedBy":"schedule"`) || !strings.Contains(seen["admin.reconcile_completed"], `"orphaned":2`) {
+		t.Fatalf("audit %+v", seen)
 	}
 	if err := s.ScheduleReconcileJobs(now.Add(5 * time.Hour)); err != nil {
 		t.Fatal(err)
@@ -117,10 +132,15 @@ func TestReconcileDriftRepairsManagedAccountsOnly(t *testing.T) {
 	defer cleanup()
 	app := provisioningFixture(t, s, "target")
 	wanted, orphan, stale := createTestUserNamed(t, s, "wanted"), createTestUserNamed(t, s, "orphan"), createTestUserNamed(t, s, "stale")
-	for _, u := range []*User{wanted, stale} {
+	for _, u := range []*User{wanted, stale, orphan} {
 		if err := s.SetAppAssignment(app, "users", u.ID, true, nil); err != nil {
 			t.Fatal(err)
 		}
+	}
+	deliverAll(t, s)
+	// The connector held orphan's account; access was revoked, but the target kept it active.
+	if err := s.SetAppAssignment(app, "users", orphan.ID, false, nil); err != nil {
+		t.Fatal(err)
 	}
 	deliverAll(t, s)
 	if _, err := s.db.Exec(`DELETE FROM account_sync_events`); err != nil {
@@ -190,6 +210,61 @@ func TestReconcileDriftRepairsManagedAccountsOnly(t *testing.T) {
 	}
 }
 
+func TestReconcilePreviewWritesNothingAndManagedIsConnectorScoped(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+	app := provisioningFixture(t, s, "target")
+	provisioningFixture(t, s, "other")
+	stranger, held := createTestUserNamed(t, s, "stranger"), createTestUserNamed(t, s, "held")
+	if err := s.SetAppAssignment(app, "users", held.ID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	deliverAll(t, s)
+	if err := s.SaveSCIMUserLink("target", held.ID, "r-held"); err != nil {
+		t.Fatal(err)
+	}
+	// The target names a local user this connector has no relationship with, and
+	// disputes the mapping of one it holds.
+	listing := RemoteListing{Supported: true, Complete: true, Users: []RemoteAccount{
+		{ID: "r-stranger", ExternalID: stranger.ID, UserName: stranger.Username, Active: true},
+		{ID: "r-other", ExternalID: held.ID, UserName: held.Username, DisplayName: held.DisplayName, Email: held.Email, Active: true},
+	}}
+	preview, err := s.ReconcileDrift("target", listing, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Unrelated != 1 || preview.OrphanedCount != 0 {
+		t.Fatalf("stranger treated as managed: %+v", preview)
+	}
+	var links int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM scim_user_links WHERE system_id='target' AND local_id=?`, stranger.ID).Scan(&links); err != nil || links != 0 {
+		t.Fatal("preview persisted a target-supplied mapping", links, err)
+	}
+	if id, _, _ := s.SCIMUserLink("target", held.ID); id != "r-held" {
+		t.Fatal("preview rewrote a stored mapping", id)
+	}
+	repair, err := s.ReconcileDrift("target", listing, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair.MappingConflicts != 1 || repair.Unrelated != 1 {
+		t.Fatalf("conflict not observed: %+v", repair)
+	}
+	if id, _, _ := s.SCIMUserLink("target", held.ID); id != "r-held" {
+		t.Fatal("repair rewrote a disputed mapping", id)
+	}
+	if got := pendingFor(t, s, "target", held.ID); len(got) != 0 {
+		t.Fatal("repair wrote through a disputed mapping", got)
+	}
+	if err := s.DeleteUserWithSyncEvents(stranger.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	var body string
+	if err := s.db.QueryRow(`SELECT payload_json FROM account_sync_events WHERE system_id='target' AND user_id=?`, stranger.ID).Scan(&body); err != nil || strings.Contains(body, stranger.Username) {
+		t.Fatal("connector that never held the account received its profile", body, err)
+	}
+}
+
 func TestReconcileDriftUnsupportedAndGroups(t *testing.T) {
 	s, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -219,6 +294,10 @@ func TestReconcileDriftUnsupportedAndGroups(t *testing.T) {
 	}
 	orphanGroup := &Group{ID: uuid.NewString(), Name: "former"}
 	if err := s.CreateGroup(orphanGroup, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A group this connector once delivered, since unassigned, still exists at the target.
+	if err := s.SaveSCIMLink("target", "group", orphanGroup.ID, "g-orphan"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(`DELETE FROM account_sync_events`); err != nil {

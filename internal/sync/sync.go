@@ -563,6 +563,7 @@ func (e *Engine) StartWorker(ctx context.Context) {
 	defer ticker.Stop()
 	reconcile := time.NewTicker(time.Minute)
 	defer reconcile.Stop()
+	go e.reconcileWorker(ctx)
 
 	for {
 		select {
@@ -582,7 +583,6 @@ func (e *Engine) StartWorker(ctx context.Context) {
 				// only unsent claims become available when their leases expire.
 				log.Printf(`{"level":"ERROR","component":"sync","error":%q}`, err.Error())
 			}
-			e.runReconcileJobs(ctx)
 		}
 	}
 }

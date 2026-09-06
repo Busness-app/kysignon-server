@@ -387,9 +387,8 @@ func retryDelay(attempts int) time.Duration {
 	return delay
 }
 
-// deliveryLease bounds how long one dispatcher owns a claimed event. It must exceed the
-// delivery timeout so a slow-but-live delivery is never double-sent, and stay short enough
-// that a crashed dispatcher's events are retried promptly.
+// deliveryLease bounds unsent claims. Once delivery begins, its durable resource
+// fence survives this deadline until a known outcome or operator recovery.
 const deliveryLease = 60 * time.Second
 
 // DispatchPendingEvents delivers due events to the system each was queued for.
@@ -408,11 +407,19 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 	secrets := map[string]string{}
 
 	for _, ev := range events {
+		begun, err := e.store.BeginSyncDelivery(ev, deliveryLease)
+		if err != nil {
+			return err
+		}
+		if !begun {
+			continue
+		}
+
 		sys, ok := systems[ev.SystemID]
 		if !ok {
 			sys, err = e.store.GetPairedSystemByID(ev.SystemID)
 			if err != nil {
-				_ = e.store.ReleaseSyncEventLease(ev.ID)
+				_ = e.store.FinishSyncDelivery(ev, "pending", "", ev.Attempts, ev.NextAttempt)
 				return err
 			}
 			systems[ev.SystemID] = sys
@@ -426,13 +433,13 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 		// A system that has been deleted can never receive this event. Anything else stays
 		// queued: "nobody is listening yet" is not the same as "delivered".
 		if sys == nil {
-			if err := e.store.UpdateSyncEventStatus(ev.ID, "failed", "paired system no longer exists", ev.Attempts, nil); err != nil {
+			if err := e.store.FinishSyncDelivery(ev, "failed", "paired system no longer exists", ev.Attempts, nil); err != nil {
 				return err
 			}
 			continue
 		}
 		if sys.Status == "disabled" || !supportedSystemType(sys.SystemType) {
-			if err := e.store.ReleaseSyncEventLease(ev.ID); err != nil {
+			if err := e.store.FinishSyncDelivery(ev, "pending", "", ev.Attempts, ev.NextAttempt); err != nil {
 				return err
 			}
 			continue
@@ -440,7 +447,7 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 		secret, ok := secrets[ev.SystemID]
 		if !ok {
 			next := time.Now().UTC().Add(retryDelay(ev.Attempts))
-			if err := e.store.UpdateSyncEventStatus(ev.ID, "pending", "signing secret unavailable", ev.Attempts+1, &next); err != nil {
+			if err := e.store.FinishSyncDelivery(ev, "pending", "signing secret unavailable", ev.Attempts+1, &next); err != nil {
 				return err
 			}
 			continue
@@ -458,19 +465,34 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 			payloadBytes = []byte(ev.PayloadJSON)
 		}
 		if merr != nil {
-			if serr := e.store.UpdateSyncEventStatus(ev.ID, "failed", merr.Error(), ev.Attempts+1, nil); serr != nil {
+			if serr := e.store.FinishSyncDelivery(ev, "failed", merr.Error(), ev.Attempts+1, nil); serr != nil {
 				return serr
 			}
 			continue
 		}
 
-		if derr := e.deliver(ctx, sys, secret, ev.ID, ev.EventType, ev.UserID, payloadBytes); derr != nil {
-			attempts := ev.Attempts + 1
-			if serr := e.store.UpdatePairedSystemStatus(sys.ID, "failing"); serr != nil {
-				return serr
+		// Clone the client so simultaneous dispatchers never share outcome tracking.
+		delivery := *e
+		client := *e.httpClient
+		transport := client.Transport
+		if transport == nil {
+			transport = http.DefaultTransport
+		}
+		outcome := &deliveryTransport{base: transport}
+		client.Transport = outcome
+		delivery.httpClient = &client
+		if derr := delivery.deliver(ctx, sys, secret, ev.ID, ev.EventType, ev.UserID, payloadBytes); derr != nil {
+			if outcome.uncertain.Load() {
+				// Keep the fence even after the lease expires. The remote may still
+				// commit this write after a newer write would otherwise be sent.
+				if err := e.store.MarkSyncDeliveryUncertain(ev); err != nil {
+					return err
+				}
+				continue
 			}
+			attempts := ev.Attempts + 1
 			if attempts >= 5 {
-				if serr := e.store.UpdateSyncEventStatus(ev.ID, "failed", deliveryError(derr), attempts, nil); serr != nil {
+				if serr := e.store.FinishSyncDelivery(ev, "failed", deliveryError(derr), attempts, nil); serr != nil {
 					return serr
 				}
 			} else {
@@ -480,21 +502,15 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 					delay = max(delay, remoteErr.RetryAfter)
 				}
 				next := time.Now().UTC().Add(delay)
-				if serr := e.store.UpdateSyncEventStatus(ev.ID, "pending", deliveryError(derr), attempts, &next); serr != nil {
+				if serr := e.store.FinishSyncDelivery(ev, "pending", deliveryError(derr), attempts, &next); serr != nil {
 					return serr
 				}
 			}
 			continue
 		}
 
-		// The remote accepted the event but the local record of that fact has not landed
-		// yet. If this write fails the lease eventually expires and the event is delivered
-		// again, so delivery is at-least-once and recipients must be idempotent; surfacing
-		// the error is what lets the operator see that happening.
-		if serr := e.store.UpdatePairedSystemStatus(sys.ID, "active"); serr != nil {
-			return serr
-		}
-		if serr := e.store.UpdateSyncEventStatus(ev.ID, "delivered", "", ev.Attempts+1, nil); serr != nil {
+		// Persist acknowledgment and release the resource in one transaction.
+		if serr := e.store.FinishSyncDelivery(ev, "delivered", "", ev.Attempts+1, nil); serr != nil {
 			return serr
 		}
 	}
@@ -565,7 +581,7 @@ func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, e
 	defer resp.Body.Close()
 
 	// Preserve suite webhook acknowledgments, including already-gone deletion.
-	if (resp.StatusCode >= 200 && resp.StatusCode < 300) ||
+	if (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusNoContent) ||
 		(eventType == "user.deleted" && resp.StatusCode == http.StatusNotFound) ||
 		(eventType == "user.created" && resp.StatusCode == http.StatusConflict) {
 		return nil
@@ -620,8 +636,8 @@ func (e *Engine) StartWorker(ctx context.Context) {
 		case <-ticker.C:
 			if err := e.DispatchPendingEvents(ctx); err != nil && ctx.Err() == nil {
 				// Delivery failures are recorded per event; this is the local persistence
-				// layer failing, which leaves events leased and silently un-retried until
-				// the lease expires. It has to be visible somewhere.
+				// layer failing. An attempt already begun remains fenced for recovery;
+				// only unsent claims become available when their leases expire.
 				log.Printf(`{"level":"ERROR","component":"sync","error":%q}`, err.Error())
 			}
 		}

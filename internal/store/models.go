@@ -51,6 +51,7 @@ type PairedSystem struct {
 }
 
 type AccountSyncEvent struct {
+	ClaimToken  string     `json:"-"`
 	ID          string     `json:"id"`
 	UserID      string     `json:"userId"`
 	SystemID    string     `json:"systemId"`

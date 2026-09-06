@@ -537,3 +537,24 @@ export function parseEnrollmentPolicies(value: unknown): EnrollmentPolicy[] {
 export function parseEnrollmentPreview(value: unknown): EnrollmentPreview {
  const o=obj(value,'policy preview');return {affected:directoryCount(o,'affected'),missingFactor:directoryCount(o,'missingFactor'),restrictedSessions:directoryCount(o,'restrictedSessions'),canActivate:requiredBool(o,'canActivate')};
 }
+
+export function parseSyncDeliveries(value: unknown) {
+  if (!Array.isArray(value)) return fail('delivery attempts');
+  return value.map((item: unknown) => {
+    const row = obj(item, 'delivery attempt');
+    const recoverAfter = str(row, 'recoverAfter');
+    if (!Number.isFinite(Date.parse(recoverAfter))) return fail('recovery timestamp');
+    return { token: str(row, 'token'), userId: str(row, 'userId'), eventType: str(row, 'eventType'), recoverAfter };
+  });
+}
+
+export function parseSyncReadBack(value: unknown): string {
+  const row = obj(value, 'read-back');
+  switch (str(row, 'state')) {
+    case 'unsupported': return 'This signed webhook has no SCIM read-back endpoint. Check the receiving service directly.';
+    case 'absent': return 'No matching remote user was observed.';
+    case 'present':
+      return `Matching remote user ${str(row, 'remoteId')} was observed. Inspect its attributes in the receiving service.`;
+    default: return fail('read-back state');
+  }
+}

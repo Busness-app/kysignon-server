@@ -22,8 +22,11 @@ var ErrLastActiveAdmin = errors.New("cannot remove the last active administrator
 
 // New opens the SQLite database and creates the schema.
 func New(dbPath string) (*Store, error) {
-	// Enable WAL mode, busy timeout, and foreign keys in DSN
-	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", dbPath)
+	// Enable WAL mode, busy timeout, and foreign keys in DSN. Transactions begin
+	// IMMEDIATE: a deferred transaction that reads and then writes cannot wait out a
+	// concurrent writer and fails with SQLITE_BUSY at the upgrade instead, which the
+	// dispatcher, the reconcile worker and request handlers would otherwise hit.
+	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate", dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)

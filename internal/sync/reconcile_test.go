@@ -170,6 +170,16 @@ func TestReconcileJobDoesNotBlockDelivery(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() { defer close(done); e.runReconcileJobs(context.Background()) }()
+	running := func() bool {
+		jobs, _ := s.ListReconcileJobs(sys.ID, 1)
+		return len(jobs) == 1 && jobs[0].Status == "running"
+	}
+	for deadline := time.Now().Add(5 * time.Second); !running(); {
+		if time.Now().After(deadline) {
+			t.Fatal("job never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := s.SetAppAssignment(app.ID, "users", u.ID, false, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -178,9 +188,8 @@ func TestReconcileJobDoesNotBlockDelivery(t *testing.T) {
 	if got, _ := remote.userByExternal(u.ID); got.Active {
 		t.Fatal("revocation not delivered while listing ran")
 	}
-	jobs, _ := s.ListReconcileJobs(sys.ID, 1)
-	if time.Since(start) > 500*time.Millisecond || len(jobs) != 1 || jobs[0].Status != "running" {
-		t.Fatalf("delivery waited for the listing: %v %+v", time.Since(start), jobs)
+	if time.Since(start) > 500*time.Millisecond || !running() {
+		t.Fatalf("delivery waited for the listing: %v", time.Since(start))
 	}
 	<-done
 }

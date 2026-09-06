@@ -1,6 +1,5 @@
 **Repo:** kysignon-server
-**PR:** #32 — https://github.com/Busness-app/kysignon-server/pull/32
-**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/group-mfa-policy)
+**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/outbound-scim)
 
 # KySignOn access and identity lifecycle implementation plan
 
@@ -11,8 +10,12 @@ PR 02 merged as GitHub PR #25; PR 03 merged as GitHub PR #26. PR 04 is split int
 PR05 is split into 05a (OIDC re-authentication requests and bound interactions, merged as GitHub PR #29)
 and 05b (administrator per-app policies, factor freshness and policy revision enforcement,
 merged as GitHub PR #30). PR06 is split into 06a (organization/admin enrollment policy,
-merged as GitHub PR #31) and 06b (group-specific requirements, in review as GitHub PR #32).
-PRs 07–23 and D1–D4 remain planned.
+merged as GitHub PR #31) and 06b (group-specific requirements, merged as GitHub PR #32).
+PR07 is implemented on `feat/outbound-scim`, awaiting CI/review.
+PRs 08–23 and D1–D4 remain planned.
+PR32 review limitations remain: some frontend source hunks were omitted from review
+input, and the reviewer could not execute tests; implementation-agent runs and CI
+provided test evidence. It was not an exhaustive whole-PR audit.
 PR numbers below are sequence labels, not GitHub PR numbers.
 
 ## Outcome and scope
@@ -272,6 +275,13 @@ Depends on: none. Touch: sync/store, system connection UI, HTTP contract fixture
   stable external reference lookup; an unrelated 409 must never count as successful sync.
 - Support bounded responses, pagination where needed, explicit errors, Retry-After,
   connection testing and redacted logs. Preserve existing HTTPS/netguard behavior.
+
+Implementation: uses released `ky-primitives/scim` resource writes, a strict bounded
+externalId collection lookup, persisted remote IDs and uncertain-create markers.
+Generic deletion uses active=false PATCH. The connection UI accepts target-issued
+tokens, supports token replacement and tests, and requires explicit review of legacy
+custom connectors. Full setup, protocol requirements and ordering limitations are
+in README.md, Outbound provisioning.
 
 Acceptance: a SCIM fixture assigning unrelated IDs completes create/update/disable;
 timeout-after-create does not duplicate users; wrong Bearer credentials fail; suite

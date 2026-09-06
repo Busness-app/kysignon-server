@@ -593,7 +593,7 @@ func TestAdminCreatePairedSystemSCIM(t *testing.T) {
 
 	// 1. Create SCIM system directly via POST /api/admin/systems
 	csrfToken := server.middleware.IssueCSRFToken(adminSessionToken)
-	body := `{"name":"Nextcloud SCIM","systemType":"scim","description":"Cloud storage","iconUrl":"https://example.com/icon.svg","callbackUrl":"https://cloud.example.com/scim/v2"}`
+	body := `{"name":"Nextcloud SCIM","systemType":"scim","description":"Cloud storage","iconUrl":"https://example.com/icon.svg","callbackUrl":"https://cloud.example.com/scim/v2","bearerToken":"target-issued-token"}`
 	req := httptest.NewRequest("POST", "/api/admin/systems", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", csrfToken)
@@ -621,8 +621,8 @@ func TestAdminCreatePairedSystemSCIM(t *testing.T) {
 	if resp.System.Description != "Cloud storage" || resp.System.IconURL != "https://example.com/icon.svg" {
 		t.Fatalf("unexpected metadata in created system: %+v", resp.System)
 	}
-	if len(resp.BearerToken) < 32 {
-		t.Fatalf("expected high-entropy generated bearer token, got '%s'", resp.BearerToken)
+	if resp.BearerToken != "" {
+		t.Fatal("configured bearer token returned")
 	}
 
 	// 2. Verify system is in list

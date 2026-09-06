@@ -1,7 +1,6 @@
 package sync
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -207,7 +206,7 @@ func TestAccountSyncSCIMPayloadAndHeaders(t *testing.T) {
 	ps := &store.PairedSystem{
 		ID:                  uuid.New().String(),
 		Name:                "SCIM Downstream",
-		SystemType:          "custom",
+		SystemType:          "suite_webhook",
 		CallbackURL:         mockSCIMServer.URL,
 		HMACSecretEncrypted: mustEncrypt(t, engine, sharedSecret),
 		Status:              "active",
@@ -248,102 +247,6 @@ func TestAccountSyncSCIMPayloadAndHeaders(t *testing.T) {
 	}
 	if !receivedSCIMUser.Active {
 		t.Fatal("expected SCIM active to be true")
-	}
-}
-
-func TestRESTfulSCIMEndpointsCRUD(t *testing.T) {
-	engine, dbStore, adminUser, cleanup := setupTestSyncEngine(t)
-	defer cleanup()
-
-	var receivedMethods []string
-	var receivedPaths []string
-	var receivedBodies [][]byte
-
-	sharedSecret := "mock-hmac-secret-32-chars-long!"
-
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedMethods = append(receivedMethods, r.Method)
-		receivedPaths = append(receivedPaths, r.URL.Path)
-
-		buf := new(bytes.Buffer)
-		_, _ = buf.ReadFrom(r.Body)
-		receivedBodies = append(receivedBodies, buf.Bytes())
-
-		if r.Method == http.MethodPost {
-			w.WriteHeader(http.StatusCreated)
-		} else if r.Method == http.MethodPut {
-			w.WriteHeader(http.StatusOK)
-		} else if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusNoContent)
-		}
-	}))
-	defer mockServer.Close()
-
-	ps := &store.PairedSystem{
-		ID:                  uuid.New().String(),
-		Name:                "Standard SCIM Service",
-		SystemType:          "scim",
-		CallbackURL:         mockServer.URL + "/scim/v2",
-		HMACSecretEncrypted: mustEncrypt(t, engine, sharedSecret),
-		Status:              "active",
-	}
-	if err := dbStore.CreatePairedSystem(ps); err != nil {
-		t.Fatalf("CreatePairedSystem failed: %v", err)
-	}
-
-	scimUser := UserToSCIMResource(adminUser)
-
-	// 1. Create -> POST /scim/v2/Users
-	if err := engine.QueueAccountSyncEvent(adminUser.ID, "user.created", scimUser); err != nil {
-		t.Fatalf("Queue user.created failed: %v", err)
-	}
-	if err := engine.DispatchPendingEvents(context.Background()); err != nil {
-		t.Fatalf("Dispatch user.created failed: %v", err)
-	}
-
-	// 2. Update -> PUT /scim/v2/Users/{id}
-	if err := engine.QueueAccountSyncEvent(adminUser.ID, "user.updated", scimUser); err != nil {
-		t.Fatalf("Queue user.updated failed: %v", err)
-	}
-	if err := engine.DispatchPendingEvents(context.Background()); err != nil {
-		t.Fatalf("Dispatch user.updated failed: %v", err)
-	}
-
-	// 3. Delete -> DELETE /scim/v2/Users/{id}
-	if err := engine.QueueAccountSyncEvent(adminUser.ID, "user.deleted", map[string]any{"id": adminUser.ID}); err != nil {
-		t.Fatalf("Queue user.deleted failed: %v", err)
-	}
-	if err := engine.DispatchPendingEvents(context.Background()); err != nil {
-		t.Fatalf("Dispatch user.deleted failed: %v", err)
-	}
-
-	if len(receivedMethods) != 3 {
-		t.Fatalf("expected 3 requests, got %d", len(receivedMethods))
-	}
-
-	// Verify Create
-	if receivedMethods[0] != http.MethodPost || receivedPaths[0] != "/scim/v2/Users" {
-		t.Fatalf("expected POST /scim/v2/Users, got %s %s", receivedMethods[0], receivedPaths[0])
-	}
-	if len(receivedBodies[0]) == 0 {
-		t.Fatal("expected non-empty body on POST /scim/v2/Users")
-	}
-
-	// Verify Update
-	expectedResourcePath := "/scim/v2/Users/" + adminUser.ID
-	if receivedMethods[1] != http.MethodPut || receivedPaths[1] != expectedResourcePath {
-		t.Fatalf("expected PUT %s, got %s %s", expectedResourcePath, receivedMethods[1], receivedPaths[1])
-	}
-	if len(receivedBodies[1]) == 0 {
-		t.Fatal("expected non-empty body on PUT /scim/v2/Users/{id}")
-	}
-
-	// Verify Delete
-	if receivedMethods[2] != http.MethodDelete || receivedPaths[2] != expectedResourcePath {
-		t.Fatalf("expected DELETE %s, got %s %s", expectedResourcePath, receivedMethods[2], receivedPaths[2])
-	}
-	if len(receivedBodies[2]) != 0 {
-		t.Fatalf("expected empty body on DELETE /scim/v2/Users/{id}, got %d bytes", len(receivedBodies[2]))
 	}
 }
 

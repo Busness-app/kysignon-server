@@ -330,6 +330,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateNativeDevicePushTokenReplayState(); err != nil {
 		return err
 	}
+	if err := s.migrateSCIM(); err != nil {
+		return err
+	}
 	if err := s.migratePairedSystemsMetadata(); err != nil {
 		return err
 	}
@@ -1078,6 +1081,8 @@ func (s *Store) ClaimDueSyncEvents(limit int, lease time.Duration) ([]AccountSyn
 
 	rows, err := tx.Query(`SELECT `+syncEventColumns+` FROM account_sync_events
 		WHERE status = 'pending' AND attempts < 5
+          AND NOT EXISTS (SELECT 1 FROM paired_systems p WHERE p.id=account_sync_events.system_id
+            AND (p.status='disabled' OR p.system_type NOT IN ('scim','suite_webhook','kypost','kypasswords','kybookmarks','kynotes')))
 		  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
 		  AND (lease_until IS NULL OR lease_until <= ?)
 		ORDER BY created_at ASC LIMIT ?`, now, now, limit)

@@ -43,8 +43,8 @@ const PRESET_METADATA: Record<
     defaultDesc: 'Self-hosted cloud storage & collaboration',
     defaultIcon: 'https://nextcloud.com/media/nextcloud-logo-white.svg',
   },
-  custom: {
-    defaultName: 'Custom SCIM Service',
+  suite_webhook: {
+    defaultName: 'Custom signed webhook',
     defaultUrl: 'https://api.example.com/scim/v2',
     defaultDesc: '',
     defaultIcon: '',
@@ -63,6 +63,8 @@ export const AdminSystems: React.FC = () => {
   const [description, setDescription] = useState('');
   const [iconUrl, setIconUrl] = useState('');
   const [callbackUrl, setCallbackUrl] = useState('');
+  const [bearerToken, setBearerToken] = useState('');
+  const [editing, setEditing] = useState<PairedSystem | null>(null);
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -89,11 +91,11 @@ export const AdminSystems: React.FC = () => {
       setDescription(meta.defaultDesc || '');
       setIconUrl(meta.defaultIcon || '');
     }
+    setBearerToken('');
     setFormError(null);
   };
 
-  // Connecting a system mints a bearer token for the account directory; disconnecting one
-  // cuts off replication. Resync is left alone: it is idempotent and carries no secret.
+  // Connection changes require operation-bound step-up; resync retains its existing gate.
   const { requestGrant, stepUpPrompt } = useStepUp();
 
   const handleCreateSCIMTarget = async (e: React.FormEvent) => {
@@ -102,21 +104,31 @@ export const AdminSystems: React.FC = () => {
     setSubmitting(true);
 
     try {
+      if (editing) {
+        const path = `/api/admin/systems/${editing.id}/connection`;
+        const grant = await requestGrant(`Update the connection for '${editing.name}'?`, `PUT ${path}`);
+        await apiRequest(path, { method: 'PUT', stepUpToken: grant, body: JSON.stringify({ systemType, bearerToken }) });
+        handleCloseModal();
+        return;
+      }
       const grant = await requestGrant(
-        `Connecting '${targetName.trim() || 'this system'}' issues a bearer token with access to the account directory.`, 'POST /api/admin/systems');
+        `Connecting '${targetName.trim() || 'this system'}' sends directory accounts to this service.`, 'POST /api/admin/systems');
       const data = await apiJson('/api/admin/systems', parseCreatedSystem, {
         method: 'POST',
         stepUpToken: grant,
         body: JSON.stringify({
           name: targetName.trim(),
           systemType,
+          bearerToken: systemType === 'scim' ? bearerToken : undefined,
           description: description.trim() || undefined,
           iconUrl: iconUrl.trim() || undefined,
           callbackUrl: callbackUrl.trim(),
         }),
       });
 
-      setCreatedToken(data.bearerToken || null);
+      setBearerToken('');
+      if (data.bearerToken) setCreatedToken(data.bearerToken);
+      else handleCloseModal();
       fetchSystems();
     } catch (err) {
       if (isCancelled(err)) return;
@@ -127,6 +139,7 @@ export const AdminSystems: React.FC = () => {
   };
 
   const handleOpenModal = () => {
+    setEditing(null);
     setShowPairModal(true);
     handleTypeChange('kypost');
     setCreatedToken(null);
@@ -135,6 +148,8 @@ export const AdminSystems: React.FC = () => {
 
   const handleCloseModal = () => {
     setShowPairModal(false);
+    setEditing(null);
+    setBearerToken('');
     setCreatedToken(null);
     fetchSystems();
   };
@@ -170,7 +185,19 @@ export const AdminSystems: React.FC = () => {
     }
   };
 
-  const isCustomOrGeneric = systemType === 'scim' || systemType === 'custom';
+  const isCustomOrGeneric = systemType === 'scim' || systemType === 'suite_webhook';
+  const needsReview = (s: PairedSystem) => !['scim', 'suite_webhook', 'kypost', 'kypasswords', 'kybookmarks', 'kynotes'].includes(s.systemType);
+  const openConnection = (s: PairedSystem) => {
+    setEditing(s); setSystemType(s.systemType === 'scim' ? 'scim' : '');
+    setTargetName(s.name); setCallbackUrl(s.callbackUrl); setDescription(s.description ?? ''); setIconUrl(s.iconUrl ?? '');
+    setBearerToken(''); setCreatedToken(null); setFormError(null); setShowPairModal(true);
+  };
+  const testConnection = async (s: PairedSystem) => {
+    try {
+      await apiRequest(`/api/admin/systems/${s.id}/test`, { method: 'POST' });
+      alert('SCIM Users lookup succeeded. This does not verify write permissions or provisioning.');
+    } catch (err) { alert(errorMessage(err, 'Connection test failed')); }
+  };
 
   return (
     <div className="admin-page">
@@ -191,7 +218,7 @@ export const AdminSystems: React.FC = () => {
             <tr>
               <th>Target Service</th>
               <th>Type</th>
-              <th>SCIM Base URL</th>
+              <th>Destination URL</th>
               <th>Sync Status</th>
               <th>Last Synced</th>
               <th className="text-right">Actions</th>
@@ -223,7 +250,7 @@ export const AdminSystems: React.FC = () => {
                             border: '1px solid var(--line)',
                           }}
                           onError={(e) => {
-                            (e.target as HTMLElement).style.display = 'none';
+                            e.currentTarget.style.display = 'none';
                           }}
                         />
                       ) : (
@@ -257,7 +284,8 @@ export const AdminSystems: React.FC = () => {
                   </td>
                   <td className="font-mono text-muted text-sm">{s.callbackUrl}</td>
                   <td>
-                    {s.status === 'active' && (
+                    {needsReview(s) && <span className="status-badge warn">Protocol review required — delivery paused</span>}
+                    {!needsReview(s) && s.status === 'active' && (
                       <span className="status-badge active">
                         <CheckCircle size={12} /> Active
                       </span>
@@ -278,8 +306,11 @@ export const AdminSystems: React.FC = () => {
                   </td>
                   <td className="text-right">
                     <div className="action-buttons-wrap">
+                      {(needsReview(s) || s.systemType === 'scim') && <button className="secondary-btn sm" onClick={() => openConnection(s)}>{needsReview(s) ? 'Review connection' : 'Replace token'}</button>}
+                      {s.systemType === 'scim' && <button className="secondary-btn sm" onClick={() => testConnection(s)}>Test connection</button>}
                       <button
                         className="secondary-btn sm"
+                        disabled={needsReview(s)}
                         onClick={() => handleTriggerResync(s)}
                         title="Re-replicate all accounts via SCIM"
                       >
@@ -307,7 +338,7 @@ export const AdminSystems: React.FC = () => {
         <div className="modal-backdrop">
           <div className="modal-card">
             <div className="modal-header">
-              <h3>Connect SCIM 2.0 Service</h3>
+              <h3>{editing ? 'Configure connection' : 'Connect service'}</h3>
               <button className="close-btn" onClick={handleCloseModal}>
                 ×
               </button>
@@ -320,16 +351,16 @@ export const AdminSystems: React.FC = () => {
                   <span>SCIM Target connected successfully!</span>
                 </div>
                 <div className="form-group mt-3 text-left">
-                  <label className="form-label">Auto-Generated Bearer API Token</label>
+                  <label className="form-label">Generated webhook signing secret</label>
                   <div className="pin-box">
                     <span className="pairing-token-text font-mono">{createdToken}</span>
                     <button className="secondary-btn sm mt-2" onClick={copyCreatedToken}>
                       {copied ? <Check size={13} /> : <Copy size={13} />}
-                      <span>{copied ? 'Copied Token' : 'Copy Bearer Token'}</span>
+                      <span>{copied ? 'Copied Token' : 'Copy signing secret'}</span>
                     </button>
                   </div>
                   <span className="muted" style={{ fontSize: '0.75rem', marginTop: '0.35rem', display: 'block' }}>
-                    Configure this Bearer token in your downstream SCIM target service to authenticate incoming account replication requests from KySignOn.
+                    Configure this secret in the downstream suite webhook verifier. KySignOn signs requests and never sends the secret in Authorization.
                   </span>
                 </div>
                 <div className="modal-footer mt-4">
@@ -347,15 +378,19 @@ export const AdminSystems: React.FC = () => {
                   <select
                     className="form-select"
                     value={systemType}
-                    onChange={(e) => handleTypeChange(e.target.value)}
+                    onChange={(e) => editing ? setSystemType(e.target.value) : handleTypeChange(e.target.value)}
+                    disabled={editing?.systemType === 'scim'}
                     autoFocus
                   >
+                    {editing && <option value="">Select the protocol used by this service</option>}
+                    {!editing && <>
                     <option value="kypost">KyPost (IMAP Mail & Security)</option>
                     <option value="kypasswords">KyPasswords (Password Vault)</option>
                     <option value="kybookmarks">KyBookmarks (Encrypted Bookmarks)</option>
                     <option value="kynotes">KyNotes (Encrypted Notes)</option>
+                    </>}
                     <option value="scim">Generic SCIM 2.0 (Nextcloud, OwnCloud, etc.)</option>
-                    <option value="custom">Custom Microservice</option>
+                    <option value="suite_webhook">Custom signed suite webhook</option>
                   </select>
                 </div>
 
@@ -365,6 +400,7 @@ export const AdminSystems: React.FC = () => {
                     type="text"
                     className="form-input"
                     placeholder="e.g. KyPost Mail Server"
+                    disabled={editing !== null}
                     value={targetName}
                     onChange={(e) => setTargetName(e.target.value)}
                     required
@@ -372,7 +408,7 @@ export const AdminSystems: React.FC = () => {
                   />
                 </div>
 
-                {isCustomOrGeneric && (
+                {isCustomOrGeneric && !editing && (
                   <>
                     <div className="form-group">
                       <label className="form-label">Description (Optional)</label>
@@ -399,31 +435,37 @@ export const AdminSystems: React.FC = () => {
                 )}
 
                 <div className="form-group">
-                  <label className="form-label">SCIM Base URL (Destination)</label>
+                  <label className="form-label">{systemType === 'scim' ? 'SCIM Base URL' : 'Signed webhook URL'}</label>
                   <input
                     type="url"
                     className="form-input font-mono"
                     placeholder="https://mail.example.com/scim/v2"
+                    disabled={editing !== null}
                     value={callbackUrl}
                     onChange={(e) => setCallbackUrl(e.target.value)}
                     required
                   />
                   <span className="muted" style={{ fontSize: '0.75rem', marginTop: '0.25rem', display: 'block' }}>
-                    KySignOn will send standard RESTful requests: <code>POST /Users</code>, <code>PUT /Users/{'{id}'}</code>, <code>DELETE /Users/{'{id}'}</code>.
+                    {systemType === 'scim' ? 'Uses the target’s user IDs for updates and deactivation. Requires externalId filtering, PUT, and PATCH support.' : 'Sends signed SCIM user bodies to this exact webhook URL.'}
                   </span>
                 </div>
 
+                {systemType === 'scim' && <div className="form-group">
+                  <label className="form-label" htmlFor="scim-bearer">Bearer token issued by the target service</label>
+                  <input id="scim-bearer" className="form-input" type="password" autoComplete="new-password" value={bearerToken} onChange={(e) => setBearerToken(e.target.value)} required maxLength={8192} />
+                  <span className="muted">Stored encrypted. The saved token is never displayed.</span>
+                </div>}
                 <div className="alert-box info sm" style={{ marginBottom: '1.25rem' }}>
                   <Key size={14} />
-                  <span>KySignOn will auto-generate a cryptographically secure 256-bit Bearer API Token.</span>
+                  <span>{systemType === 'scim' ? 'Use an HTTPS SCIM base URL and the service’s provisioning token.' : editing ? 'The existing webhook signing secret will be retained.' : 'KySignOn generates a signing secret shown once after connection.'}</span>
                 </div>
 
                 <div className="modal-footer">
                   <button type="button" className="secondary-btn" onClick={handleCloseModal}>
                     Cancel
                   </button>
-                  <button type="submit" className="primary-btn" disabled={submitting}>
-                    {submitting ? <RefreshCw className="spin" size={14} /> : <span>Connect SCIM Target</span>}
+                  <button type="submit" className="primary-btn" disabled={submitting || !systemType}>
+                    {submitting ? <RefreshCw className="spin" size={14} /> : <span>{editing ? 'Save connection' : 'Connect service'}</span>}
                   </button>
                 </div>
               </form>

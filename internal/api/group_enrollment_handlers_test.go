@@ -2,6 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -89,5 +94,45 @@ func TestGroupEnrollmentAdminAndRestrictedAccess(t *testing.T) {
 	}
 	if !success || !denied {
 		t.Fatal("missing group policy audit", success, denied)
+	}
+}
+
+func TestGroupEnrollmentDeniedScope(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	cookie := enrollmentAPIAdmin(t, srv, db)
+	p := store.EnrollmentPolicy{Scope: "group:bad\n\u202e", Required: true, AllowedMethods: []string{"invalid"}, Revision: 1}
+	r := adminRequestNoStepUp(t, srv, "POST", "/api/admin/enrollment-policies/preview", cookie, policyJSON(t, p))
+	if r.Code != 400 {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	events, _, err := db.ListAuditEvents(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.TargetType == "enrollment_policy" && e.Outcome == "denied" {
+			if e.TargetID != "" {
+				t.Fatalf("unsafe audit target: %q", e.TargetID)
+			}
+			return
+		}
+	}
+	t.Fatal("missing denial audit")
+}
+func TestGroupEnrollmentJoinedError(t *testing.T) {
+	if os.Getenv("KYSIGNON_JOINED_ERROR_TEST") == "1" {
+		debug.SetMaxStack(65536)
+		w := httptest.NewRecorder()
+		writeGroupError(w, errors.Join(store.ErrGroupTargetMissing, store.ErrEnrollmentPolicy))
+		if w.Code != 400 {
+			t.Fatal(w.Code)
+		}
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGroupEnrollmentJoinedError$")
+	cmd.Env = append(os.Environ(), "KYSIGNON_JOINED_ERROR_TEST=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("joined error crashed: %v\n%.1000s", err, out)
 	}
 }

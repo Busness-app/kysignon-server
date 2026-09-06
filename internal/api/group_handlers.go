@@ -135,7 +135,13 @@ func (h *AdminHandler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
 	actor := GetUserFromContext(r.Context())
 	id := r.PathValue("id")
 	event := h.audit.Prepare("admin.group_deleted", actor.ID, actor.Username, id, "group", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
-	if err := h.store.DeleteGroup(id, event.Row); err != nil {
+	if err := h.store.DeleteGroupForSession(id, GetSessionFromContext(r.Context()).ID, event.Row); err != nil {
+		if errors.Is(err, store.ErrEmergencyAdministrator) {
+			if auditErr := h.audit.Record("admin.group_deleted", actor.ID, actor.Username, id, "group", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": "compliant_admin_required"}); auditErr != nil {
+				stepUpInternalError(w)
+				return
+			}
+		}
 		writeGroupError(w, err)
 		return
 	}

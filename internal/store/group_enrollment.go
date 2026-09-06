@@ -70,10 +70,11 @@ func (s *Store) migrateEnrollmentPolicy() error {
  UNION ALL SELECT u.id,p.scope,p.allowed_mask,p.grace_seconds FROM users u JOIN enrollment_policies p ON p.required AND p.scope='administrators' WHERE u.role='admin'
  UNION ALL SELECT m.user_id,p.scope,p.allowed_mask,p.grace_seconds FROM group_memberships m JOIN enrollment_policies p ON p.group_id=m.group_id AND p.required;
  CREATE VIEW enrollment_requirements AS
- SELECT u.id user_id,COUNT(p.scope)>0 required,
- COALESCE(MIN(p.allowed_mask&1),1)+COALESCE(MIN(p.allowed_mask&2),2)+COALESCE(MIN(p.allowed_mask&4),4) allowed_mask,
- COALESCE(MIN(CASE WHEN p.scope IS NOT NULL THEN COALESCE(d.due_at,0) END),0) due_at
- FROM users u LEFT JOIN applicable_enrollment_policies p ON p.user_id=u.id LEFT JOIN enrollment_deadlines d ON d.user_id=u.id AND d.scope=p.scope GROUP BY u.id;
+ SELECT u.id user_id,
+ EXISTS(SELECT 1 FROM enrollment_policies p WHERE p.required AND p.scope IN (SELECT 'organization' UNION ALL SELECT 'administrators' WHERE u.role='admin' UNION ALL SELECT 'group:'||m.group_id FROM group_memberships m WHERE m.user_id=u.id)) required,
+ COALESCE((SELECT MIN(p.allowed_mask&1)+MIN(p.allowed_mask&2)+MIN(p.allowed_mask&4) FROM enrollment_policies p WHERE p.required AND p.scope IN (SELECT 'organization' UNION ALL SELECT 'administrators' WHERE u.role='admin' UNION ALL SELECT 'group:'||m.group_id FROM group_memberships m WHERE m.user_id=u.id)),7) allowed_mask,
+ COALESCE((SELECT MIN(COALESCE(d.due_at,0)) FROM enrollment_policies p LEFT JOIN enrollment_deadlines d ON d.user_id=u.id AND d.scope=p.scope WHERE p.required AND p.scope IN (SELECT 'organization' UNION ALL SELECT 'administrators' WHERE u.role='admin' UNION ALL SELECT 'group:'||m.group_id FROM group_memberships m WHERE m.user_id=u.id)),0) due_at
+ FROM users u;
  CREATE VIEW IF NOT EXISTS enrolled_factors AS
  SELECT user_id,1 bit FROM mfa_methods WHERE method_type='totp'
  UNION SELECT user_id,2 FROM native_devices WHERE is_mfa_approver AND public_key IS NOT NULL AND public_key<>''

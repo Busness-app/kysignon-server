@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -170,7 +171,7 @@ func TestGroupEnrollmentMutationRevokesAndNeverRevives(t *testing.T) {
 			if remove == "membership" {
 				testEnrollmentMember(t, s, "a", u.ID, false)
 			} else {
-				if err := s.DeleteGroup("a", nil); err != nil {
+				if err := s.DeleteGroupForSession("a", "admin-session", nil); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -339,5 +340,65 @@ func TestGroupEnrollmentPreviewCountsOnlyGroupMembers(t *testing.T) {
 	status, err := s.SessionEnrollmentStatus(u.ID, "session")
 	if err != nil || status.Restricted {
 		t.Fatal("preview mutated deadline", status, err)
+	}
+}
+
+func TestGroupEnrollmentDeletionRequiresLogin(t *testing.T) {
+	s, u, _ := enrollmentFixture(t)
+	p := testEnrollmentGroup(t, s, "delete-proof")
+	testEnrollmentMember(t, s, "delete-proof", u.ID, true)
+	p.Required = true
+	if err := s.SetEnrollmentPolicy(p, "admin-session", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteGroup("delete-proof", nil); !errors.Is(err, ErrEmergencyAdministrator) {
+		t.Fatalf("deletion without login proof: %v", err)
+	}
+	if err := s.SetEnrollmentPolicy(enrollmentPolicy("organization", 3600), "admin-session", nil); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().UTC().Add(-6 * time.Minute)
+	if _, err := s.db.Exec(`UPDATE sessions SET primary_authenticated_at=?,factor_authenticated_at=? WHERE id='admin-session'`, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteGroupForSession("delete-proof", "admin-session", nil); !errors.Is(err, ErrEmergencyAdministrator) {
+		t.Fatalf("stale login accepted: %v", err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM directory_groups WHERE id='delete-proof'`).Scan(&count); err != nil || count != 1 {
+		t.Fatal(count, err)
+	}
+	now := time.Now().UTC()
+	if _, err := s.db.Exec(`UPDATE sessions SET primary_authenticated_at=?,factor_authenticated_at=? WHERE id='admin-session'`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteGroupForSession("delete-proof", "admin-session", nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGroupEnrollmentSessionQueryPlan(t *testing.T) {
+	s, _, _ := enrollmentFixture(t)
+	if _, err := s.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3000) INSERT INTO users(id,username,email,password_hash,role,status,display_name) SELECT 'plan-'||i,'plan-'||i,'plan-'||i||'@example.com','test','user','active','Plan user' FROM n`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.db.Query(`EXPLAIN QUERY PLAN SELECT allowed FROM mfa_session_access WHERE id=?`, "admin-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		t.Log(detail)
+		if strings.Contains(detail, "MATERIALIZE enrollment_requirements") || strings.Contains(detail, "SCAN u") {
+			t.Errorf("directory scan on session lookup: %s", detail)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }

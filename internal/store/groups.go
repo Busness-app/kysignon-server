@@ -86,6 +86,10 @@ func (s *Store) UpdateGroup(g *Group, audit *AuditEvent) error {
 }
 
 func (s *Store) DeleteGroup(id string, audit *AuditEvent) error {
+	return s.DeleteGroupForSession(id, "", audit)
+}
+
+func (s *Store) DeleteGroupForSession(id, sessionID string, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -104,6 +108,24 @@ func (s *Store) DeleteGroup(id string, audit *AuditEvent) error {
 		return err
 	}
 
+	// The preceding grant writes hold the writer lock. Check login evidence before
+	// cascading away the policy; step-up alone cannot authorize this relaxation.
+	var required bool
+	if err = tx.QueryRow(`SELECT required FROM enrollment_policies WHERE group_id=?`, id).Scan(&required); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrGroupTargetMissing
+		}
+		return err
+	}
+	if required {
+		preview, err := previewEnrollmentTx(tx, sessionID, "")
+		if err != nil {
+			return err
+		}
+		if !preview.CanActivate {
+			return ErrEmergencyAdministrator
+		}
+	}
 	var name string
 	if err = tx.QueryRow(`DELETE FROM directory_groups WHERE id=? RETURNING name`, id).Scan(&name); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

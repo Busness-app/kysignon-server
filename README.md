@@ -356,7 +356,8 @@ across every applicable policy. Grace is 0–90 days; each user's scope
 obligation stores an epoch-second deadline when it first applies, including account
 creation, promotion and group membership. The earliest applicable deadline wins. Logins,
 longer grace, disabling/re-enabling a policy and removing/re-adding membership never
-extend an existing deadline. Deleting a group deletes its own policy and obligations;
+extend an existing deadline. Deleting a group with an MFA requirement checks compliant
+administrator login evidence as well as step-up, then deletes its policy and obligations;
 a newly created group has a new identity and starts without an MFA requirement.
 
 Unenrolled users may continue during grace, subject to stricter app policies. Users with

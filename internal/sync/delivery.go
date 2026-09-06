@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/Busness-app/ky-primitives/scim"
 	"github.com/Busness-app/kysignon-server/internal/store"
+	"io"
 	"net/http"
 	"sync/atomic"
 )
@@ -25,6 +26,9 @@ func (t *deliveryTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		// The persisted delivery attempt must see that uncertainty first.
 		req = req.Clone(req.Context())
 		req.GetBody = nil
+		if req.Body == nil || req.Body == http.NoBody {
+			req.Body = io.NopCloser(http.NoBody)
+		}
 		t.uncertain.Store(true)
 	}
 	resp, err := t.base.RoundTrip(req)

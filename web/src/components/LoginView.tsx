@@ -66,7 +66,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
           setChallengeId(resp.challengeId);
           setMatchDigits(resp.matchDigits);
         }
-        if (resp.mfaMethods.includes('webauthn') && (isPasskeySupported() || interactionDetails?.requiresPasskey)) {
+        if (resp.mfaMethods.includes('webauthn') && (isPasskeySupported() || resp.mfaMethods.length === 1)) {
           setMfaMode('webauthn');
         } else if (resp.challengeId && resp.matchDigits) {
           setMfaMode('push');
@@ -88,6 +88,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
       setError('The server reported a successful sign-in but returned no account');
       return;
     }
+    if (user.enrollment?.restricted) { window.location.href = '/'; return; }
     if (restartAuthorization) {
       setMfaRequired(false);
       setAuthorizationRestarted(true);

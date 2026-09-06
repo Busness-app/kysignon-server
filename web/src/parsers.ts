@@ -8,7 +8,7 @@
  */
 import { isRecord } from './api';
 import type {
-  AppRecord, AppAccessPage, AppAccessGroup, AppAuthenticationPolicy,
+  AppRecord, AppAccessPage, AppAccessGroup, AppAuthenticationPolicy, EnrollmentStatus, EnrollmentPolicy, EnrollmentPreview,
   DirectoryGroup,
   DirectoryPage,
   GroupUser,
@@ -96,6 +96,7 @@ function list<T>(value: unknown, parse: (item: unknown) => T): T[] {
 export function parseUser(value: unknown): User {
   const o = obj(value, 'a user object');
   return {
+    enrollment: o.enrollment === undefined ? undefined : parseEnrollmentStatus(o.enrollment),
     id: str(o, 'id'),
     username: str(o, 'username'),
     displayName: optStr(o, 'displayName') ?? str(o, 'username'),
@@ -147,11 +148,13 @@ export interface PairingToken {
 
 export function parsePairingToken(value: unknown): PairingToken {
   const o = obj(value, 'a pairing token response');
+  const expiresAt = Date.parse(str(o, 'expiresAt'));
+  if (!Number.isFinite(expiresAt)) return fail('a valid pairing expiry timestamp');
   return {
     pairingToken: str(o, 'pairingToken'),
     pinCode: optStr(o, 'pinCode') ?? '',
     qrPayload: optStr(o, 'qrPayload') ?? '',
-    expiresAt: typeof o.expiresAt === 'number' ? o.expiresAt : 0,
+    expiresAt,
   };
 }
 
@@ -512,4 +515,19 @@ export function parseAppAccessPage(value: unknown): AppAccessPage {
 }
 export function parseAppAccessGroups(value: unknown): DirectoryPage<AppAccessGroup> {
  return directoryPage(value,'groups',item => { const g=obj(item,'an assigned group'); return {id:str(g,'id'),name:str(g,'name'),assigned:requiredBool(g,'assigned')}; });
+}
+
+function enrollmentMethods(value: unknown): string[] {
+ const methods = arr(value, 'factor methods').map(v => typeof v === 'string' && ['totp','push','webauthn'].includes(v) ? v : fail('permitted MFA method'));
+ if (!methods.length || new Set(methods).size !== methods.length) return fail('nonempty distinct MFA methods');
+ return methods;
+}
+export function parseEnrollmentStatus(value: unknown): EnrollmentStatus {
+ const o=obj(value,'enrollment status');return {required:requiredBool(o,'required'),allowedMethods:enrollmentMethods(o.allowedMethods),deadline:directoryCount(o,'deadline'),enrolled:requiredBool(o,'enrolled'),restricted:requiredBool(o,'restricted')};
+}
+export function parseEnrollmentPolicies(value: unknown): EnrollmentPolicy[] {
+ return arr(obj(value,'enrollment policies').policies,'policies').map(v=>{const o=obj(v,'policy');return {scope:oneOf(o,'scope',['organization','administrators']),required:requiredBool(o,'required'),allowedMethods:enrollmentMethods(o.allowedMethods),graceSeconds:directoryCount(o,'graceSeconds'),revision:directoryCount(o,'revision')};});
+}
+export function parseEnrollmentPreview(value: unknown): EnrollmentPreview {
+ const o=obj(value,'policy preview');return {affected:directoryCount(o,'affected'),missingFactor:directoryCount(o,'missingFactor'),restrictedSessions:directoryCount(o,'restrictedSessions'),canActivate:requiredBool(o,'canActivate')};
 }

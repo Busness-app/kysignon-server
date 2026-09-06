@@ -22,6 +22,9 @@ func TestAuthenticationEvidenceMigration(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE app_registry SET access_mode='all_active_users' WHERE client_id='app'`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`DROP VIEW mfa_session_access`); err != nil {
+		t.Fatal(err)
+	}
 	// Remove precisely the new columns to reproduce an existing installation.
 	for table, columns := range map[string][]string{
 		"sessions":            {"primary_authenticated_at", "factor_authenticated_at", "factor_method"},

@@ -349,6 +349,35 @@ Launcher visibility and provisioning scope remain governed by their existing con
 On first upgrade, old pending codes and interactions restart without deleting existing
 sessions or already-issued tokens. Subsequent startups preserve live requests.
 
+**Required MFA enrollment (PR06a).** Administrators can preview and apply organization
+and administrator requirements under **MFA policies**. Allowed TOTP, signed push and
+passkey methods intersect across the two scopes. Grace is 0–90 days; each user's scope
+obligation stores an epoch-second deadline when it first applies, including account
+creation and promotion. The earliest applicable deadline wins. Logins, longer grace,
+and disabling/re-enabling a policy never extend an existing deadline. Group-specific
+requirements remain PR06b.
+
+Unenrolled users may continue during grace, subject to stricter app policies. Users with
+a permitted factor must sign in with it immediately. At the deadline, password-only
+sign-in produces an enrollment-only session only for accounts with no enrolled factor.
+An existing factor still has to be verified even when policy no longer permits it.
+Pairing a new approver phone requires operation-bound step-up, including during enrollment. Recovery sign-in is also restricted when
+MFA is required. Such sessions can inspect identity/factors, obtain operation-bound
+factor-enrollment grants, enroll and sign out; they cannot access applications, admin
+APIs, OAuth codes or online tokens. Completing enrollment does not upgrade that session:
+sign out and sign in with password plus a permitted factor. There is no background
+heartbeat keeping idle sessions alive; the server checks every authenticated request.
+
+Applying policy requires operation-bound step-up and, whenever the administrator is
+covered by the resulting policy, an actual permitted MFA login within five minutes.
+Step-up cannot replace that login evidence. The preview and application use the same
+transactional rules; revisions prevent stale writes. Applying cancels all outstanding
+OAuth sign-ins and revokes registered tokens with its audit event. Online token checks
+also enforce deadlines at use time; offline JWTs may remain valid for up to 15 minutes,
+and destination app sessions can outlive them. Removing the last compliant factor is
+rejected atomically, including concurrent device/passkey removals. Administrator MFA
+reset remains available, revokes sessions and ends any remaining enrollment grace.
+
 **Authentication claims describe the login that established the session.** `auth_time`
 is the time the password was verified, preserved across later SSO redirects. The second
 factor's verification time is recorded separately; completing MFA or issuing a token
@@ -365,9 +394,8 @@ does not refresh the password's age. ID tokens expose these method/context value
 These are KySignOn context classes, not NIST assurance levels or assertions that keys
 are hardware-backed. Recovery does not claim ordinary MFA. The standard method names
 follow [RFC 8176](https://www.rfc-editor.org/rfc/rfc8176.html); the URNs are local contracts.
-Administrator per-app freshness policies remain PR05b in
-[the access lifecycle plan](docs/access-lifecycle-plan.md); OIDC request enforcement is
-implemented as described above.
+Administrator per-app freshness policies are implemented as described above; further work
+is tracked in [the access lifecycle plan](docs/access-lifecycle-plan.md).
 
 Existing sessions survive the upgrade but omit `auth_time`, `amr` and `acr` until a new
 login supplies evidence. Pending legacy authorization codes and MFA flows are invalidated;

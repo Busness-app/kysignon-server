@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -39,6 +40,11 @@ func (h *DeviceHandler) GenerateDevicePairingToken(w http.ResponseWriter, r *htt
 	user := GetUserFromContext(r.Context())
 	if user == nil {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	if err := consumeStepUp(h.store, r); err != nil {
+		writeStepUpError(w, err)
 		return
 	}
 
@@ -199,6 +205,10 @@ func (h *DeviceHandler) DeleteUserDevice(w http.ResponseWriter, r *http.Request)
 	}
 
 	if err := h.store.DeleteNativeDevice(deviceID, user.ID); err != nil {
+		if errors.Is(err, store.ErrLastCompliantFactor) {
+			enrollmentError(w, err)
+			return
+		}
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -227,6 +237,10 @@ func (h *DeviceHandler) SetDeviceMFAApprover(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err := h.store.SetNativeDeviceMFAApprover(deviceID, user.ID, req.IsMFAApprover); err != nil {
+		if errors.Is(err, store.ErrLastCompliantFactor) {
+			enrollmentError(w, err)
+			return
+		}
 		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}

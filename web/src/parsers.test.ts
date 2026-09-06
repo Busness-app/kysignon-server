@@ -1,4 +1,4 @@
-import { parseAppRecordPage, parseAppAccessPage } from './parsers';
+import { parseAppRecordPage, parseAppAccessPage, parsePairingToken } from './parsers';
 import { describe, expect, it } from 'vitest';
 import {
   parseGroupPage,
@@ -351,4 +351,29 @@ describe('authentication policy boundary', () => {
    expect(() => parseAppRecordPage({ records: [{ ...record, authentication }], total: 1, limit: 25, offset: 0 })).toThrow();
   }
  });
+});
+
+
+describe('enrollment status boundary', () => {
+  const enrollment = { required: true, allowedMethods: ['totp'], deadline: 1800000000, enrolled: false, restricted: true };
+  it('preserves the server restriction and deadline', () => {
+    expect(parseMe({ ...user, enrollment }).enrollment).toEqual(enrollment);
+  });
+  it.each([
+    { restricted: 'false' }, { restricted: null }, { allowedMethods: [] },
+    { allowedMethods: ['recovery'] }, { allowedMethods: ['totp', 'totp'] },
+    { deadline: -1 }, { deadline: '1800000000' },
+  ])('rejects malformed security state %p', invalid => {
+    expect(() => parseMe({ ...user, enrollment: { ...enrollment, ...invalid } })).toThrow();
+  });
+});
+
+
+describe('pairing expiry', () => {
+  it('reads the server ISO timestamp without resetting the countdown to epoch zero', () => {
+    expect(parsePairingToken({pairingToken:'test', expiresAt:'2026-09-06T01:00:00Z'}).expiresAt).toBe(Date.parse('2026-09-06T01:00:00Z'));
+  });
+  it.each([undefined, '', 'invalid'])('rejects an invalid expiry %p', expiresAt => {
+    expect(() => parsePairingToken({pairingToken:'test', expiresAt})).toThrow();
+  });
 });

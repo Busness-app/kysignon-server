@@ -178,6 +178,15 @@ func (h *OAuthHandler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	enrollment, err := h.store.SessionEnrollmentStatus(user.ID, session.ID)
+	if err != nil {
+		redirectError(w, r, redirectURI, state, "server_error", "Could not check enrollment")
+		return
+	}
+	if enrollment.Restricted {
+		redirectError(w, r, redirectURI, state, "interaction_required", "Complete MFA enrollment at your account dashboard and sign in again")
+		return
+	}
 	allowed, err := h.store.ClientAccessAllowed(user.ID, clientID)
 	if err != nil {
 		redirectError(w, r, redirectURI, state, "server_error", "Could not check application access")

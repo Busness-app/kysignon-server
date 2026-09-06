@@ -188,6 +188,9 @@ func (s *Server) routes() *http.ServeMux {
 		return adminM(s.requireStepUp(h))
 	}
 
+	mux.Handle("GET /api/admin/enrollment-policies", adminM(http.HandlerFunc(adminH.ListEnrollmentPolicies)))
+	mux.Handle("POST /api/admin/enrollment-policies/preview", adminM(http.HandlerFunc(adminH.PreviewEnrollmentPolicy)))
+	mux.Handle("PUT /api/admin/enrollment-policies", adminStepUpM(http.HandlerFunc(adminH.SetEnrollmentPolicy)))
 	mux.Handle("GET /api/admin/groups", adminM(http.HandlerFunc(adminH.ListGroups)))
 	mux.Handle("POST /api/admin/groups", adminStepUpM(http.HandlerFunc(adminH.CreateGroup)))
 	mux.Handle("PUT /api/admin/groups/{id}", adminStepUpM(http.HandlerFunc(adminH.UpdateGroup)))

@@ -77,6 +77,7 @@ export async function apiRequest(path: string, options: ApiOptions = {}): Promis
     window.dispatchEvent(new CustomEvent('kysignon:unauthorized'));
   }
 
+  if (res.status === 403 && isRecord(data) && data.error === 'enrollment_required') { window.dispatchEvent(new CustomEvent('kysignon:enrollment-required')); }
   if (!res.ok) {
     throw new ApiError(res.status, data);
   }

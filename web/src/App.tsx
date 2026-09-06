@@ -8,6 +8,7 @@ import { UserDashboard } from './components/UserDashboard';
 import { DeviceSettings } from './components/DeviceSettings';
 import { Appearance } from './components/Appearance';
 import { AdminAppRegistry } from './components/AdminAppRegistry';
+import { AdminEnrollmentPolicies } from './components/AdminEnrollmentPolicies';
 import { AdminGroups } from './components/AdminGroups';
 import { AdminUsers } from './components/AdminUsers';
 import { AdminSystems } from './components/AdminSystems';
@@ -40,7 +41,8 @@ export const App: React.FC = () => {
     };
 
     window.addEventListener('kysignon:unauthorized', handleUnauthorized);
-    return () => window.removeEventListener('kysignon:unauthorized', handleUnauthorized);
+    window.addEventListener('kysignon:enrollment-required',checkSession);
+    return () => {window.removeEventListener('kysignon:unauthorized', handleUnauthorized);window.removeEventListener('kysignon:enrollment-required',checkSession);};
   }, []);
 
   const handleLogout = async () => {
@@ -67,6 +69,11 @@ export const App: React.FC = () => {
     return <LoginView onLoginSuccess={(u) => { setCurrentUser(u); checkSession(); }} />;
   }
 
+  if (currentUser.enrollment?.restricted) return <div className="shell"><main className="main-content" style={{ gridColumn: '1 / -1' }}>
+    <div role="status" className="alert-box"><div><h1>Complete MFA enrollment</h1><p>This session can only set up account security. Permitted methods: {currentUser.enrollment.allowedMethods.map(m=>m==='webauthn'?'passkey':m.toUpperCase()).join(', ')}.</p><p>After enrolling, sign out and sign in with a permitted factor to continue.</p><button className="secondary-btn" onClick={handleLogout}>Sign out and sign in again</button></div></div>
+    <DeviceSettings user={currentUser} onUserUpdate={checkSession}/>
+  </main></div>;
+
   return (
     <div className="shell">
       <Sidebar
@@ -77,6 +84,7 @@ export const App: React.FC = () => {
       />
 
       <main className="main-content">
+        {currentUser.enrollment?.required && !currentUser.enrollment.enrolled && <div role="status" className="alert-box"><p>Enroll a permitted MFA factor by {new Date(currentUser.enrollment.deadline*1000).toLocaleString()}. <button className="secondary-btn" onClick={()=>setActiveTab('devices')}>Set up MFA</button></p></div>}
         {activeTab === 'dashboard' && (
           <UserDashboard
             user={currentUser}
@@ -92,6 +100,7 @@ export const App: React.FC = () => {
 
         {currentUser.role === 'admin' && (
           <>
+            {activeTab === 'admin-enrollment' && <AdminEnrollmentPolicies />}
             {activeTab === 'admin-users' && <AdminUsers onManageGroups={user => { setGroupUser(user); setActiveTab('admin-groups'); }} />}
             {activeTab === 'admin-groups' && <AdminGroups key={groupUser?.id ?? 'all'} user={groupUser} onClearUser={() => setGroupUser(null)} />}
             {activeTab === 'admin-app-registry' && <AdminAppRegistry onManageLaunchers={() => setActiveTab('admin-launchers')} />}

@@ -1,8 +1,10 @@
 package store
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestSCIMMappingDurability(t *testing.T) {
@@ -82,5 +84,35 @@ func TestSCIMConfigurationAuditRollback(t *testing.T) {
 	}
 	if loaded.SystemType != "custom" || loaded.HMACSecretEncrypted != "original" {
 		t.Fatal("configuration escaped rollback")
+	}
+}
+
+func TestPausedConnectorsDoNotStarveDispatch(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+	for _, sys := range []PairedSystem{
+		{ID: "legacy", Name: "legacy", SystemType: "custom", Status: "active"},
+		{ID: "disabled", Name: "disabled", SystemType: "scim", Status: "disabled"},
+		{ID: "live", Name: "live", SystemType: "scim", Status: "active"},
+	} {
+		if err := s.CreatePairedSystem(&sys); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 55 {
+		if err := s.CreateAccountSyncEvent(&AccountSyncEvent{ID: fmt.Sprintf("paused-%d", i), UserID: "user", SystemID: []string{"legacy", "disabled"}[i%2], EventType: "user.created", PayloadJSON: "{}", Status: "pending"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateAccountSyncEvent(&AccountSyncEvent{ID: "live-event", UserID: "user", SystemID: "live", EventType: "user.created", PayloadJSON: "{}", Status: "pending"}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.ClaimDueSyncEvents(50, time.Minute)
+	if err != nil || len(events) != 1 || events[0].ID != "live-event" {
+		t.Fatalf("active connector starved: %+v %v", events, err)
+	}
+	var untouched int
+	if err = s.db.QueryRow(`SELECT count(*) FROM account_sync_events WHERE system_id IN ('legacy','disabled') AND attempts=0 AND lease_until IS NULL`).Scan(&untouched); err != nil || untouched != 55 {
+		t.Fatalf("paused work changed: %d %v", untouched, err)
 	}
 }

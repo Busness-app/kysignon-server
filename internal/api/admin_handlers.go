@@ -1021,6 +1021,11 @@ func (h *AdminHandler) ConfigureSystem(w http.ResponseWriter, r *http.Request) {
 	admin := GetUserFromContext(r.Context())
 	event := h.audit.Prepare("admin.system_configured", admin.ID, admin.Username, sys.ID, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"systemName": sys.Name, "systemType": req.SystemType})
 	if err = h.syncEngine.ReviewSystem(sys, req.SystemType, req.BearerToken, event.Row); err != nil {
+		protocol := req.SystemType
+		if protocol != "scim" && protocol != "suite_webhook" {
+			protocol = "invalid"
+		}
+		h.audit.Record("admin.system_configured", admin.ID, admin.Username, sys.ID, "system", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{"systemName": sys.Name, "systemType": protocol})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(400)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_connection", "error_description": err.Error()})

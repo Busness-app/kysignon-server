@@ -53,6 +53,19 @@ func TestSCIMConnectionAdministration(t *testing.T) {
 	if rr.Code != 400 {
 		t.Fatalf("protocol switch accepted: %d", rr.Code)
 	}
+	events, _, err := db.ListAuditEvents(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditedFailure := false
+	for _, event := range events {
+		if event.Action == "admin.system_configured" && event.TargetID == id && event.Outcome == "failure" {
+			auditedFailure = true
+		}
+	}
+	if !auditedFailure {
+		t.Fatal("rejected connection change missing from audit")
+	}
 	legacy := &store.PairedSystem{ID: "legacy-custom", Name: "legacy", SystemType: "custom", CallbackURL: "https://example.com/legacy", HMACSecretEncrypted: sys.HMACSecretEncrypted, Status: "active"}
 	if err = db.CreatePairedSystem(legacy); err != nil {
 		t.Fatal(err)

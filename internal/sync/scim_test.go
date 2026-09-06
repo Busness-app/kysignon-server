@@ -285,7 +285,13 @@ func TestSCIMRedirectNeverForwardsCredentials(t *testing.T) {
 	hits := 0
 	sink := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
 	defer sink.Close()
-	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, sink.URL+"/target-token", 307) }))
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/Users/remote" {
+			_ = json.NewEncoder(w).Encode(scim.User{ID: "remote", ExternalID: u.ID, UserName: u.Username})
+			return
+		}
+		http.Redirect(w, r, sink.URL+"/target-token", 307)
+	}))
 	defer source.Close()
 	e.httpClient = source.Client()
 	sys, _, err := e.CreateSystem(&CreateSystemRequest{Name: "redirect", SystemType: "scim", CallbackURL: source.URL, BearerToken: "target-token"})
@@ -304,5 +310,33 @@ func TestSCIMRedirectNeverForwardsCredentials(t *testing.T) {
 	err = e.deliver(context.Background(), sys, "target-token", "event", "user.updated", u.ID, body)
 	if err == nil || hits != 0 || strings.Contains(deliveryError(err), "target-token") {
 		t.Fatalf("write redirect failure err=%v hits=%d", err, hits)
+	}
+}
+
+func TestGenericSCIMRejectsReassignedRemoteID(t *testing.T) {
+	e, s, u, cleanup := setupTestSyncEngine(t)
+	defer cleanup()
+	writes := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"id":"reused","externalId":"someone-else","userName":"other"}`))
+			return
+		}
+		writes++
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+	e.httpClient = srv.Client()
+	sys, _, err := e.CreateSystem(&CreateSystemRequest{Name: "reassigned", SystemType: "scim", CallbackURL: srv.URL, BearerToken: "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SaveSCIMUserLink(sys.ID, u.ID, "reused"); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(UserToSCIMResource(u))
+	err = e.deliver(context.Background(), sys, "token", "event", "user.updated", u.ID, body)
+	if !errors.Is(err, scim.ErrMalformedResponse) || writes != 0 {
+		t.Fatalf("unrelated account overwritten: err=%v writes=%d", err, writes)
 	}
 }

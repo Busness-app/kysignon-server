@@ -145,6 +145,7 @@ func (e *Engine) deliverSCIM(ctx context.Context, sys *store.PairedSystem, secre
 		return err
 	}
 	remoteID, started, err := e.store.SCIMUserLink(sys.ID, localID)
+	verifyMapping := remoteID != ""
 	if err != nil {
 		return err
 	}
@@ -209,10 +210,11 @@ func (e *Engine) deliverSCIM(ctx context.Context, sys *store.PairedSystem, secre
 			}
 		}
 	}
-	if eventType == "user.deleted" {
-		// Deactivate rather than erase the downstream user's data.
+	// A stored mapping may outlive a target restore or account reassignment.
+	// IDs established by this call's externalId lookup have already been checked.
+	if verifyMapping {
 		current, err := c.GetUser(ctx, remoteID)
-		if errors.Is(err, scim.ErrNotFound) {
+		if eventType == "user.deleted" && errors.Is(err, scim.ErrNotFound) {
 			return nil
 		}
 		if err != nil {
@@ -221,6 +223,9 @@ func (e *Engine) deliverSCIM(ctx context.Context, sys *store.PairedSystem, secre
 		if current.ID != remoteID || current.ExternalID != localID {
 			return scim.ErrMalformedResponse
 		}
+	}
+	if eventType == "user.deleted" {
+		// Deactivate rather than erase the downstream user's data.
 		_, err = c.PatchUser(ctx, remoteID, scim.PatchOperation{Op: "replace", Path: "active", Value: false})
 		if errors.Is(err, scim.ErrNotFound) {
 			return nil

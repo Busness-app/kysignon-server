@@ -52,85 +52,26 @@ func (e *Engine) SigningSecret(sys *store.PairedSystem) (string, error) {
 	return string(plain), nil
 }
 
-// QueueAccountSyncEvent queues one event per active paired system. Fanning out at queue
-// time is what keeps a system's delivery state, and its retries, its own.
-func (e *Engine) QueueAccountSyncEvent(userID, eventType string, userPayload any) error {
-	events, err := e.newAccountSyncEvents(userID, eventType, userPayload)
-	if err != nil {
-		return err
-	}
-	for i := range events {
-		if err := e.store.CreateAccountSyncEvent(&events[i]); err != nil {
-			return err
-		}
-	}
-	return nil
+// The store computes each connector's desired state from effective access inside the
+// mutation transaction; these wrappers exist so handlers keep one entry point.
+func (e *Engine) CreateUserAndQueueSyncEvents(user *store.User, audit *store.AuditEvent) error {
+	return e.store.CreateUserWithSyncEvents(user, audit)
 }
 
-// CreateUserAndQueueSyncEvents atomically records a new source-of-truth account and every
-// downstream delivery obligation.
-func (e *Engine) CreateUserAndQueueSyncEvents(user *store.User, userPayload any, audit *store.AuditEvent) error {
-	events, err := e.newAccountSyncEvents(user.ID, "user.created", userPayload)
-	if err != nil {
-		return err
-	}
-	return e.store.CreateUserWithSyncEvents(user, events, audit)
+func (e *Engine) UpdateUserAndQueueSyncEvents(user *store.User, revokeAccess bool, audit *store.AuditEvent) error {
+	return e.store.UpdateUserWithSyncEvents(user, revokeAccess, audit)
 }
 
-// UpdateUserAndQueueSyncEvents atomically records an account mutation and its outbox events.
-func (e *Engine) UpdateUserAndQueueSyncEvents(user *store.User, revokeAccess bool, userPayload any, audit *store.AuditEvent) error {
-	events, err := e.newAccountSyncEvents(user.ID, "user.updated", userPayload)
-	if err != nil {
-		return err
-	}
-	return e.store.UpdateUserWithSyncEvents(user, revokeAccess, events, audit)
+// ResetUserMFAAndRevoke atomically strips every factor, revokes everything those factors
+// were protecting, and notifies every connector holding the account.
+func (e *Engine) ResetUserMFAAndRevoke(userID string, audit *store.AuditEvent) error {
+	return e.store.ResetUserMFA(userID, audit)
 }
 
 // DeleteUserAndQueueSyncEvents removes a user and queues its deletion atomically, so a
 // downstream product cannot retain an account when the source deletion succeeds.
-// ResetUserMFAAndRevoke atomically strips every factor, revokes everything those factors
-// were protecting, and queues the downstream notification.
-func (e *Engine) ResetUserMFAAndRevoke(userID string, userPayload any, audit *store.AuditEvent) error {
-	events, err := e.newAccountSyncEvents(userID, "user.mfa_reset", userPayload)
-	if err != nil {
-		return err
-	}
-	return e.store.ResetUserMFA(userID, events, audit)
-}
-
-func (e *Engine) DeleteUserAndQueueSyncEvents(userID string, userPayload any, audit *store.AuditEvent) error {
-	events, err := e.newAccountSyncEvents(userID, "user.deleted", userPayload)
-	if err != nil {
-		return err
-	}
-	return e.store.DeleteUserWithSyncEvents(userID, events, audit)
-}
-
-func (e *Engine) newAccountSyncEvents(userID, eventType string, userPayload any) ([]store.AccountSyncEvent, error) {
-	systems, err := e.store.ListActivePairedSystems()
-	if err != nil {
-		return nil, err
-	}
-	if len(systems) == 0 {
-		return nil, nil
-	}
-
-	payloadBytes, err := json.Marshal(userPayload)
-	if err != nil {
-		return nil, err
-	}
-	events := make([]store.AccountSyncEvent, 0, len(systems))
-	for _, sys := range systems {
-		events = append(events, store.AccountSyncEvent{
-			ID:          uuid.New().String(),
-			UserID:      userID,
-			SystemID:    sys.ID,
-			EventType:   eventType,
-			PayloadJSON: string(payloadBytes),
-			Status:      "pending",
-		})
-	}
-	return events, nil
+func (e *Engine) DeleteUserAndQueueSyncEvents(userID string, audit *store.AuditEvent) error {
+	return e.store.DeleteUserWithSyncEvents(userID, audit)
 }
 
 // SCIM Schema URIs and standard types (RFC 7643 / RFC 7644)
@@ -160,6 +101,9 @@ type SCIMMeta struct {
 	Created      *time.Time `json:"created,omitempty"`
 	LastModified *time.Time `json:"lastModified,omitempty"`
 	Location     string     `json:"location,omitempty"`
+	// Version carries the resource's monotonic revision to suite receivers as a weak
+	// ETag, so a receiver can refuse a write older than one it already applied.
+	Version string `json:"version,omitempty"`
 }
 
 type SCIMUserResource struct {
@@ -453,13 +397,20 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 			continue
 		}
 
-		scimUser, _ := FormatUserAsSCIM(json.RawMessage(ev.PayloadJSON))
+		var scimUser *SCIMUserResource
+		if !strings.HasPrefix(ev.EventType, "group.") {
+			scimUser, _ = FormatUserAsSCIM(json.RawMessage(ev.PayloadJSON))
+		}
 		// Scoped to this event on purpose. Assigning to the function-scoped err let a
 		// marshal failure on one event survive into the next iteration and fail an event
 		// that was perfectly deliverable.
 		var payloadBytes []byte
 		var merr error
 		if scimUser != nil {
+			if scimUser.Meta == nil {
+				scimUser.Meta = &SCIMMeta{ResourceType: "User"}
+			}
+			scimUser.Meta.Version = fmt.Sprintf(`W/"%d"`, ev.Revision)
 			payloadBytes, merr = json.Marshal(scimUser)
 		} else {
 			payloadBytes = []byte(ev.PayloadJSON)
@@ -538,6 +489,12 @@ func resolveSCIMURL(sys *store.PairedSystem, eventType, userID string) (method s
 }
 
 func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, eventID, eventType, userID string, payload []byte) error {
+	if strings.HasPrefix(eventType, "group.") {
+		if sys.SystemType != "scim" || !sys.GroupsEnabled {
+			return errors.New("group delivery is not enabled for this connector")
+		}
+		return e.deliverSCIMGroup(ctx, sys, secret, eventType, userID)
+	}
 	if sys.SystemType == "scim" {
 		return e.deliverSCIM(ctx, sys, secret, eventType, userID, payload)
 	}
@@ -580,9 +537,13 @@ func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, e
 	}
 	defer resp.Body.Close()
 
-	// Preserve suite webhook acknowledgments, including already-gone deletion.
+	// Preserve suite webhook acknowledgments: already-gone deletion or deactivation,
+	// and a create the receiver already holds.
+	var body struct{ Active *bool }
+	_ = json.Unmarshal(payload, &body)
+	inactive := body.Active != nil && !*body.Active
 	if (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusNoContent) ||
-		(eventType == "user.deleted" && resp.StatusCode == http.StatusNotFound) ||
+		((eventType == "user.deleted" || (eventType == "user.updated" && inactive)) && resp.StatusCode == http.StatusNotFound) ||
 		(eventType == "user.created" && resp.StatusCode == http.StatusConflict) {
 		return nil
 	}
@@ -590,49 +551,27 @@ func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, e
 	return fmt.Errorf("system %s returned status %d", sys.Name, resp.StatusCode)
 }
 
-// ResyncAllAccounts pushes every current account to one paired system.
+// ResyncAllAccounts re-sends every in-scope account and group to one paired system.
 func (e *Engine) ResyncAllAccounts(systemID string) error {
-	sys, err := e.store.GetPairedSystemByID(systemID)
-	if err != nil {
-		return err
-	}
-	if sys == nil {
-		return errors.New("paired system not found")
-	}
-
-	users, err := e.store.ListUsers()
-	if err != nil {
-		return err
-	}
-	for _, u := range users {
-		scimRes := UserToSCIMResource(&u)
-		payload, err := json.Marshal(scimRes)
-		if err != nil {
-			return err
-		}
-		if err := e.store.CreateAccountSyncEvent(&store.AccountSyncEvent{
-			ID:          uuid.New().String(),
-			UserID:      u.ID,
-			SystemID:    sys.ID,
-			EventType:   "user.created",
-			PayloadJSON: string(payload),
-			Status:      "pending",
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return e.store.ResyncSystem(systemID)
 }
 
-// StartWorker runs the background sync dispatcher.
+// StartWorker runs the background sync dispatcher. The slower reconcile tick catches
+// effective-access changes that arrived through cascades rather than a mutation path.
 func (e *Engine) StartWorker(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
+	reconcile := time.NewTicker(time.Minute)
+	defer reconcile.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-reconcile.C:
+			if err := e.store.ReconcileProvisioning(); err != nil && ctx.Err() == nil {
+				log.Printf("provisioning reconcile failed: %v", err)
+			}
 		case <-ticker.C:
 			if err := e.DispatchPendingEvents(ctx); err != nil && ctx.Err() == nil {
 				// Delivery failures are recorded per event; this is the local persistence

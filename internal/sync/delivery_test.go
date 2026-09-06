@@ -57,7 +57,7 @@ func TestTimedOutWriteBlocksLaterDelivery(t *testing.T) {
 		t.Fatal("later write bypassed uncertain request", attempts, calls.Load(), err)
 	}
 	// Read-back of suite protocols is explicitly unavailable, never an unblock.
-	result, err := e.ReadBackSyncUser(context.Background(), target, u.ID)
+	result, err := e.ReadBackSyncResource(context.Background(), target, "user.created", u.ID)
 	if err != nil || result["state"] != "unsupported" {
 		t.Fatal(result, err)
 	}

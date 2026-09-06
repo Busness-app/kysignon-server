@@ -64,7 +64,10 @@ func TestSyncDeliveryOrderingAndCrashRecovery(t *testing.T) {
 		t.Fatalf("expired in-flight attempt reclaimed: %+v", got)
 	}
 	// Local deletion removes the old event but not its in-flight resource fence.
-	if err := s.DeleteUserWithSyncEvents(u.ID, []AccountSyncEvent{{ID: "delete", UserID: u.ID, SystemID: "target", EventType: "user.deleted", PayloadJSON: `{}`, Status: "pending"}}, nil); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO sync_resource_state(system_id,resource_id,active,provisioned,revision) VALUES('target',?,1,1,1)`, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUserWithSyncEvents(u.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := claim(); len(got) != 0 {
@@ -74,13 +77,13 @@ func TestSyncDeliveryOrderingAndCrashRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := claim()
-	if len(got) != 1 || got[0].ID != "delete" {
+	if len(got) != 1 || got[0].EventType != "user.deleted" || got[0].Revision != 2 {
 		t.Fatal("delete not released", got)
 	}
 	if ok, err := s.BeginSyncDelivery(got[0], -time.Second); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
-	if _, err := s.StartSCIMCreate("target", u.ID); err != nil {
+	if _, err := s.StartSCIMCreate("target", "user", u.ID); err != nil {
 		t.Fatal(err)
 	}
 	// Failed audit rolls recovery back along with fence and create-marker removal.

@@ -368,7 +368,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateAuthorizationInteractions(); err != nil {
 		return err
 	}
-	return s.migrateEnrollmentPolicy()
+	if err := s.migrateEnrollmentPolicy(); err != nil {
+		return err
+	}
+	return s.migrateProvisioning()
 }
 
 // migrateSyncEventLease adds the delivery lease column to pre-existing databases.
@@ -595,7 +598,7 @@ func (s *Store) CreateUser(u *User) error {
 }
 
 // CreateUserWithSyncEvents is the transactional outbox path for directory creation.
-func (s *Store) CreateUserWithSyncEvents(u *User, events []AccountSyncEvent, audit *AuditEvent) error {
+func (s *Store) CreateUserWithSyncEvents(u *User, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -606,7 +609,7 @@ func (s *Store) CreateUserWithSyncEvents(u *User, events []AccountSyncEvent, aud
 	if _, err := tx.Exec(`INSERT INTO users (id, username, display_name, email, password_hash, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, u.ID, u.Username, u.DisplayName, u.Email, u.PasswordHash, u.Role, u.Status, u.CreatedAt, u.UpdatedAt); err != nil {
 		return err
 	}
-	if err := insertSyncEvents(tx, events, now); err != nil {
+	if err := reconcileProvisioningTx(tx, now); err != nil {
 		return err
 	}
 	if err := recordAuditTx(tx, audit); err != nil {
@@ -673,7 +676,7 @@ func (s *Store) UpdateUser(u *User) error {
 
 // UpdateUserWithSyncEvents preserves the active-admin invariant and writes its outbox event
 // in the same transaction as the account change.
-func (s *Store) UpdateUserWithSyncEvents(u *User, revokeAccess bool, events []AccountSyncEvent, audit *AuditEvent) error {
+func (s *Store) UpdateUserWithSyncEvents(u *User, revokeAccess bool, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -705,7 +708,14 @@ func (s *Store) UpdateUserWithSyncEvents(u *User, revokeAccess bool, events []Ac
 			return err
 		}
 	}
-	if err := insertSyncEvents(tx, events, now); err != nil {
+	stored, err := scanUser(tx.QueryRow(`SELECT `+userColumns+` FROM users WHERE id=?`, u.ID))
+	if err != nil || stored == nil {
+		return err
+	}
+	if err := queueUserUpdateTx(tx, stored, now); err != nil {
+		return err
+	}
+	if err := reconcileProvisioningTx(tx, now); err != nil {
 		return err
 	}
 	if err := recordAuditTx(tx, audit); err != nil {
@@ -738,19 +748,22 @@ func (s *Store) DeleteUser(userID string) error {
 }
 
 // DeleteUserWithSyncEvents atomically removes a user and queues its deletion for every
-// active paired system. Older queued user events are discarded so a downstream system
-// cannot receive stale updates after the deletion.
-func (s *Store) DeleteUserWithSyncEvents(userID string, events []AccountSyncEvent, audit *AuditEvent) error {
+// connector that holds the account. Older queued user events are discarded so a
+// downstream system cannot receive stale updates after the deletion.
+func (s *Store) DeleteUserWithSyncEvents(userID string, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var role, status string
-	if err := tx.QueryRow(`SELECT role, status FROM users WHERE id = ?`, userID).Scan(&role, &status); err != nil {
+	u, err := scanUser(tx.QueryRow(`SELECT `+userColumns+` FROM users WHERE id=?`, userID))
+	if err != nil {
 		return err
 	}
-	if role == "admin" && status == "active" {
+	if u == nil {
+		return sql.ErrNoRows
+	}
+	if u.Role == "admin" && u.Status == "active" {
 		var admins int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active'`).Scan(&admins); err != nil {
 			return err
@@ -760,40 +773,50 @@ func (s *Store) DeleteUserWithSyncEvents(userID string, events []AccountSyncEven
 		}
 	}
 
-	if _, err := tx.Exec(`DELETE FROM account_sync_events WHERE user_id = ?`, userID); err != nil {
-		return err
-	}
-	result, err := tx.Exec(`DELETE FROM users WHERE id = ?`, userID)
+	rows, err := tx.Query(`SELECT st.system_id,st.revision+1 FROM sync_resource_state st JOIN paired_systems s ON s.id=st.system_id
+ WHERE st.resource_id=? AND st.kind='user' AND s.status<>'disabled' ORDER BY st.system_id`, userID)
 	if err != nil {
 		return err
 	}
-	if deleted, err := result.RowsAffected(); err != nil {
-		return err
-	} else if deleted != 1 {
-		return sql.ErrNoRows
+	targets := map[string]int{}
+	for rows.Next() {
+		var sys string
+		var rev int
+		if err := rows.Scan(&sys, &rev); err != nil {
+			rows.Close()
+			return err
+		}
+		targets[sys] = rev
 	}
-
-	if err := insertSyncEvents(tx, events, time.Now().UTC()); err != nil {
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM account_sync_events WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM sync_resource_state WHERE resource_id = ? AND kind='user'`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM users WHERE id = ?`, userID); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	payload, err := scimUserPayload(u, false)
+	if err != nil {
+		return err
+	}
+	for sys, revision := range targets {
+		if err := insertResourceEventTx(tx, sys, userID, "user.deleted", payload, revision, now); err != nil {
+			return err
+		}
+	}
+	if err := reconcileProvisioningTx(tx, now); err != nil {
 		return err
 	}
 	if err := recordAuditTx(tx, audit); err != nil {
 		return err
 	}
 	return tx.Commit()
-}
-
-func insertSyncEvents(tx *sql.Tx, events []AccountSyncEvent, now time.Time) error {
-	stmt, err := tx.Prepare(`INSERT INTO account_sync_events (id, user_id, system_id, event_type, payload_json, attempts, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for _, event := range events {
-		if _, err := stmt.Exec(event.ID, event.UserID, event.SystemID, event.EventType, event.PayloadJSON, event.Attempts, event.Status, now, now); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Session Management
@@ -948,9 +971,9 @@ func (s *Store) CreatePairedSystem(ps *PairedSystem) error {
 }
 
 func (s *Store) GetPairedSystemByID(id string) (*PairedSystem, error) {
-	query := `SELECT id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE id = ?`
+	query := `SELECT id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at, groups_enabled FROM paired_systems WHERE id = ?`
 	ps := &PairedSystem{}
-	err := s.db.QueryRow(query, id).Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.Description, &ps.IconURL, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt)
+	err := s.db.QueryRow(query, id).Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.Description, &ps.IconURL, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt, &ps.GroupsEnabled)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -958,7 +981,7 @@ func (s *Store) GetPairedSystemByID(id string) (*PairedSystem, error) {
 }
 
 func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
-	query := `SELECT id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems ORDER BY created_at ASC`
+	query := `SELECT id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at, groups_enabled FROM paired_systems ORDER BY created_at ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -968,7 +991,7 @@ func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
 	var systems []PairedSystem
 	for rows.Next() {
 		var ps PairedSystem
-		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.Description, &ps.IconURL, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.Description, &ps.IconURL, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt, &ps.GroupsEnabled); err != nil {
 			return nil, err
 		}
 		systems = append(systems, ps)
@@ -977,7 +1000,7 @@ func (s *Store) ListAllPairedSystems() ([]PairedSystem, error) {
 }
 
 func (s *Store) ListActivePairedSystems() ([]PairedSystem, error) {
-	query := `SELECT id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at FROM paired_systems WHERE status != 'disabled' ORDER BY created_at ASC`
+	query := `SELECT id, name, system_type, description, icon_url, callback_url, hmac_secret_encrypted, status, last_synced_at, created_at, groups_enabled FROM paired_systems WHERE status != 'disabled' ORDER BY created_at ASC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -987,7 +1010,7 @@ func (s *Store) ListActivePairedSystems() ([]PairedSystem, error) {
 	var systems []PairedSystem
 	for rows.Next() {
 		var ps PairedSystem
-		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.Description, &ps.IconURL, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt); err != nil {
+		if err := rows.Scan(&ps.ID, &ps.Name, &ps.SystemType, &ps.Description, &ps.IconURL, &ps.CallbackURL, &ps.HMACSecretEncrypted, &ps.Status, &ps.LastSyncedAt, &ps.CreatedAt, &ps.GroupsEnabled); err != nil {
 			return nil, err
 		}
 		systems = append(systems, ps)
@@ -1028,15 +1051,15 @@ func (s *Store) DeletePairedSystem(systemID string, audit *AuditEvent) (bool, er
 
 // Account Sync Events
 func (s *Store) CreateAccountSyncEvent(event *AccountSyncEvent) error {
-	query := `INSERT INTO account_sync_events (id, user_id, system_id, event_type, payload_json, attempts, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO account_sync_events (id, user_id, system_id, event_type, payload_json, attempts, status, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	now := time.Now().UTC()
 	event.CreatedAt = now
 	event.UpdatedAt = now
-	_, err := s.db.Exec(query, event.ID, event.UserID, event.SystemID, event.EventType, event.PayloadJSON, event.Attempts, event.Status, event.CreatedAt, event.UpdatedAt)
+	_, err := s.db.Exec(query, event.ID, event.UserID, event.SystemID, event.EventType, event.PayloadJSON, event.Attempts, event.Status, event.CreatedAt, event.UpdatedAt, event.Revision)
 	return err
 }
 
-const syncEventColumns = `id, user_id, system_id, event_type, payload_json, attempts, status, last_error, next_attempt_at, created_at, updated_at, claim_token`
+const syncEventColumns = `id, user_id, system_id, event_type, payload_json, attempts, status, last_error, next_attempt_at, created_at, updated_at, claim_token, revision`
 
 func scanSyncEvents(rows *sql.Rows) ([]AccountSyncEvent, error) {
 	defer rows.Close()
@@ -1046,7 +1069,7 @@ func scanSyncEvents(rows *sql.Rows) ([]AccountSyncEvent, error) {
 		var lastErr sql.NullString
 		var next sql.NullTime
 		if err := rows.Scan(&ev.ID, &ev.UserID, &ev.SystemID, &ev.EventType, &ev.PayloadJSON,
-			&ev.Attempts, &ev.Status, &lastErr, &next, &ev.CreatedAt, &ev.UpdatedAt, &ev.ClaimToken); err != nil {
+			&ev.Attempts, &ev.Status, &lastErr, &next, &ev.CreatedAt, &ev.UpdatedAt, &ev.ClaimToken, &ev.Revision); err != nil {
 			return nil, err
 		}
 		if lastErr.Valid {
@@ -1923,6 +1946,9 @@ func (s *Store) UpdateOAuthClientWithAudit(c *OAuthClient, revokeTokens bool, au
 			return err
 		}
 	}
+	if err := reconcileProvisioningTx(tx, time.Now().UTC()); err != nil {
+		return err
+	}
 	if err := recordAuditTx(tx, audit); err != nil {
 		return err
 	}
@@ -1950,6 +1976,9 @@ func (s *Store) DeleteOAuthClient(id string, audit *AuditEvent) (bool, error) {
 		return false, nil
 	}
 	if err := revokeClientTokensTx(tx, id, time.Now().UTC()); err != nil {
+		return false, err
+	}
+	if err := reconcileProvisioningTx(tx, time.Now().UTC()); err != nil {
 		return false, err
 	}
 	if err := recordAuditTx(tx, audit); err != nil {
@@ -2359,7 +2388,7 @@ func (s *Store) SnapshotTo(destPath string) error {
 // backing, in one transaction. A partial reset that reports success is the worst outcome
 // here: the admin believes the account is locked down while the attacker is still holding a
 // live session.
-func (s *Store) ResetUserMFA(userID string, events []AccountSyncEvent, audit *AuditEvent) error {
+func (s *Store) ResetUserMFA(userID string, audit *AuditEvent) error {
 	now := time.Now().UTC()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -2385,8 +2414,12 @@ func (s *Store) ResetUserMFA(userID string, events []AccountSyncEvent, audit *Au
 	if err := revokeUserAccessTx(tx, userID, now); err != nil {
 		return err
 	}
-	if err := insertSyncEvents(tx, events, now); err != nil {
+	if u, err := scanUser(tx.QueryRow(`SELECT `+userColumns+` FROM users WHERE id=?`, userID)); err != nil {
 		return err
+	} else if u != nil {
+		if err := queueUserNotificationTx(tx, u, "user.mfa_reset", now); err != nil {
+			return err
+		}
 	}
 	if err := recordAuditTx(tx, audit); err != nil {
 		return err

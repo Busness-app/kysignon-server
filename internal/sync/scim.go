@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,71 +59,101 @@ func deliveryError(err error) string {
 
 var errCreateUncertain = errors.New("SCIM create outcome unresolved; reconcile externalId at the target before retrying")
 
+func (e *Engine) findSCIMUser(ctx context.Context, c *scim.Client, localID string) (scim.User, error) {
+	id, err := e.findSCIMResource(ctx, c, "Users", localID)
+	return scim.User{ID: id, ExternalID: localID}, err
+}
+
 // The released primitive's FindUser treats an empty page as not-found regardless
 // of totalResults. Own the bounded collection read until the library supports
-// strict pagination; all resource writes still use the shared client.
-func (e *Engine) findSCIMUser(ctx context.Context, c *scim.Client, localID string) (scim.User, error) {
+// strict pagination; all user writes still use the shared client. The same read
+// identifies a remote Group by externalId.
+func (e *Engine) findSCIMResource(ctx context.Context, c *scim.Client, collection, localID string) (string, error) {
 	if err := validateSCIMConfig(c.BaseURL, c.Token); err != nil {
-		return scim.User{}, err
+		return "", err
 	}
 	u, _ := url.Parse(c.BaseURL)
-	u = u.JoinPath("Users")
+	u = u.JoinPath(collection)
 	quoted := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(localID)
 	u.RawQuery = url.Values{"filter": {`externalId eq "` + quoted + `"`}, "startIndex": {"1"}, "count": {"2"}}.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	status, raw, err := e.scimRequest(ctx, c, http.MethodGet, u.String(), nil)
+	// A missing collection is a misconfigured target, never an empty directory.
+	if status == http.StatusNotFound {
+		return "", scim.ErrMalformedResponse
+	}
 	if err != nil {
-		return scim.User{}, err
+		return "", err
+	}
+	if status != http.StatusOK {
+		return "", scim.ErrMalformedResponse
+	}
+	var page struct {
+		Total     *int `json:"totalResults"`
+		Start     *int `json:"startIndex"`
+		Resources []struct {
+			ID         string `json:"id"`
+			ExternalID string `json:"externalId"`
+		} `json:"Resources"`
+	}
+	if json.Unmarshal(raw, &page) != nil || page.Total == nil || *page.Total < 0 || (page.Start != nil && *page.Start != 1) {
+		return "", scim.ErrMalformedResponse
+	}
+	if *page.Total > 1 || len(page.Resources) > 1 {
+		return "", scim.ErrAmbiguous
+	}
+	// A unique filtered result fits on the first page. Partial/contradictory pages
+	// must fail closed rather than create a duplicate or select an unrelated resource.
+	if *page.Total != len(page.Resources) {
+		return "", scim.ErrMalformedResponse
+	}
+	if *page.Total == 0 {
+		return "", scim.ErrNotFound
+	}
+	found := page.Resources[0]
+	if found.ID == "" || found.ID == "." || found.ID == ".." || found.ExternalID != localID {
+		return "", scim.ErrMalformedResponse
+	}
+	return found.ID, nil
+}
+
+// scimRequest is the bounded, redirect-refusing request used for collection reads and
+// Group writes. Non-2xx responses come back as *scim.Error carrying Retry-After.
+func (e *Engine) scimRequest(ctx context.Context, c *scim.Client, method, target string, body []byte) (int, []byte, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, reader)
+	if err != nil {
+		return 0, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/scim+json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/scim+json")
+	}
 	client := *e.httpClient
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }
 	resp, err := client.Do(req)
 	if err != nil {
-		return scim.User{}, err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if err != nil {
-		return scim.User{}, scim.ErrMalformedResponse
+	if err != nil || len(raw) > 1<<20 {
+		return resp.StatusCode, nil, scim.ErrMalformedResponse
 	}
-	if resp.StatusCode == http.StatusNotFound {
-		return scim.User{}, scim.ErrMalformedResponse
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return resp.StatusCode, raw, nil
 	}
-	if resp.StatusCode != http.StatusOK {
-		d := time.Duration(0)
-		h := resp.Header.Get("Retry-After")
-		if seconds, err := strconv.ParseInt(h, 10, 64); err == nil {
-			d = time.Duration(max(0, min(seconds, 3600))) * time.Second
-		} else if t, err := http.ParseTime(h); err == nil {
-			d = max(0, min(time.Until(t), time.Hour))
-		}
-		return scim.User{}, &scim.Error{Status: resp.StatusCode, RetryAfter: d}
+	d := time.Duration(0)
+	h := resp.Header.Get("Retry-After")
+	if seconds, err := strconv.ParseInt(h, 10, 64); err == nil {
+		d = time.Duration(max(0, min(seconds, 3600))) * time.Second
+	} else if t, err := http.ParseTime(h); err == nil {
+		d = max(0, min(time.Until(t), time.Hour))
 	}
-	var page struct {
-		Total     *int        `json:"totalResults"`
-		Start     *int        `json:"startIndex"`
-		Resources []scim.User `json:"Resources"`
-	}
-	if len(raw) > 1<<20 || json.Unmarshal(raw, &page) != nil || page.Total == nil || *page.Total < 0 || (page.Start != nil && *page.Start != 1) {
-		return scim.User{}, scim.ErrMalformedResponse
-	}
-	if *page.Total > 1 || len(page.Resources) > 1 {
-		return scim.User{}, scim.ErrAmbiguous
-	}
-	// A unique filtered result fits on the first page. Partial/contradictory pages
-	// must fail closed rather than create a duplicate or select an unrelated user.
-	if *page.Total != len(page.Resources) {
-		return scim.User{}, scim.ErrMalformedResponse
-	}
-	if *page.Total == 0 {
-		return scim.User{}, scim.ErrNotFound
-	}
-	found := page.Resources[0]
-	if found.ID == "" || found.ID == "." || found.ID == ".." || found.ExternalID != localID {
-		return scim.User{}, scim.ErrMalformedResponse
-	}
-	return found, nil
+	return resp.StatusCode, nil, &scim.Error{Status: resp.StatusCode, RetryAfter: d}
 }
 
 func (e *Engine) deliverSCIM(ctx context.Context, sys *store.PairedSystem, secret, eventType, localID string, payload []byte) error {
@@ -150,8 +181,14 @@ func (e *Engine) deliverSCIM(ctx context.Context, sys *store.PairedSystem, secre
 		return err
 	}
 	var desired scim.User
-	if eventType != "user.deleted" {
-		if err = json.Unmarshal(payload, &desired); err != nil || desired.UserName == "" {
+	if err = json.Unmarshal(payload, &desired); err != nil {
+		return scim.ErrMalformedResponse
+	}
+	// Scope loss and local disablement both arrive as an inactive update. Neither may
+	// create an account, so they follow the deletion path: deactivate when present.
+	deactivate := eventType == "user.deleted" || !desired.Active
+	if !deactivate {
+		if desired.UserName == "" {
 			return scim.ErrMalformedResponse
 		}
 		desired.ID = ""
@@ -171,10 +208,10 @@ func (e *Engine) deliverSCIM(ctx context.Context, sys *store.PairedSystem, secre
 			if started {
 				return errCreateUncertain
 			}
-			if eventType == "user.deleted" {
+			if deactivate {
 				return nil
 			}
-			won, err := e.store.StartSCIMCreate(sys.ID, localID)
+			won, err := e.store.StartSCIMCreate(sys.ID, "user", localID)
 			if err != nil {
 				return err
 			}
@@ -185,7 +222,7 @@ func (e *Engine) deliverSCIM(ctx context.Context, sys *store.PairedSystem, secre
 			if err != nil {
 				var rejection *scim.Error
 				if errors.As(err, &rejection) && rejection.Status >= 400 && rejection.Status < 500 && rejection.Status != http.StatusRequestTimeout {
-					if clearErr := e.store.RejectSCIMCreate(sys.ID, localID); clearErr != nil {
+					if clearErr := e.store.RejectSCIMCreate(sys.ID, "user", localID); clearErr != nil {
 						return clearErr
 					}
 				}
@@ -214,7 +251,7 @@ func (e *Engine) deliverSCIM(ctx context.Context, sys *store.PairedSystem, secre
 	// IDs established by this call's externalId lookup have already been checked.
 	if verifyMapping {
 		current, err := c.GetUser(ctx, remoteID)
-		if eventType == "user.deleted" && errors.Is(err, scim.ErrNotFound) {
+		if deactivate && errors.Is(err, scim.ErrNotFound) {
 			return nil
 		}
 		if err != nil {
@@ -224,7 +261,7 @@ func (e *Engine) deliverSCIM(ctx context.Context, sys *store.PairedSystem, secre
 			return scim.ErrMalformedResponse
 		}
 	}
-	if eventType == "user.deleted" {
+	if deactivate {
 		// Deactivate rather than erase the downstream user's data.
 		_, err = c.PatchUser(ctx, remoteID, scim.PatchOperation{Op: "replace", Path: "active", Value: false})
 		if errors.Is(err, scim.ErrNotFound) {
@@ -253,17 +290,21 @@ func (e *Engine) TestSystem(ctx context.Context, sys *store.PairedSystem) error 
 	return err
 }
 
-// ReviewSystem permits an explicit choice for legacy custom connectors, or token
-// replacement for SCIM. Established suite protocols cannot be switched accidentally.
-func (e *Engine) ReviewSystem(sys *store.PairedSystem, kind, token string, audit *store.AuditEvent) error {
+// ReviewSystem permits an explicit choice for legacy custom connectors, token
+// replacement for SCIM, and the SCIM group-delivery flag. An established SCIM connector
+// keeps its token when none is supplied. Suite protocols cannot be switched or deliver groups.
+func (e *Engine) ReviewSystem(sys *store.PairedSystem, kind, token string, groups bool, audit *store.AuditEvent) error {
 	if kind != "scim" && kind != "suite_webhook" {
 		return errors.New("choose scim or suite_webhook")
 	}
 	if supportedSystemType(sys.SystemType) && sys.SystemType != kind {
 		return errors.New("an established connector cannot change protocol")
 	}
+	if groups && kind != "scim" {
+		return errors.New("group delivery requires a generic SCIM connector")
+	}
 	encrypted := sys.HMACSecretEncrypted
-	if kind == "scim" {
+	if kind == "scim" && (token != "" || sys.SystemType != "scim") {
 		if err := validateSCIMConfig(sys.CallbackURL, token); err != nil {
 			return err
 		}
@@ -272,8 +313,8 @@ func (e *Engine) ReviewSystem(sys *store.PairedSystem, kind, token string, audit
 		if err != nil {
 			return err
 		}
-	} else if token != "" {
+	} else if kind != "scim" && token != "" {
 		return errors.New("suite webhook retains its existing signing secret")
 	}
-	return e.store.ConfigureSystem(sys.ID, sys.SystemType, kind, encrypted, audit)
+	return e.store.ConfigureSystem(sys.ID, sys.SystemType, kind, encrypted, groups, audit)
 }

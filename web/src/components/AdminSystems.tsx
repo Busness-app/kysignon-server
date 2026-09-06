@@ -66,6 +66,7 @@ export const AdminSystems: React.FC = () => {
   const [iconUrl, setIconUrl] = useState('');
   const [callbackUrl, setCallbackUrl] = useState('');
   const [bearerToken, setBearerToken] = useState('');
+  const [groups, setGroups] = useState(false);
   const [editing, setEditing] = useState<PairedSystem | null>(null);
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
@@ -109,7 +110,7 @@ export const AdminSystems: React.FC = () => {
       if (editing) {
         const path = `/api/admin/systems/${editing.id}/connection`;
         const grant = await requestGrant(`Update the connection for '${editing.name}'?`, `PUT ${path}`);
-        await apiRequest(path, { method: 'PUT', stepUpToken: grant, body: JSON.stringify({ systemType, bearerToken }) });
+        await apiRequest(path, { method: 'PUT', stepUpToken: grant, body: JSON.stringify({ systemType, bearerToken, groups }) });
         handleCloseModal();
         return;
       }
@@ -152,6 +153,7 @@ export const AdminSystems: React.FC = () => {
     setShowPairModal(false);
     setEditing(null);
     setBearerToken('');
+    setGroups(false);
     setCreatedToken(null);
     fetchSystems();
   };
@@ -192,7 +194,7 @@ export const AdminSystems: React.FC = () => {
   const openConnection = (s: PairedSystem) => {
     setEditing(s); setSystemType(s.systemType === 'scim' ? 'scim' : '');
     setTargetName(s.name); setCallbackUrl(s.callbackUrl); setDescription(s.description ?? ''); setIconUrl(s.iconUrl ?? '');
-    setBearerToken(''); setCreatedToken(null); setFormError(null); setShowPairModal(true);
+    setBearerToken(''); setGroups(s.groupsEnabled); setCreatedToken(null); setFormError(null); setShowPairModal(true);
   };
   const testConnection = async (s: PairedSystem) => {
     try {
@@ -287,6 +289,7 @@ export const AdminSystems: React.FC = () => {
                   </td>
                   <td className="font-mono text-muted text-sm">{s.callbackUrl}</td>
                   <td>
+                    {s.groupsEnabled && <span className="status-badge active">Groups</span>}
                     {needsReview(s) && <span className="status-badge warn">Protocol review required — delivery paused</span>}
                     {!needsReview(s) && s.status === 'active' && (
                       <span className="status-badge active">
@@ -309,7 +312,7 @@ export const AdminSystems: React.FC = () => {
                   </td>
                   <td className="text-right">
                     <div className="action-buttons-wrap">
-                      {(needsReview(s) || s.systemType === 'scim') && <button className="secondary-btn sm" onClick={() => openConnection(s)}>{needsReview(s) ? 'Review connection' : 'Replace token'}</button>}
+                      {(needsReview(s) || s.systemType === 'scim') && <button className="secondary-btn sm" onClick={() => openConnection(s)}>{needsReview(s) ? 'Review connection' : 'Connection settings'}</button>}
                       <button className="secondary-btn sm" onClick={() => setDeliverySystem(s)}>Deliveries</button>
                       {s.systemType === 'scim' && <button className="secondary-btn sm" onClick={() => testConnection(s)}>Test connection</button>}
                       <button
@@ -456,8 +459,12 @@ export const AdminSystems: React.FC = () => {
 
                 {systemType === 'scim' && <div className="form-group">
                   <label className="form-label" htmlFor="scim-bearer">Bearer token issued by the target service</label>
-                  <input id="scim-bearer" className="form-input" type="password" autoComplete="new-password" value={bearerToken} onChange={(e) => setBearerToken(e.target.value)} required maxLength={8192} />
-                  <span className="muted">Stored encrypted. The saved token is never displayed.</span>
+                  <input id="scim-bearer" className="form-input" type="password" autoComplete="new-password" value={bearerToken} onChange={(e) => setBearerToken(e.target.value)} required={editing?.systemType !== 'scim'} maxLength={8192} />
+                  <span className="muted">{editing?.systemType === 'scim' ? 'Leave blank to keep the current token.' : 'Stored encrypted. The saved token is never displayed.'}</span>
+                </div>}
+                {systemType === 'scim' && <div className="form-group">
+                  <label><input type="checkbox" checked={groups} onChange={(e) => setGroups(e.target.checked)} /> Deliver SCIM Groups: assigned groups and their in-scope members</label>
+                  <span className="muted">Only for targets that support the Groups resource. Turning this off leaves remote groups in place.</span>
                 </div>}
                 <div className="alert-box info sm" style={{ marginBottom: '1.25rem' }}>
                   <Key size={14} />

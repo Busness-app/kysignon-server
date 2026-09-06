@@ -260,6 +260,7 @@ export function parsePairedSystems(value: unknown): PairedSystem[] {
       status: oneOf(s, 'status', ['active', 'failing', 'disabled'] as const),
       lastSyncedAt: optStr(s, 'lastSyncedAt'),
       createdAt: optStr(s, 'createdAt') ?? '',
+      groupsEnabled: bool(s, 'groupsEnabled'),
     };
   });
 }
@@ -511,7 +512,7 @@ export function parseAppAccessPage(value: unknown): AppAccessPage {
   return { id: str(u,'id'), username: str(u,'username'), displayName: str(u,'displayName'), status: oneOf(u,'status',['active','disabled']),
    direct: requiredBool(u,'direct'), groupAssigned: requiredBool(u,'groupAssigned'), effective: requiredBool(u,'effective'), preview: requiredBool(u,'preview'),
    reason: oneOf(u,'reason',['user_disabled','app_disabled','client_disabled','all_active_users','direct_assignment','group_assignment','not_assigned']) };
- }), app: parseAppRecord(o.app), losingAccess: directoryCount(o,'losingAccess') };
+ }), app: parseAppRecord(o.app), losingAccess: directoryCount(o,'losingAccess'), gainingAccess: directoryCount(o,'gainingAccess') };
 }
 export function parseAppAccessGroups(value: unknown): DirectoryPage<AppAccessGroup> {
  return directoryPage(value,'groups',item => { const g=obj(item,'an assigned group'); return {id:str(g,'id'),name:str(g,'name'),assigned:requiredBool(g,'assigned')}; });

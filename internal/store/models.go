@@ -48,15 +48,19 @@ type PairedSystem struct {
 	Status              string     `json:"status"` // "active", "failing", "disabled"
 	LastSyncedAt        *time.Time `json:"lastSyncedAt,omitempty"`
 	CreatedAt           time.Time  `json:"createdAt"`
+	// GroupsEnabled delivers SCIM Groups; only generic SCIM connectors may opt in.
+	GroupsEnabled bool `json:"groupsEnabled"`
 }
 
 type AccountSyncEvent struct {
-	ClaimToken  string     `json:"-"`
-	ID          string     `json:"id"`
-	UserID      string     `json:"userId"`
-	SystemID    string     `json:"systemId"`
-	EventType   string     `json:"eventType"` // "created", "updated", "status_changed", "mfa_reset"
-	PayloadJSON string     `json:"payloadJson"`
+	ClaimToken  string `json:"-"`
+	ID          string `json:"id"`
+	UserID      string `json:"userId"`
+	SystemID    string `json:"systemId"`
+	EventType   string `json:"eventType"` // user.created|updated|deleted|mfa_reset, group.updated|deleted
+	PayloadJSON string `json:"payloadJson"`
+	// Revision is the resource's monotonic desired-state counter when this event was queued.
+	Revision    int        `json:"revision"`
 	Attempts    int        `json:"attempts"`
 	Status      string     `json:"status"` // "pending", "delivered", "failed"
 	LastError   string     `json:"lastError,omitempty"`

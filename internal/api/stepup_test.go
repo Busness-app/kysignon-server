@@ -261,9 +261,7 @@ func TestResetUserMFAIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.srv.syncEngine.ResetUserMFAAndRevoke(f.user.ID, map[string]any{
-		"id": f.user.ID, "username": f.user.Username,
-	}, nil); err != nil {
+	if err := f.srv.syncEngine.ResetUserMFAAndRevoke(f.user.ID, nil); err != nil {
 		t.Fatalf("ResetUserMFAAndRevoke: %v", err)
 	}
 

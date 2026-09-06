@@ -69,6 +69,9 @@ func (s *Store) FinishSyncDelivery(ev AccountSyncEvent, status, message string, 
 		return err
 	}
 	if status == "delivered" {
+		if err = provisionedTx(tx, ev, time.Now().UTC()); err != nil {
+			return err
+		}
 		_, err = tx.Exec(`UPDATE paired_systems SET status='active',last_synced_at=? WHERE id=? AND status<>'disabled'`, time.Now().UTC(), ev.SystemID)
 	} else if message != "" {
 		_, err = tx.Exec(`UPDATE paired_systems SET status='failing' WHERE id=? AND status<>'disabled'`, ev.SystemID)

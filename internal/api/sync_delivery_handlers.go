@@ -34,7 +34,7 @@ func (h *AdminHandler) ReadBackSyncDelivery(w http.ResponseWriter, r *http.Reque
 		if a.Token != r.PathValue("token") {
 			continue
 		}
-		result, err := h.syncEngine.ReadBackSyncUser(r.Context(), sys, a.UserID)
+		result, err := h.syncEngine.ReadBackSyncResource(r.Context(), sys, a.EventType, a.UserID)
 		admin := GetUserFromContext(r.Context())
 		outcome := "success"
 		if err != nil {
@@ -94,7 +94,7 @@ func (h *AdminHandler) ResumeSyncDelivery(w http.ResponseWriter, r *http.Request
 			if a.Token != r.PathValue("token") {
 				continue
 			}
-			result, err := h.syncEngine.ReadBackSyncUser(r.Context(), sys, a.UserID)
+			result, err := h.syncEngine.ReadBackSyncResource(r.Context(), sys, a.EventType, a.UserID)
 			absent = err == nil && result["state"] == "absent"
 		}
 		if !absent {

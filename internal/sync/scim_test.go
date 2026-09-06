@@ -229,7 +229,7 @@ func TestSCIMConflictAndRetryAfter(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = e.QueueAccountSyncEvent(u.ID, "user.created", UserToSCIMResource(u)); err != nil {
+			if err = func() error { queueForAll(t, e, u.ID, "user.created", UserToSCIMResource(u)); return nil }(); err != nil {
 				t.Fatal(err)
 			}
 			before := time.Now()
@@ -264,7 +264,7 @@ func TestLegacyCustomDoesNotGuessProtocol(t *testing.T) {
 	if err := s.CreatePairedSystem(sys); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.QueueAccountSyncEvent(u.ID, "user.created", u); err != nil {
+	if err := func() error { queueForAll(t, e, u.ID, "user.created", u); return nil }(); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.DispatchPendingEvents(context.Background()); err != nil {

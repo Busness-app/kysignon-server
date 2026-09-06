@@ -622,12 +622,27 @@ func TestDeletingUserQueuesDeletionSyncEvent(t *testing.T) {
 	cookie := newSession(t, db, admin, time.Now().UTC().Add(time.Hour))
 	victim := newUser(t, db, "user")
 
-	if _, _, err := syncEngine.CreateSystem(&sync.CreateSystemRequest{
+	ps, _, err := syncEngine.CreateSystem(&sync.CreateSystemRequest{
 		Name:        "KyPost",
 		SystemType:  "kypost",
 		CallbackURL: "https://kypost.example.com/scim/v2",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	allowTestAppAccess(t, db, ps.ID)
+	// The connector holds the account once its create is acknowledged.
+	creates, err := db.ClaimDueSyncEvents(10, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range creates {
+		if ok, err := db.BeginSyncDelivery(ev, time.Minute); err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+		if err := db.FinishSyncDelivery(ev, "delivered", "", 1, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	rr := adminRequest(t, srv, "DELETE", "/api/admin/users/"+victim.ID, cookie, "")

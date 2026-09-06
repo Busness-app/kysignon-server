@@ -572,6 +572,9 @@ func (e *Engine) StartWorker(ctx context.Context) {
 			if err := e.store.ReconcileProvisioning(); err != nil && ctx.Err() == nil {
 				log.Printf("provisioning reconcile failed: %v", err)
 			}
+			if err := e.store.ScheduleReconcileJobs(time.Now().UTC()); err != nil && ctx.Err() == nil {
+				log.Printf("reconciliation scheduling failed: %v", err)
+			}
 		case <-ticker.C:
 			if err := e.DispatchPendingEvents(ctx); err != nil && ctx.Err() == nil {
 				// Delivery failures are recorded per event; this is the local persistence
@@ -579,6 +582,7 @@ func (e *Engine) StartWorker(ctx context.Context) {
 				// only unsent claims become available when their leases expire.
 				log.Printf(`{"level":"ERROR","component":"sync","error":%q}`, err.Error())
 			}
+			e.runReconcileJobs(ctx)
 		}
 	}
 }

@@ -593,7 +593,41 @@ enabled connector; only a connector known to hold the account receives the profi
 the rest receive the identifier and `active=false`.
 
 **Resync** re-sends every in-scope account (and assigned group) and never provisions a
-user outside scope. Automated drift detection and repair remain PR09.
+user outside scope.
+
+### Reconciliation
+
+**Suite sync → Provisioning** shows, per user, what the directory wants (desired), what
+was last queued (queued, with its revision), what the receiver acknowledged, what the
+last listing observed, the last delivery outcome with its next retry, and whether an
+attempt is blocked. **Retry** re-queues one user's current desired state, superseding
+exhausted work.
+
+**Preview drift** and **Repair drift** queue a reconciliation job for a generic SCIM
+connector. One job runs per connector at a time under a ten-minute lease; a job
+interrupted by a restart is re-run up to three times, which is safe because repair only
+queues the same idempotent desired-state work delivery already uses. A job walks the
+target's Users (and Groups when group delivery is enabled) page by page. Every page
+must answer 200 with a stable `totalResults`; a failed page, a short page, duplicate IDs
+or more than 20,000 resources makes the run **incomplete**: the accounts that were seen
+are recorded, safe attribute repairs may be queued, and nothing is deactivated or
+inferred absent.
+
+Only accounts this connector manages are compared: resources whose `externalId` names a
+local user, a held desired-state row or a stored remote mapping. Everything else at the
+target is left alone and counted as unrelated. A complete run classifies each managed
+account as **missing** (desired, absent), **stale** (desired, but inactive or with
+different userName, displayName or email) or **orphaned** (active at the target without
+effective access). Repair queues a create for missing, an update for stale, an inactive
+update for orphaned accounts, re-queues assigned groups and deletes managed groups that
+are no longer assigned. Repair always lists afresh; a preview is never applied later.
+Repair requires operation-bound step-up and records an audit event; a preview does not.
+
+Signed suite webhooks have no read contract. Their jobs record every held account as
+**unsupported**, so an acknowledgment is never presented as an observed match.
+
+**Scheduled repair every N hours** in Connection settings queues a repair job at that
+interval (0 disables it). The last twenty jobs per connector are kept.
 
 ### SCIM Groups
 

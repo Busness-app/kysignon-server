@@ -1,5 +1,5 @@
 **Repo:** kysignon-server
-**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/outbound-scim)
+**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/provisioning-ordering)
 
 # KySignOn access and identity lifecycle implementation plan
 
@@ -11,8 +11,12 @@ PR05 is split into 05a (OIDC re-authentication requests and bound interactions, 
 and 05b (administrator per-app policies, factor freshness and policy revision enforcement,
 merged as GitHub PR #30). PR06 is split into 06a (organization/admin enrollment policy,
 merged as GitHub PR #31) and 06b (group-specific requirements, merged as GitHub PR #32).
-PR07 is implemented on `feat/outbound-scim`, awaiting CI/review.
-PRs 08–23 and D1–D4 remain planned.
+PR07 merged as GitHub PR #33 with CI passed and both findings resolved.
+PR08 is split into 08a (resource ordering and uncertain-write recovery, in progress)
+and 08b (assignment-aware desired state, revisions and group delivery, planned).
+PRs 09–23 and D1–D4 remain planned.
+PR33 review limitations remain: truncated input omitted frontend source; the reviewer
+performed no dynamic real-target SCIM exercise. It was not an exhaustive whole-PR audit.
 PR32 review limitations remain: some frontend source hunks were omitted from review
 input, and the reviewer could not execute tests; implementation-agent runs and CI
 provided test evidence. It was not an exhaustive whole-PR audit.
@@ -289,6 +293,15 @@ fixture proves exact signature/body and absence of Authorization. No secrets fol
 redirects or appear in logs.
 
 ### PR 08 — Assignment-aware provisioning and group delivery
+
+08a provides FIFO delivery per connector/user, durable attempts that survive crash and
+local deletion, stale-claim rejection, and a functional blocked-delivery recovery UI.
+Transport uncertainty does not expire with a lease; recovery requires operator-proven
+quiescence, step-up and audit. Read-back is diagnostic only. Explicit no-create
+confirmation plus empty lookup permits clearing a lost-create guard. See README.md.
+This conservative foundation does not claim automated convergence after uncertainty.
+08b retains all desired-state, scope, supersession, revision and group requirements
+below; it must add their acceptance tests before claiming PR08 complete.
 
 Depends on: 03, 04, 07. Touch: sync/store, app-to-system linking and assignment UI.
 

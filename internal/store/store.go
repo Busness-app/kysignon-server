@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
@@ -341,6 +342,9 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.migrateSyncEventLease(); err != nil {
+		return err
+	}
+	if err := s.migrateSyncDelivery(); err != nil {
 		return err
 	}
 	if err := s.migrateLegacyDevicePairingTokens(); err != nil {
@@ -1032,7 +1036,7 @@ func (s *Store) CreateAccountSyncEvent(event *AccountSyncEvent) error {
 	return err
 }
 
-const syncEventColumns = `id, user_id, system_id, event_type, payload_json, attempts, status, last_error, next_attempt_at, created_at, updated_at`
+const syncEventColumns = `id, user_id, system_id, event_type, payload_json, attempts, status, last_error, next_attempt_at, created_at, updated_at, claim_token`
 
 func scanSyncEvents(rows *sql.Rows) ([]AccountSyncEvent, error) {
 	defer rows.Close()
@@ -1042,7 +1046,7 @@ func scanSyncEvents(rows *sql.Rows) ([]AccountSyncEvent, error) {
 		var lastErr sql.NullString
 		var next sql.NullTime
 		if err := rows.Scan(&ev.ID, &ev.UserID, &ev.SystemID, &ev.EventType, &ev.PayloadJSON,
-			&ev.Attempts, &ev.Status, &lastErr, &next, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
+			&ev.Attempts, &ev.Status, &lastErr, &next, &ev.CreatedAt, &ev.UpdatedAt, &ev.ClaimToken); err != nil {
 			return nil, err
 		}
 		if lastErr.Valid {
@@ -1068,9 +1072,8 @@ func (s *Store) GetPendingSyncEvents(limit int) ([]AccountSyncEvent, error) {
 }
 
 // ClaimDueSyncEvents takes ownership of due events for the duration of lease before any
-// network I/O happens. Reading without claiming lets two dispatchers — overlapping ticks, or
-// two instances during a rolling deploy — deliver the same event twice. A lease rather than
-// a lock means a dispatcher that crashes mid-delivery releases its events when it expires.
+// network I/O happens. Only unsent claims expire automatically; BeginSyncDelivery holds
+// the resource durably once a dispatcher might send a remote write.
 func (s *Store) ClaimDueSyncEvents(limit int, lease time.Duration) ([]AccountSyncEvent, error) {
 	now := time.Now().UTC()
 	tx, err := s.db.Begin()
@@ -1081,6 +1084,11 @@ func (s *Store) ClaimDueSyncEvents(limit int, lease time.Duration) ([]AccountSyn
 
 	rows, err := tx.Query(`SELECT `+syncEventColumns+` FROM account_sync_events
 		WHERE status = 'pending' AND attempts < 5
+          AND NOT EXISTS (SELECT 1 FROM sync_delivery_attempts a
+            WHERE a.system_id=account_sync_events.system_id AND a.user_id=account_sync_events.user_id)
+          AND NOT EXISTS (SELECT 1 FROM account_sync_events older
+            WHERE older.system_id=account_sync_events.system_id AND older.user_id=account_sync_events.user_id
+            AND older.status='pending' AND older.attempts<5 AND older.rowid<account_sync_events.rowid)
           AND NOT EXISTS (SELECT 1 FROM paired_systems p WHERE p.id=account_sync_events.system_id
             AND (p.status='disabled' OR p.system_type NOT IN ('scim','suite_webhook','kypost','kypasswords','kybookmarks','kynotes')))
 		  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
@@ -1098,7 +1106,7 @@ func (s *Store) ClaimDueSyncEvents(limit int, lease time.Duration) ([]AccountSyn
 	}
 
 	until := now.Add(lease)
-	stmt, err := tx.Prepare(`UPDATE account_sync_events SET lease_until = ?, updated_at = ?
+	stmt, err := tx.Prepare(`UPDATE account_sync_events SET lease_until = ?, updated_at = ?, claim_token = ?
 		WHERE id = ? AND (lease_until IS NULL OR lease_until <= ?)`)
 	if err != nil {
 		return nil, err
@@ -1106,7 +1114,8 @@ func (s *Store) ClaimDueSyncEvents(limit int, lease time.Duration) ([]AccountSyn
 	defer stmt.Close()
 	claimed := make([]AccountSyncEvent, 0, len(events))
 	for _, ev := range events {
-		res, err := stmt.Exec(until, now, ev.ID, now)
+		ev.ClaimToken = uuid.New().String()
+		res, err := stmt.Exec(until, now, ev.ClaimToken, ev.ID, now)
 		if err != nil {
 			return nil, err
 		}

@@ -206,6 +206,9 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("POST /api/admin/users/{id}/revoke-sessions", adminM(http.HandlerFunc(adminH.RevokeUserSessions)))
 	mux.Handle("DELETE /api/admin/users/{id}", adminStepUpM(http.HandlerFunc(adminH.DeleteUser)))
 
+	mux.Handle("GET /api/admin/systems/{id}/deliveries", adminM(http.HandlerFunc(adminH.ListSyncDeliveries)))
+	mux.Handle("POST /api/admin/systems/{id}/deliveries/{token}/read-back", adminM(http.HandlerFunc(adminH.ReadBackSyncDelivery)))
+	mux.Handle("POST /api/admin/systems/{id}/deliveries/{token}/resume", adminStepUpM(http.HandlerFunc(adminH.ResumeSyncDelivery)))
 	mux.Handle("GET /api/admin/systems", adminM(http.HandlerFunc(adminH.ListPairedSystems)))
 	mux.Handle("PUT /api/admin/systems/{id}/connection", adminStepUpM(http.HandlerFunc(adminH.ConfigureSystem)))
 	mux.Handle("POST /api/admin/systems/{id}/test", adminM(http.HandlerFunc(adminH.TestSystem)))

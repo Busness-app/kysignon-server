@@ -522,13 +522,36 @@ A source account deletion deactivates the remote account with `active=false`; it
 never sends DELETE. Local MFA resets send no generic SCIM mutation. Suite products
 retain their signed webhook events, including the existing deletion contract.
 
-After a lost create response, delivery looks up the same externalId before doing
-anything else. An unresolved create remains an error rather than risking a duplicate.
-Check the downstream operation and restore the correct externalId there, then resync;
-if the request never committed, operator reconciliation of the uncertain-create
-record is required. Do not clear that record while the target may still commit the
-request. Explicit create rejection (4xx) permits a later retry. Retry-After extends
-the ordinary backoff, capped at one hour; the existing five-attempt budget remains.
+Per connector/user, only the earliest pending event can begin delivery. Backoff holds
+later events for that user; other users and connectors continue. A durable attempt
+survives process restart and local user deletion. Unsent claims may expire, but an
+attempt that might have reached the receiver stays blocked after a transport failure,
+HTTP 408/5xx, or asynchronous acceptance (202). A response acknowledging completion
+and its event status are persisted atomically. These rules rely on the receiver honoring
+its synchronous success/rejection responses; they cannot fence a nonconforming receiver.
+
+In **Suite sync → Deliveries**, inspect in-flight/blocked attempts and read remote state.
+Read-back only reports a matching externalId; it neither proves a request has finished
+nor resumes delivery. Signed suite webhooks have no read-back contract.
+
+To recover an expired attempt:
+
+1. Stop **all** KySignOn worker instances. Confirm at the receiving service that the
+   old request has finished and cannot commit later. A timeout or empty lookup is
+   insufficient. If this cannot be established, keep the attempt blocked.
+2. Restart one instance, open **Deliveries**, and confirm these steps. **Resume delivery**
+   requires fresh operation-bound step-up and records the recovery audit atomically.
+3. For a lost create, keep the existing create guard unless the receiver explicitly
+   confirms no account was created. The separate fresh-create checkbox additionally
+   requires an empty externalId lookup before clearing that guard. Otherwise restore
+   the account's correct externalId at the target and resume; lookup recovers its ID.
+
+The oldest 100 attempts are shown; resolving them exposes the next page. A definitive
+4xx rejection (except 408) uses ordinary backoff and the five-attempt budget;
+Retry-After extends backoff up to one hour. Do not use resync or disconnect/reconnect
+as an uncertain-write recovery mechanism. Stop old-version workers before upgrading;
+they do not honor the new persisted fences. Existing remote operations must finish
+before the upgraded worker starts.
 
 Known KySecurity product types and **Custom signed suite webhook** use a generated
 signing secret shown once. They send bare SCIM user bodies with `syncauth` signatures,
@@ -538,7 +561,7 @@ requires step-up: select the actual protocol, supplying a target-issued token fo
 SCIM or retaining the existing signing secret for a suite webhook. Review preserves
 the destination URL, connection ID, application linkage and assignments.
 
-Provisioning still covers the existing whole-directory scope. Assignment-aware
-provisioning, per-resource ordering across events/workers, group delivery, and full
-reconciliation remain roadmap PR08–09. A late older update can still overwrite newer
-state; this interoperability change does not establish ordering or verified removal.
+Provisioning still covers the existing whole-directory scope. This is PR08a's delivery
+ordering foundation. Assignment-aware desired state, superseding stale queued work,
+suite resource revisions and group delivery remain PR08b; automated reconciliation
+remains PR09. Completion does not establish verified removal across the suite.

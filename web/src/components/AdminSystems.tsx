@@ -1,3 +1,4 @@
+import { SyncDeliveries } from './SyncDeliveries';
 import React, { useEffect, useState } from 'react';
 import { PairedSystem } from '../types';
 import { apiJson, apiRequest, errorMessage } from '../api';
@@ -52,6 +53,7 @@ const PRESET_METADATA: Record<
 };
 
 export const AdminSystems: React.FC = () => {
+  const [deliverySystem, setDeliverySystem] = useState<PairedSystem | null>(null);
   const [systems, setSystems] = useState<PairedSystem[]>([]);
 
   // Modal State
@@ -212,6 +214,7 @@ export const AdminSystems: React.FC = () => {
         </button>
       </div>
 
+      {deliverySystem && <SyncDeliveries key={deliverySystem.id} system={deliverySystem} onClose={() => setDeliverySystem(null)} />}
       <div className="table-card">
         <table className="admin-table">
           <thead>
@@ -307,6 +310,7 @@ export const AdminSystems: React.FC = () => {
                   <td className="text-right">
                     <div className="action-buttons-wrap">
                       {(needsReview(s) || s.systemType === 'scim') && <button className="secondary-btn sm" onClick={() => openConnection(s)}>{needsReview(s) ? 'Review connection' : 'Replace token'}</button>}
+                      <button className="secondary-btn sm" onClick={() => setDeliverySystem(s)}>Deliveries</button>
                       {s.systemType === 'scim' && <button className="secondary-btn sm" onClick={() => testConnection(s)}>Test connection</button>}
                       <button
                         className="secondary-btn sm"

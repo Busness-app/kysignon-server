@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -50,7 +51,7 @@ func (p EnrollmentPolicy) mask() int {
 	return mask
 }
 func (p EnrollmentPolicy) Valid() bool {
-	return (p.Scope == "organization" || p.Scope == "administrators") && p.mask() > 0 && p.GraceSeconds >= 0 && p.GraceSeconds <= 90*86400 && p.Revision > 0
+	return (p.Scope == "organization" || p.Scope == "administrators" || (strings.HasPrefix(p.Scope, "group:") && len(p.Scope) > 6 && len(p.Scope) <= 512)) && p.mask() > 0 && p.GraceSeconds >= 0 && p.GraceSeconds <= 90*86400 && p.Revision > 0
 }
 
 type EnrollmentStatus struct {
@@ -59,57 +60,6 @@ type EnrollmentStatus struct {
 	Deadline       int64    `json:"deadline"`
 	Enrolled       bool     `json:"enrolled"`
 	Restricted     bool     `json:"restricted"`
-}
-
-// Deadlines are epoch seconds. They are stored when a requirement first applies,
-// including user creation/promotion; logins and policy relaxations never restart grace.
-func (s *Store) migrateEnrollmentPolicy() error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var exists int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='enrollment_only'`).Scan(&exists); err != nil {
-		return err
-	}
-	if exists == 0 {
-		if _, err = tx.Exec(`ALTER TABLE sessions ADD COLUMN enrollment_only BOOLEAN NOT NULL DEFAULT 0`); err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec(`CREATE TABLE IF NOT EXISTS enrollment_policies (
- scope TEXT PRIMARY KEY CHECK(scope IN ('organization','administrators')),required BOOLEAN NOT NULL DEFAULT 0,
- allowed_mask INTEGER NOT NULL DEFAULT 7 CHECK(allowed_mask BETWEEN 1 AND 7),grace_seconds INTEGER NOT NULL DEFAULT 0 CHECK(grace_seconds BETWEEN 0 AND 7776000),revision INTEGER NOT NULL DEFAULT 1);
- INSERT OR IGNORE INTO enrollment_policies(scope) VALUES('organization'),('administrators');
- CREATE TABLE IF NOT EXISTS enrollment_deadlines (
- user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,scope TEXT NOT NULL REFERENCES enrollment_policies(scope),due_at INTEGER NOT NULL,PRIMARY KEY(user_id,scope));
- CREATE VIEW IF NOT EXISTS applicable_enrollment_policies AS
- SELECT u.id user_id,p.scope,p.allowed_mask,p.grace_seconds FROM users u JOIN enrollment_policies p ON p.required AND (p.scope='organization' OR u.role='admin');
- CREATE VIEW IF NOT EXISTS enrollment_requirements AS
- SELECT u.id user_id,EXISTS(SELECT 1 FROM applicable_enrollment_policies p WHERE p.user_id=u.id) required,
- (CASE WHEN o.required THEN o.allowed_mask ELSE 7 END)&(CASE WHEN a.required AND u.role='admin' THEN a.allowed_mask ELSE 7 END) allowed_mask,
- COALESCE((SELECT MIN(COALESCE(d.due_at,0)) FROM applicable_enrollment_policies p LEFT JOIN enrollment_deadlines d ON d.user_id=p.user_id AND d.scope=p.scope WHERE p.user_id=u.id),0) due_at
- FROM users u JOIN enrollment_policies o ON o.scope='organization' JOIN enrollment_policies a ON a.scope='administrators';
- CREATE VIEW IF NOT EXISTS enrolled_factors AS
- SELECT user_id,1 bit FROM mfa_methods WHERE method_type='totp'
- UNION SELECT user_id,2 FROM native_devices WHERE is_mfa_approver AND public_key IS NOT NULL AND public_key<>''
- UNION SELECT user_id,4 FROM webauthn_credentials;
- CREATE VIEW IF NOT EXISTS mfa_session_access AS
- SELECT sess.id,sess.user_id,NOT sess.enrollment_only AND (NOT r.required OR
- (sess.factor_method<>'recovery' AND r.due_at>unixepoch() AND NOT EXISTS(SELECT 1 FROM enrolled_factors f WHERE f.user_id=sess.user_id AND (f.bit&r.allowed_mask)<>0)) OR
- (sess.primary_authenticated_at IS NOT NULL AND sess.factor_authenticated_at IS NOT NULL AND
- ((CASE sess.factor_method WHEN 'totp' THEN 1 WHEN 'push' THEN 2 WHEN 'webauthn' THEN 4 ELSE 0 END)&r.allowed_mask)<>0 AND
- EXISTS(SELECT 1 FROM enrolled_factors f WHERE f.user_id=sess.user_id AND f.bit=CASE sess.factor_method WHEN 'totp' THEN 1 WHEN 'push' THEN 2 WHEN 'webauthn' THEN 4 ELSE 0 END))) allowed
- FROM sessions sess JOIN enrollment_requirements r ON r.user_id=sess.user_id;
- CREATE TRIGGER IF NOT EXISTS enrollment_new_user AFTER INSERT ON users BEGIN
- INSERT OR IGNORE INTO enrollment_deadlines SELECT p.user_id,p.scope,unixepoch()+p.grace_seconds FROM applicable_enrollment_policies p WHERE p.user_id=NEW.id; END;
- CREATE TRIGGER IF NOT EXISTS enrollment_user_role AFTER UPDATE OF role ON users BEGIN
- INSERT OR IGNORE INTO enrollment_deadlines SELECT p.user_id,p.scope,unixepoch()+p.grace_seconds FROM applicable_enrollment_policies p WHERE p.user_id=NEW.id; END;`)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 func enrollmentStatus(row interface{ Scan(...any) error }) (EnrollmentStatus, error) {
@@ -126,7 +76,7 @@ func (s *Store) SessionEnrollmentStatus(userID, sessionID string) (EnrollmentSta
 	return enrollmentStatus(s.db.QueryRow(enrollmentStatusSQL, sessionID, userID))
 }
 func (s *Store) ListEnrollmentPolicies() ([]EnrollmentPolicy, error) {
-	rows, err := s.db.Query(`SELECT scope,required,allowed_mask,grace_seconds,revision FROM enrollment_policies ORDER BY scope`)
+	rows, err := s.db.Query(`SELECT scope,required,allowed_mask,grace_seconds,revision FROM enrollment_policies WHERE group_id IS NULL ORDER BY scope`)
 	if err != nil {
 		return nil, err
 	}
@@ -180,11 +130,11 @@ type EnrollmentPreview struct {
 	CanActivate        bool `json:"canActivate"`
 }
 
-func previewEnrollmentTx(tx *sql.Tx, sessionID string) (EnrollmentPreview, error) {
+func previewEnrollmentTx(tx *sql.Tx, sessionID, scope string) (EnrollmentPreview, error) {
 	var p EnrollmentPreview
-	err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM enrollment_requirements r JOIN users u ON u.id=r.user_id WHERE r.required AND u.status='active'),
- (SELECT COUNT(*) FROM enrollment_requirements r JOIN users u ON u.id=r.user_id WHERE r.required AND u.status='active' AND NOT EXISTS(SELECT 1 FROM enrolled_factors f WHERE f.user_id=r.user_id AND (f.bit&r.allowed_mask)<>0)),
- (SELECT COUNT(*) FROM mfa_session_access a JOIN sessions s ON s.id=a.id WHERE NOT a.allowed AND s.expires_at>?)`, time.Now().UTC()).Scan(&p.Affected, &p.MissingFactor, &p.RestrictedSessions)
+	err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM enrollment_requirements r JOIN users u ON u.id=r.user_id WHERE r.required AND u.status='active' AND (? NOT LIKE 'group:%' OR EXISTS(SELECT 1 FROM group_memberships m WHERE m.user_id=r.user_id AND 'group:'||m.group_id=?))),
+ (SELECT COUNT(*) FROM enrollment_requirements r JOIN users u ON u.id=r.user_id WHERE r.required AND u.status='active' AND NOT EXISTS(SELECT 1 FROM enrolled_factors f WHERE f.user_id=r.user_id AND (f.bit&r.allowed_mask)<>0) AND (? NOT LIKE 'group:%' OR EXISTS(SELECT 1 FROM group_memberships m WHERE m.user_id=r.user_id AND 'group:'||m.group_id=?))),
+ (SELECT COUNT(*) FROM mfa_session_access a JOIN sessions s ON s.id=a.id WHERE NOT a.allowed AND s.expires_at>? AND (? NOT LIKE 'group:%' OR EXISTS(SELECT 1 FROM group_memberships m WHERE m.user_id=a.user_id AND 'group:'||m.group_id=?)))`, scope, scope, scope, scope, time.Now().UTC(), scope, scope).Scan(&p.Affected, &p.MissingFactor, &p.RestrictedSessions)
 	if err != nil {
 		return p, err
 	}
@@ -217,7 +167,7 @@ func (s *Store) PreviewEnrollmentPolicy(p EnrollmentPolicy, sessionID string) (E
 	if err = applyEnrollmentPolicyTx(tx, p); err != nil {
 		return EnrollmentPreview{}, err
 	}
-	return previewEnrollmentTx(tx, sessionID)
+	return previewEnrollmentTx(tx, sessionID, p.Scope)
 }
 func (s *Store) SetEnrollmentPolicy(p EnrollmentPolicy, sessionID string, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
@@ -228,7 +178,7 @@ func (s *Store) SetEnrollmentPolicy(p EnrollmentPolicy, sessionID string, audit 
 	if err = applyEnrollmentPolicyTx(tx, p); err != nil {
 		return err
 	}
-	preview, err := previewEnrollmentTx(tx, sessionID)
+	preview, err := previewEnrollmentTx(tx, sessionID, p.Scope)
 	if err != nil {
 		return err
 	}
@@ -238,7 +188,15 @@ func (s *Store) SetEnrollmentPolicy(p EnrollmentPolicy, sessionID string, audit 
 	if _, err = tx.Exec(`DELETE FROM authorization_codes; DELETE FROM authorization_interactions; UPDATE issued_tokens SET revoked_at=? WHERE revoked_at IS NULL`, time.Now().UTC()); err != nil {
 		return err
 	}
-	if err = appRegistryAudit(audit, map[string]any{"policy": p, "impact": preview}); err != nil {
+	details := map[string]any{"policy": p, "impact": preview}
+	if strings.HasPrefix(p.Scope, "group:") {
+		var name string
+		if err = tx.QueryRow(`SELECT g.name FROM directory_groups g JOIN enrollment_policies p ON p.group_id=g.id WHERE p.scope=?`, p.Scope).Scan(&name); err != nil {
+			return err
+		}
+		details["groupName"] = name
+	}
+	if err = appRegistryAudit(audit, details); err != nil {
 		return err
 	}
 	if err = recordAuditTx(tx, audit); err != nil {
@@ -287,3 +245,12 @@ func (s *Store) changeEnrollmentDevice(userID, query string, args ...any) error 
 	}
 	return tx.Commit()
 }
+
+const enrollmentSessionViewSQL = ` CREATE VIEW IF NOT EXISTS mfa_session_access AS
+ SELECT sess.id,sess.user_id,NOT sess.enrollment_only AND (NOT r.required OR
+ (sess.factor_method<>'recovery' AND r.due_at>unixepoch() AND NOT EXISTS(SELECT 1 FROM enrolled_factors f WHERE f.user_id=sess.user_id AND (f.bit&r.allowed_mask)<>0)) OR
+ (sess.primary_authenticated_at IS NOT NULL AND sess.factor_authenticated_at IS NOT NULL AND
+ ((CASE sess.factor_method WHEN 'totp' THEN 1 WHEN 'push' THEN 2 WHEN 'webauthn' THEN 4 ELSE 0 END)&r.allowed_mask)<>0 AND
+ EXISTS(SELECT 1 FROM enrolled_factors f WHERE f.user_id=sess.user_id AND f.bit=CASE sess.factor_method WHEN 'totp' THEN 1 WHEN 'push' THEN 2 WHEN 'webauthn' THEN 4 ELSE 0 END))) allowed
+ FROM sessions sess JOIN enrollment_requirements r ON r.user_id=sess.user_id;
+`

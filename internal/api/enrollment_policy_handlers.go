@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/Busness-app/kysignon-server/internal/store"
 )
@@ -14,15 +15,22 @@ func enrollmentError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrEmergencyAdministrator):
 		http.Error(w, `{"error":"compliant_admin_required","error_description":"Sign out and sign in with a permitted administrator factor, then apply within five minutes. This proves a local administrator can still sign in."}`, 409)
 	case errors.Is(err, store.ErrEnrollmentPolicy):
-		http.Error(w, `{"error":"invalid_policy","error_description":"Choose permitted factors and a grace period from 0 to 90 days. Organization and administrator factors must overlap."}`, 400)
+		http.Error(w, `{"error":"invalid_policy","error_description":"Choose permitted factors and a grace period from 0 to 90 days. All applicable policies must share a permitted factor."}`, 400)
 	case errors.Is(err, store.ErrLastCompliantFactor):
 		http.Error(w, `{"error":"required_factor","error_description":"Enroll another permitted factor before removing your last compliant factor."}`, 409)
+	case errors.Is(err, store.ErrGroupTargetMissing):
+		http.Error(w, `{"error":"not_found","error_description":"Group or user no longer exists"}`, 404)
 	default:
 		writeAppRegistryError(w, err)
 	}
 }
 func (h *AdminHandler) ListEnrollmentPolicies(w http.ResponseWriter, r *http.Request) {
 	p, err := h.store.ListEnrollmentPolicies()
+	if groupID := r.URL.Query().Get("groupId"); groupID != "" {
+		var policy store.EnrollmentPolicy
+		policy, err = h.store.GroupEnrollmentPolicy(groupID)
+		p = []store.EnrollmentPolicy{policy}
+	}
 	if err != nil {
 		enrollmentError(w, err)
 		return
@@ -52,7 +60,14 @@ func readEnrollmentPolicy(r *http.Request) (store.EnrollmentPolicy, error) {
 // Rejected writes have rolled back their success audit, so record the denial separately.
 func (h *AdminHandler) enrollmentDenied(w http.ResponseWriter, r *http.Request, action, scope string, err error) {
 	if scope != "organization" && scope != "administrators" {
-		scope = ""
+		valid := false
+		if strings.HasPrefix(scope, "group:") && len(scope) <= 512 {
+			_, lookupErr := h.store.GroupEnrollmentPolicy(strings.TrimPrefix(scope, "group:"))
+			valid = lookupErr == nil
+		}
+		if !valid {
+			scope = ""
+		}
 	}
 	reason := "storage_error"
 	switch {

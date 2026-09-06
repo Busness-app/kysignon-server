@@ -349,13 +349,16 @@ Launcher visibility and provisioning scope remain governed by their existing con
 On first upgrade, old pending codes and interactions restart without deleting existing
 sessions or already-issued tokens. Subsequent startups preserve live requests.
 
-**Required MFA enrollment (PR06a).** Administrators can preview and apply organization
-and administrator requirements under **MFA policies**. Allowed TOTP, signed push and
-passkey methods intersect across the two scopes. Grace is 0–90 days; each user's scope
+**Required MFA enrollment.** Administrators can preview and apply organization
+and administrator requirements under **MFA policies**, and each group's requirement
+under **Groups → MFA policy**. Allowed TOTP, signed push and passkey methods intersect
+across every applicable policy. Grace is 0–90 days; each user's scope
 obligation stores an epoch-second deadline when it first applies, including account
-creation and promotion. The earliest applicable deadline wins. Logins, longer grace,
-and disabling/re-enabling a policy never extend an existing deadline. Group-specific
-requirements remain PR06b.
+creation, promotion and group membership. The earliest applicable deadline wins. Logins,
+longer grace, disabling/re-enabling a policy and removing/re-adding membership never
+extend an existing deadline. Deleting a group with an MFA requirement checks compliant
+administrator login evidence as well as step-up, then deletes its policy and obligations;
+a newly created group has a new identity and starts without an MFA requirement.
 
 Unenrolled users may continue during grace, subject to stricter app policies. Users with
 a permitted factor must sign in with it immediately. At the deadline, password-only
@@ -374,7 +377,14 @@ Step-up cannot replace that login evidence. The preview and application use the 
 transactional rules; revisions prevent stale writes. Applying cancels all outstanding
 OAuth sign-ins and revokes registered tokens with its audit event. Online token checks
 also enforce deadlines at use time; offline JWTs may remain valid for up to 15 minutes,
-and destination app sessions can outlive them. Removing the last compliant factor is
+and destination app sessions can outlive them. Changing membership in an MFA-required group cancels that user's outstanding OAuth
+interactions/codes and revokes registered tokens, even when the change relaxes policy.
+An actual membership change requires a current administrator session; if that account
+is subject to MFA, its permitted login proof must be within five minutes. Conflicting
+factor intersections reject the entire membership or policy transaction. Promotion to
+administrator also rejects conflicting requirements. Group previews summarize all applicable requirements for that group's members;
+organization/admin previews summarize the directory.
+Removing the last compliant factor is
 rejected atomically, including concurrent device/passkey removals. Administrator MFA
 reset remains available, revokes sessions and ends any remaining enrollment grace.
 

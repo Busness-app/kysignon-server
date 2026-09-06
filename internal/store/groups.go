@@ -86,11 +86,46 @@ func (s *Store) UpdateGroup(g *Group, audit *AuditEvent) error {
 }
 
 func (s *Store) DeleteGroup(id string, audit *AuditEvent) error {
+	return s.DeleteGroupForSession(id, "", audit)
+}
+
+func (s *Store) DeleteGroupForSession(id, sessionID string, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// Revoke while memberships and policy still exist; cascades remove both below.
+	for _, query := range []string{
+		`DELETE FROM authorization_codes WHERE user_id IN (SELECT m.user_id FROM group_memberships m JOIN enrollment_policies p ON p.group_id=m.group_id AND p.required WHERE m.group_id=?)`,
+		`DELETE FROM authorization_interactions WHERE user_id IN (SELECT m.user_id FROM group_memberships m JOIN enrollment_policies p ON p.group_id=m.group_id AND p.required WHERE m.group_id=?)`,
+	} {
+		if _, err = tx.Exec(query, id); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`UPDATE issued_tokens SET revoked_at=? WHERE revoked_at IS NULL AND user_id IN (SELECT m.user_id FROM group_memberships m JOIN enrollment_policies p ON p.group_id=m.group_id AND p.required WHERE m.group_id=?)`, time.Now().UTC(), id); err != nil {
+		return err
+	}
+
+	// The preceding grant writes hold the writer lock. Check login evidence before
+	// cascading away the policy; step-up alone cannot authorize this relaxation.
+	var required bool
+	if err = tx.QueryRow(`SELECT required FROM enrollment_policies WHERE group_id=?`, id).Scan(&required); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrGroupTargetMissing
+		}
+		return err
+	}
+	if required {
+		preview, err := previewEnrollmentTx(tx, sessionID, "")
+		if err != nil {
+			return err
+		}
+		if !preview.CanActivate {
+			return ErrEmergencyAdministrator
+		}
+	}
 	var name string
 	if err = tx.QueryRow(`DELETE FROM directory_groups WHERE id=? RETURNING name`, id).Scan(&name); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -111,15 +146,20 @@ func (s *Store) DeleteGroup(id string, audit *AuditEvent) error {
 // Individual membership writes cannot overwrite another administrator's edits.
 // Repeating either desired state is idempotent; each accepted request is audited.
 func (s *Store) SetGroupMembership(groupID, userID string, member bool, audit *AuditEvent) error {
+	return s.SetGroupMembershipForSession(groupID, userID, member, "", audit)
+}
+
+func (s *Store) SetGroupMembershipForSession(groupID, userID string, member bool, sessionID string, audit *AuditEvent) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var result sql.Result
 	if member {
-		_, err = tx.Exec(`INSERT INTO group_memberships(group_id,user_id) VALUES (?,?) ON CONFLICT(group_id,user_id) DO NOTHING`, groupID, userID)
+		result, err = tx.Exec(`INSERT INTO group_memberships(group_id,user_id) VALUES (?,?) ON CONFLICT(group_id,user_id) DO NOTHING`, groupID, userID)
 	} else {
-		_, err = tx.Exec(`DELETE FROM group_memberships WHERE group_id=? AND user_id=?`, groupID, userID)
+		result, err = tx.Exec(`DELETE FROM group_memberships WHERE group_id=? AND user_id=?`, groupID, userID)
 	}
 	if err != nil {
 		return groupWriteError(err)
@@ -131,6 +171,33 @@ func (s *Store) SetGroupMembership(groupID, userID string, member bool, audit *A
 			return ErrGroupTargetMissing
 		}
 		return err
+	}
+	var required bool
+	if err = tx.QueryRow(`SELECT required FROM enrollment_policies WHERE group_id=?`, groupID).Scan(&required); err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if required && changed > 0 {
+		var compatible bool
+		if err = tx.QueryRow(`SELECT allowed_mask<>0 FROM enrollment_requirements WHERE user_id=?`, userID).Scan(&compatible); err != nil {
+			return err
+		}
+		if !compatible {
+			return ErrEnrollmentPolicy
+		}
+		preview, err := previewEnrollmentTx(tx, sessionID, "")
+		if err != nil {
+			return err
+		}
+		if !preview.CanActivate {
+			return ErrEmergencyAdministrator
+		}
+		if err = invalidateUserEnrollmentTx(tx, userID); err != nil {
+			return err
+		}
 	}
 	if err = revokeLostAppAccessTx(tx); err != nil {
 		return err

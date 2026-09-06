@@ -37,6 +37,8 @@ func parseGroupPage(r *http.Request) (groupPage, error) {
 
 func writeGroupError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, store.ErrEnrollmentPolicy), errors.Is(err, store.ErrEmergencyAdministrator):
+		enrollmentError(w, err)
 	case errors.Is(err, store.ErrGroupNameExists):
 		http.Error(w, `{"error":"group_name_exists","error_description":"A group with that name already exists"}`, 409)
 	case errors.Is(err, store.ErrGroupTargetMissing):
@@ -150,7 +152,17 @@ func (h *AdminHandler) SetGroupMembership(w http.ResponseWriter, r *http.Request
 		action = "admin.group_member_added"
 	}
 	event := h.audit.Prepare(action, actor.ID, actor.Username, groupID, "group", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"userId": userID})
-	if err := h.store.SetGroupMembership(groupID, userID, member, event.Row); err != nil {
+	if err := h.store.SetGroupMembershipForSession(groupID, userID, member, GetSessionFromContext(r.Context()).ID, event.Row); err != nil {
+		if errors.Is(err, store.ErrEnrollmentPolicy) || errors.Is(err, store.ErrEmergencyAdministrator) {
+			reason := "conflicting_mfa_policies"
+			if errors.Is(err, store.ErrEmergencyAdministrator) {
+				reason = "compliant_admin_required"
+			}
+			if auditErr := h.audit.Record(action, actor.ID, actor.Username, groupID, "group", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": reason, "userId": userID}); auditErr != nil {
+				stepUpInternalError(w)
+				return
+			}
+		}
 		writeGroupError(w, err)
 		return
 	}

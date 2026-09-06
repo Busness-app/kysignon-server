@@ -182,7 +182,9 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		"accessRevoked": revokeAccess,
 	})
 	if err := h.syncEngine.UpdateUserAndQueueSyncEvents(user, revokeAccess, userSyncPayload(user), updated.Row); err != nil {
-		if errors.Is(err, store.ErrLastActiveAdmin) {
+		if errors.Is(err, store.ErrEnrollmentPolicy) {
+			enrollmentError(w, err)
+		} else if errors.Is(err, store.ErrLastActiveAdmin) {
 			http.Error(w, `{"error":"cannot_remove_last_admin"}`, http.StatusBadRequest)
 		} else {
 			http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)

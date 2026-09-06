@@ -525,8 +525,14 @@ function enrollmentMethods(value: unknown): string[] {
 export function parseEnrollmentStatus(value: unknown): EnrollmentStatus {
  const o=obj(value,'enrollment status');return {required:requiredBool(o,'required'),allowedMethods:enrollmentMethods(o.allowedMethods),deadline:directoryCount(o,'deadline'),enrolled:requiredBool(o,'enrolled'),restricted:requiredBool(o,'restricted')};
 }
+function enrollmentScope(o: Record<string, unknown>): EnrollmentPolicy['scope'] {
+ const scope = str(o, 'scope');
+ if (scope === 'organization' || scope === 'administrators') return scope;
+ if (scope.startsWith('group:') && scope.length > 6 && scope.length <= 512) return `group:${scope.slice(6)}`;
+ return fail('an enrollment policy scope');
+}
 export function parseEnrollmentPolicies(value: unknown): EnrollmentPolicy[] {
- return arr(obj(value,'enrollment policies').policies,'policies').map(v=>{const o=obj(v,'policy');return {scope:oneOf(o,'scope',['organization','administrators']),required:requiredBool(o,'required'),allowedMethods:enrollmentMethods(o.allowedMethods),graceSeconds:directoryCount(o,'graceSeconds'),revision:directoryCount(o,'revision')};});
+ return arr(obj(value,'enrollment policies').policies,'policies').map(v=>{const o=obj(v,'policy');return {scope:enrollmentScope(o),required:requiredBool(o,'required'),allowedMethods:enrollmentMethods(o.allowedMethods),graceSeconds:directoryCount(o,'graceSeconds'),revision:directoryCount(o,'revision')};});
 }
 export function parseEnrollmentPreview(value: unknown): EnrollmentPreview {
  const o=obj(value,'policy preview');return {affected:directoryCount(o,'affected'),missingFactor:directoryCount(o,'missingFactor'),restrictedSessions:directoryCount(o,'restrictedSessions'),canActivate:requiredBool(o,'canActivate')};

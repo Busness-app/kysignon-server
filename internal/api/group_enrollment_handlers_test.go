@@ -1,0 +1,93 @@
+package api
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Busness-app/kysignon-server/internal/store"
+)
+
+func TestGroupEnrollmentAdminAndRestrictedAccess(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := enrollmentAPIAdmin(t, srv, db)
+	u := newUser(t, db, "user")
+	cookie := newSession(t, db, u, time.Now().UTC().Add(time.Hour))
+	for _, id := range []string{"a", "b"} {
+		if err := db.CreateGroup(&store.Group{ID: id, Name: id}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := "/api/admin/enrollment-policies"
+	if r := adminRequestNoStepUp(t, srv, "GET", path+"?groupId=a", cookie, ""); r.Code != 403 {
+		t.Fatal("non-admin policy read", r.Code)
+	}
+	if r := adminRequestNoStepUp(t, srv, "GET", path+"?groupId=missing", admin, ""); r.Code != 404 {
+		t.Fatal("missing group", r.Code)
+	}
+	r := adminRequestNoStepUp(t, srv, "GET", path+"?groupId=a", admin, "")
+	var listed struct {
+		Policies []store.EnrollmentPolicy `json:"policies"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &listed); err != nil || len(listed.Policies) != 1 || listed.Policies[0].Scope != "group:a" || listed.Policies[0].Required {
+		t.Fatal("group default", r.Body.String(), err)
+	}
+	memberPath := "/api/admin/groups/a/members/" + u.ID
+	if r := adminRequest(t, srv, "PUT", memberPath, admin, ""); r.Code != 200 {
+		t.Fatal(r.Body.String())
+	}
+	p := store.EnrollmentPolicy{Scope: "group:a", Required: true, AllowedMethods: []string{"totp"}, Revision: 1}
+	body := policyJSON(t, p)
+	if r := adminRequestNoStepUp(t, srv, "POST", path+"/preview", admin, body); r.Code != 200 {
+		t.Fatal("preview", r.Body.String())
+	}
+	if r := adminRequestNoStepUp(t, srv, "GET", "/api/user/applications", cookie, ""); r.Code != 200 {
+		t.Fatal("preview restricted user", r.Code)
+	}
+	if r := adminRequestNoStepUp(t, srv, "PUT", path, admin, body); r.Code != 403 {
+		t.Fatal("unprotected group policy", r.Code)
+	}
+	if r := adminRequest(t, srv, "PUT", path, admin, body); r.Code != 200 {
+		t.Fatal("apply group policy", r.Code, r.Body.String())
+	}
+	if r := adminRequest(t, srv, "PUT", path, admin, body); r.Code != 409 {
+		t.Fatal("stale policy", r.Code)
+	}
+	if r := adminRequestNoStepUp(t, srv, "GET", "/api/user/applications", cookie, ""); r.Code != 403 || !strings.Contains(r.Body.String(), "enrollment_required") {
+		t.Fatal("group enrollment bypassed", r.Code, r.Body.String())
+	}
+	p.Scope = "group:b"
+	p.AllowedMethods = []string{"webauthn"}
+	if r := adminRequest(t, srv, "PUT", path, admin, policyJSON(t, p)); r.Code != 200 {
+		t.Fatal("empty group policy", r.Body.String())
+	}
+	if r := adminRequest(t, srv, "PUT", "/api/admin/groups/b/members/"+u.ID, admin, ""); r.Code != 400 {
+		t.Fatal("conflicting membership accepted", r.Code, r.Body.String())
+	}
+	// Adding the activating administrator cannot strand their own MFA login.
+	adminSession, err := db.GetSessionByID("enrollment-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := adminRequest(t, srv, "PUT", "/api/admin/groups/b/members/"+adminSession.UserID, admin, ""); r.Code != 409 {
+		t.Fatal("administrator lockout", r.Code, r.Body.String())
+	}
+	events, _, err := db.ListAuditEvents(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	success, denied := false, false
+	for _, e := range events {
+		if e.Action == "admin.mfa_enrollment_policy_changed" && e.Outcome == "success" && strings.Contains(e.DetailsJSON, `"groupName":"a"`) {
+			success = true
+		}
+		if e.Action == "admin.group_member_added" && e.Outcome == "denied" && strings.Contains(e.DetailsJSON, "conflicting_mfa_policies") {
+			denied = true
+		}
+	}
+	if !success || !denied {
+		t.Fatal("missing group policy audit", success, denied)
+	}
+}

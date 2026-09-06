@@ -1,6 +1,5 @@
 **Repo:** kysignon-server
-**PR:** #31 — https://github.com/Busness-app/kysignon-server/pull/31
-**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/mfa-enrollment-policy)
+**Worktree:** /home/yoshi/busness.app/kysignon-server (branch feat/group-mfa-policy)
 
 # KySignOn access and identity lifecycle implementation plan
 
@@ -11,7 +10,7 @@ PR 02 merged as GitHub PR #25; PR 03 merged as GitHub PR #26. PR 04 is split int
 PR05 is split into 05a (OIDC re-authentication requests and bound interactions, merged as GitHub PR #29)
 and 05b (administrator per-app policies, factor freshness and policy revision enforcement,
 merged as GitHub PR #30). PR06 is split into 06a (organization/admin enrollment policy,
-implemented as GitHub PR #31 on `feat/mfa-enrollment-policy`, in review) and 06b (group-specific requirements, planned).
+merged as GitHub PR #31) and 06b (group-specific requirements, implemented on `feat/group-mfa-policy`).
 PRs 07–23 and D1–D4 remain planned.
 PR numbers below are sequence labels, not GitHub PR numbers.
 
@@ -248,8 +247,11 @@ session enforcement introduced in 06a. Add per-group policies and combine every 
 requirement by factor intersection and earliest deadline. Membership and policy mutations
 must reject empty intersections, preserve tested administrator access, and invalidate
 OAuth grants atomically. Removing and re-adding membership must never restart grace.
-Include group impact controls and membership-change race tests. No group MFA policy is
-implemented by 06a.
+Includes group impact controls and membership-change race tests. Implemented on
+`feat/group-mfa-policy`; policy controls live under Groups, with shared activation and
+preview rules. Actual changes to membership in required-policy groups require a compliant
+admin session and revoke affected OAuth grants transactionally. Membership re-addition
+preserves prior deadlines; PR06a schema upgrade preserves policy revisions and deadlines.
 
 Release A gate: demonstrate two users, two groups and two apps with different freshness
 and factor requirements, including direct-URL denial and removal during code exchange.

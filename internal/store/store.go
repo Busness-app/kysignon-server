@@ -661,7 +661,7 @@ func (s *Store) UpdateUser(u *User) error {
 	query := `UPDATE users SET display_name = ?, email = ?, role = ?, status = ?, updated_at = ? WHERE id = ?`
 	u.UpdatedAt = time.Now().UTC()
 	_, err := s.db.Exec(query, u.DisplayName, u.Email, u.Role, u.Status, u.UpdatedAt, u.ID)
-	return err
+	return enrollmentMutationError(err)
 }
 
 // UpdateUserWithSyncEvents preserves the active-admin invariant and writes its outbox event
@@ -688,7 +688,7 @@ func (s *Store) UpdateUserWithSyncEvents(u *User, revokeAccess bool, events []Ac
 	now := time.Now().UTC()
 	u.UpdatedAt = now
 	if _, err := tx.Exec(`UPDATE users SET display_name = ?, email = ?, password_hash = ?, role = ?, status = ?, updated_at = ? WHERE id = ?`, u.DisplayName, u.Email, u.PasswordHash, u.Role, u.Status, now, u.ID); err != nil {
-		return err
+		return enrollmentMutationError(err)
 	}
 	if revokeAccess {
 		if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ?`, u.ID); err != nil {

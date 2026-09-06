@@ -302,11 +302,12 @@ func TestEnrollmentRecoveryDuringGraceAndPromotionDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	u.Role = "admin"
+	promotionStartedAt := time.Now().Unix()
 	if err := s.UpdateUser(u); err != nil {
 		t.Fatal(err)
 	}
 	status, err := s.SessionEnrollmentStatus(u.ID, "session")
-	if err != nil || !status.Restricted || status.Deadline > now.Unix() {
+	if err != nil || !status.Restricted || status.Deadline < promotionStartedAt || status.Deadline > time.Now().Unix() {
 		t.Fatal("promotion missed shorter admin deadline", status, err)
 	}
 }

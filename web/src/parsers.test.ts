@@ -1,4 +1,4 @@
-import { parseAppRecordPage, parseAppAccessPage, parsePairingToken } from './parsers';
+import { parseAppRecordPage, parseAppAccessPage, parsePairingToken, parseEnrollmentPolicies } from './parsers';
 import { describe, expect, it } from 'vitest';
 import {
   parseGroupPage,
@@ -375,5 +375,14 @@ describe('pairing expiry', () => {
   });
   it.each([undefined, '', 'invalid'])('rejects an invalid expiry %p', expiresAt => {
     expect(() => parsePairingToken({pairingToken:'test', expiresAt})).toThrow();
+  });
+});
+
+describe('group enrollment policies', () => {
+  it('accepts a stable group scope', () => {
+    expect(parseEnrollmentPolicies({policies:[{scope:'group:g1',required:true,allowedMethods:['totp'],graceSeconds:3600,revision:2}]} )[0].scope).toBe('group:g1');
+  });
+  it.each(['group:', 'group', 'group:'+'x'.repeat(513)])('rejects invalid scope %p', scope => {
+    expect(() => parseEnrollmentPolicies({policies:[{scope,required:true,allowedMethods:['totp'],graceSeconds:0,revision:1}]})).toThrow();
   });
 });

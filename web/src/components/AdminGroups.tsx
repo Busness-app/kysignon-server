@@ -3,6 +3,7 @@ import { apiRequest, errorMessage } from '../api';
 import { parseGroupPage, parseGroupUserPage } from '../parsers';
 import type { DirectoryGroup, User } from '../types';
 import { isCancelled, useStepUp } from './StepUpPrompt';
+import { AdminEnrollmentPolicies } from './AdminEnrollmentPolicies';
 import { pageSize, Pager, useDirectoryPage } from './DirectoryPage';
 
 type Mutate = (reason: string, method: 'POST' | 'PUT' | 'DELETE', path: string, body?: { name: string; description: string }) => Promise<boolean>;
@@ -49,6 +50,7 @@ function GroupMembers({ group, busy, mutate, onClose }: {
 
 export function AdminGroups({ user, onClearUser }: { user: User | null; onClearUser: () => void }) {
   const [query, setQuery] = useState('');
+  const [policyGroup, setPolicyGroup] = useState<DirectoryGroup | null>(null);
   const [offset, setOffset] = useState(0);
   const [editor, setEditor] = useState<{ kind: 'new' } | { kind: 'edit'; group: DirectoryGroup } | null>(null);
   const [selected, setSelected] = useState<DirectoryGroup | null>(null);
@@ -81,11 +83,12 @@ export function AdminGroups({ user, onClearUser }: { user: User | null; onClearU
     setDescription(group?.description ?? '');
     setEditor(group ? { kind: 'edit', group } : { kind: 'new' });
   };
+  if (policyGroup) return <AdminEnrollmentPolicies key={policyGroup.id} group={policyGroup} onBack={() => setPolicyGroup(null)} />;
   return <div className="admin-page">
     <div className="page-header">
       <div><h1 className="page-title">Groups</h1>
         <p>{user ? `Membership for ${user.username}` : 'Organize directory users into groups.'}</p>
-        <p className="text-muted text-sm">Administrator access is controlled by each user's role.</p>
+        <p className="text-muted text-sm">Administrator access is controlled by each user's role. Membership in a group with required MFA changes authentication requirements and cancels that user's OAuth grants. If your account requires MFA, sign in with a permitted factor within five minutes before changing such memberships.</p>
       </div>
       {user ? <button className="secondary-btn" disabled={busy} onClick={onClearUser}>All groups</button>
         : <button className="primary-btn" disabled={busy} onClick={() => edit()}>Create group</button>}
@@ -123,6 +126,7 @@ export function AdminGroups({ user, onClearUser }: { user: User | null; onClearU
             group.member ? 'DELETE' : 'PUT', `/api/admin/groups/${group.id}/members/${user.id}`)}>{group.member ? 'Remove member' : 'Add member'}</button> : <>
             <button className="secondary-btn sm" disabled={busy} onClick={() => { setEditor(null); setSelected(group); }}>Members</button>
             <button className="secondary-btn sm" disabled={busy} onClick={() => edit(group)}>Edit</button>
+            <button className="secondary-btn sm" disabled={busy} onClick={() => setPolicyGroup(group)}>MFA policy</button>
             <button className="secondary-btn sm" disabled={busy} onClick={async () => {
               if (await mutate(`Delete '${group.name}' and all of its memberships.`, 'DELETE', `/api/admin/groups/${group.id}`)) {
                 if (editor?.kind === 'edit' && editor.group.id === group.id) setEditor(null);

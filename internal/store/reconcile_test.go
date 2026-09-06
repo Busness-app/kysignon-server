@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -262,6 +263,60 @@ func TestReconcilePreviewWritesNothingAndManagedIsConnectorScoped(t *testing.T) 
 	var body string
 	if err := s.db.QueryRow(`SELECT payload_json FROM account_sync_events WHERE system_id='target' AND user_id=?`, stranger.ID).Scan(&body); err != nil || strings.Contains(body, stranger.Username) {
 		t.Fatal("connector that never held the account received its profile", body, err)
+	}
+}
+
+func TestReconcileReportBoundsRemoteText(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+	app := provisioningFixture(t, s, "target")
+	var orphans []RemoteAccount
+	huge := strings.Repeat("x", 200000)
+	for i := 0; i < 5; i++ {
+		u := createTestUser(t, s)
+		if err := s.SetAppAssignment(app, "users", u.ID, true, nil); err != nil {
+			t.Fatal(err)
+		}
+		deliverAll(t, s)
+		if err := s.SetAppAssignment(app, "users", u.ID, false, nil); err != nil {
+			t.Fatal(err)
+		}
+		deliverAll(t, s)
+		orphans = append(orphans, RemoteAccount{ID: "r" + u.ID, ExternalID: u.ID, UserName: huge, DisplayName: huge, Active: true}.Bounded())
+		if i == 4 {
+			// A deleted user's orphan, still mapped at the target, has no local name to fall back on.
+			if err := s.SaveSCIMUserLink("target", u.ID, "r"+u.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.DeleteUserWithSyncEvents(u.ID, nil); err != nil {
+				t.Fatal(err)
+			}
+			deliverAll(t, s)
+		}
+	}
+	job, err := s.CreateReconcileJob("target", "repair", "admin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _ = s.ClaimReconcileJob(time.Minute)
+	report, err := s.ReconcileDrift("target", RemoteListing{Supported: true, Complete: true, Users: orphans}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OrphanedCount != 5 {
+		t.Fatalf("%+v", report)
+	}
+	for _, e := range report.Orphaned {
+		if utf8.RuneCountInString(e.Username) > remoteTextLimit {
+			t.Fatalf("unbounded remote username retained: %d runes", utf8.RuneCountInString(e.Username))
+		}
+	}
+	if err := s.FinishReconcileJob(job, report, nil); err != nil {
+		t.Fatal(err)
+	}
+	var size int
+	if err := s.db.QueryRow(`SELECT length(result_json) FROM sync_reconcile_jobs WHERE id=?`, job.ID).Scan(&size); err != nil || size > 8192 {
+		t.Fatalf("report size %d %v", size, err)
 	}
 }
 

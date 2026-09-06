@@ -118,7 +118,7 @@ func (e *Engine) listRemote(ctx context.Context, sys *store.PairedSystem) (store
 				account.Email = m.Value
 			}
 		}
-		listing.Users = append(listing.Users, account)
+		listing.Users = append(listing.Users, account.Bounded())
 	}
 	if err != nil {
 		return listing, err
@@ -127,7 +127,7 @@ func (e *Engine) listRemote(ctx context.Context, sys *store.PairedSystem) (store
 	if sys.GroupsEnabled {
 		groups, err := e.listSCIMCollection(ctx, c, "Groups")
 		for _, r := range groups {
-			listing.Groups = append(listing.Groups, store.RemoteGroup{ID: r.ID, ExternalID: r.ExternalID, DisplayName: r.DisplayName})
+			listing.Groups = append(listing.Groups, store.RemoteGroup{ID: r.ID, ExternalID: r.ExternalID, DisplayName: r.DisplayName}.Bounded())
 		}
 		if err != nil {
 			listing.Complete = false

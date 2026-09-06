@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -261,8 +262,19 @@ type RemoteAccount struct {
 	Active                                       bool
 }
 
+// Bounded trims every target-supplied text field to remoteTextLimit runes.
+func (a RemoteAccount) Bounded() RemoteAccount {
+	a.ID, a.ExternalID, a.UserName, a.DisplayName, a.Email = boundRemoteText(a.ID), boundRemoteText(a.ExternalID), boundRemoteText(a.UserName), boundRemoteText(a.DisplayName), boundRemoteText(a.Email)
+	return a
+}
+
 type RemoteGroup struct {
 	ID, ExternalID, DisplayName string
+}
+
+func (g RemoteGroup) Bounded() RemoteGroup {
+	g.ID, g.ExternalID, g.DisplayName = boundRemoteText(g.ID), boundRemoteText(g.ExternalID), boundRemoteText(g.DisplayName)
+	return g
 }
 
 // RemoteListing is one complete or partial read of the target. Complete is false when a
@@ -303,6 +315,17 @@ type DriftReport struct {
 }
 
 const driftSample = 100
+
+// remoteTextLimit bounds any target-supplied text kept in memory or in a report.
+const remoteTextLimit = 128
+
+func boundRemoteText(s string) string {
+	if utf8.RuneCountInString(s) <= remoteTextLimit {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:remoteTextLimit])
+}
 
 func appendDrift(list *[]DriftEntry, count *int, e DriftEntry) {
 	*count++
@@ -452,16 +475,23 @@ func (s *Store) ReconcileDrift(systemID string, listing RemoteListing, repair bo
 				}
 			}
 		case !wanted && remote.Active && listing.Complete:
-			entry := DriftEntry{ID: remote.ExternalID, Username: remote.UserName, Reason: "active without access"}
+			// The report names the local account where one exists; only a deleted
+			// user's entry falls back to bounded remote text.
+			local, err := scanUser(tx.QueryRow(`SELECT `+userColumns+` FROM users WHERE id=?`, remote.ExternalID))
+			if err != nil {
+				return nil, err
+			}
+			entry := DriftEntry{ID: remote.ExternalID, Username: boundRemoteText(remote.UserName), Reason: "active without access"}
+			if local != nil {
+				entry.Username = local.Username
+			}
 			appendDrift(&report.Orphaned, &report.OrphanedCount, entry)
 			if repair {
 				if err = hold("user", remote.ExternalID); err != nil {
 					return nil, err
 				}
 				payload := scimInactivePayload(remote.ExternalID)
-				if local, err := scanUser(tx.QueryRow(`SELECT `+userColumns+` FROM users WHERE id=?`, remote.ExternalID)); err != nil {
-					return nil, err
-				} else if local != nil {
+				if local != nil {
 					if payload, err = scimUserPayload(local, false); err != nil {
 						return nil, err
 					}

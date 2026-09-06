@@ -35,6 +35,15 @@ func (h *AdminHandler) ReadBackSyncDelivery(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		result, err := h.syncEngine.ReadBackSyncUser(r.Context(), sys, a.UserID)
+		admin := GetUserFromContext(r.Context())
+		outcome := "success"
+		if err != nil {
+			outcome = "failure"
+		}
+		if auditErr := h.audit.Record("admin.sync_delivery_read_back", admin.ID, admin.Username, sys.ID, "system", h.middleware.ClientIP(r), r.UserAgent(), outcome, map[string]any{"systemName": sys.Name, "attemptToken": a.Token, "userId": a.UserID}); auditErr != nil {
+			http.Error(w, `{"error":"internal_error"}`, 500)
+			return
+		}
 		if err != nil {
 			http.Error(w, `{"error":"read_back_failed"}`, 502)
 			return
@@ -47,27 +56,37 @@ func (h *AdminHandler) ReadBackSyncDelivery(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *AdminHandler) ResumeSyncDelivery(w http.ResponseWriter, r *http.Request) {
+	admin := GetUserFromContext(r.Context())
+	details := map[string]any{"attemptToken": r.PathValue("token")}
+	// Step-up has already been consumed. Every rejected handler path needs its
+	// own audit entry, using fixed reasons rather than store/remote error text.
+	reject := func(reason string, status int) {
+		details["reason"] = reason
+		_ = h.audit.Record("admin.sync_delivery_resumed", admin.ID, admin.Username, r.PathValue("id"), "system", h.middleware.ClientIP(r), r.UserAgent(), "failure", details)
+		http.Error(w, `{"error":"`+reason+`"}`, status)
+	}
+	sys, err := h.store.GetPairedSystemByID(r.PathValue("id"))
+	if err != nil {
+		reject("internal_error", 500)
+		return
+	}
+	if sys == nil {
+		reject("system_not_found", 404)
+		return
+	}
+	details["systemName"] = sys.Name
 	var req struct {
 		ConfirmedQuiescent bool `json:"confirmedQuiescent"`
 		AllowCreateRetry   bool `json:"allowCreateRetry"`
 	}
 	if json.NewDecoder(r.Body).Decode(&req) != nil || !req.ConfirmedQuiescent {
-		http.Error(w, `{"error":"confirm_remote_quiescence"}`, 400)
-		return
-	}
-	sys, err := h.store.GetPairedSystemByID(r.PathValue("id"))
-	if err != nil {
-		http.Error(w, `{"error":"internal_error"}`, 500)
-		return
-	}
-	if sys == nil {
-		http.NotFound(w, r)
+		reject("confirm_remote_quiescence", 400)
 		return
 	}
 	if req.AllowCreateRetry {
 		attempts, err := h.store.ListSyncDeliveryAttempts(sys.ID)
 		if err != nil {
-			http.Error(w, `{"error":"internal_error"}`, 500)
+			reject("internal_error", 500)
 			return
 		}
 		absent := false
@@ -79,14 +98,13 @@ func (h *AdminHandler) ResumeSyncDelivery(w http.ResponseWriter, r *http.Request
 			absent = err == nil && result["state"] == "absent"
 		}
 		if !absent {
-			http.Error(w, `{"error":"create_retry_requires_absent_remote_user"}`, 409)
+			reject("create_retry_requires_absent_remote_user", 409)
 			return
 		}
 	}
-	admin := GetUserFromContext(r.Context())
 	event := h.audit.Prepare("admin.sync_delivery_resumed", admin.ID, admin.Username, sys.ID, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"systemName": sys.Name, "attemptToken": r.PathValue("token"), "confirmedQuiescent": true, "allowCreateRetry": req.AllowCreateRetry})
 	if err = h.store.ResumeSyncDelivery(sys.ID, r.PathValue("token"), req.AllowCreateRetry, event.Row); err != nil {
-		http.Error(w, `{"error":"attempt_changed_or_still_running"}`, 409)
+		reject("attempt_changed_or_still_running", 409)
 		return
 	}
 	event.Committed()

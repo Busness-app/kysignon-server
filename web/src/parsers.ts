@@ -148,11 +148,13 @@ export interface PairingToken {
 
 export function parsePairingToken(value: unknown): PairingToken {
   const o = obj(value, 'a pairing token response');
+  const expiresAt = Date.parse(str(o, 'expiresAt'));
+  if (!Number.isFinite(expiresAt)) return fail('a valid pairing expiry timestamp');
   return {
     pairingToken: str(o, 'pairingToken'),
     pinCode: optStr(o, 'pinCode') ?? '',
     qrPayload: optStr(o, 'qrPayload') ?? '',
-    expiresAt: typeof o.expiresAt === 'number' ? o.expiresAt : 0,
+    expiresAt,
   };
 }
 

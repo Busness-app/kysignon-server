@@ -5,7 +5,7 @@ KySignOn Server is the single-organization SSO provider and central identity aut
 ## Core Capabilities & Responsibilities
 
 1. **Central User Directory & Replication**: KySignOn is the source of truth for accounts. When an admin creates, updates, or disables an account, it automatically replicates to paired KySecurity products via bare SCIM 2.0 user bodies signed with `ky-primitives/syncauth`; event type and event ID are part of the signature, and the sync secret is never sent in `Authorization`.
-2. **Direct SCIM 2.0 Service Connection**: Admin configures downstream KySecurity and 3rd-party product servers directly with their SCIM Base URL and Bearer token for automated RESTful CRUD replication.
+2. **Outbound SCIM 2.0**: Generic `scim` connectors use the target-issued Bearer token encrypted at rest and `ky-primitives/scim` resource writes; known suite types and explicit `suite_webhook` retain signed webhooks. Legacy custom/unknown types pause delivery until an administrator selects a protocol. Remote IDs and uncertain-create markers persist per connector/local user, surviving local user deletion. Strict bounded externalId lookup recovers lost create responses; unresolved outcomes never trigger another create. Generic deletion uses `active=false` PATCH, preserving downstream data. Configuration review/token replacement requires step-up and atomic audit. Connection tests only prove Users lookup, not write permissions. Setup and limitations: README.md, Outbound provisioning.
 3. **OpenID Connect & OAuth 2.0**: Standard authorization-code flow with PKCE, RS256 ID tokens, and JWKS discovery.
 4. **Native Device Pairing & Push MFA**: Natively hosts device pairing (`/api/notifications/native/register`) using 90s PIN/QR codes, push challenge dispatch through FCM/APNs relay Workers with 2-digit number matching, and TOTP/recovery code support.
 5. **Dashboard & Application Launcher**: Suite sidebar layout in Space Grotesk and IBM Plex Mono, themed with the fifteen KyPost palettes (`web/src/theme.ts`, Patina Ky default, chosen under Appearance and kept in this browser). Accent is a fill colour only; as text it fails contrast on the light palettes. `css/styles.css` serves the fonts and the pre-bundle fallback page.
@@ -62,7 +62,7 @@ Non-trivial logic must include one runnable check (unit test or minimal self-che
 
 ## Verification
 
-- CI runs Go formatting, build, vet, vulnerability scanning, and race-enabled tests.
+- CI runs Go formatting, build, vet, vulnerability scanning, and race-enabled tests. SCIM fixtures cover remote IDs, lost responses, malformed/ambiguous lookup pages, throttling, token isolation, legacy review, and mapping durability; API tests cover step-up and secret redaction.
 - App-access regression tests cover sole-grant group deletion revoking tokens and codes, and enabled/disabled previews with unfiltered loss counts and strict API boolean validation.
 - CI builds, audits, and tests the web app, and rejects stale committed `web/dist` assets.
 - CI audits and typechecks both push Workers and runs their shared and provider behavior tests.

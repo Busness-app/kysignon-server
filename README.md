@@ -499,3 +499,46 @@ A malformed value is a startup error, never a silently weakened key. Generate wi
 ## License & Security
 
 Refer to [SECURITY.md](SECURITY.md) for vulnerability disclosure procedures and [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+
+## Outbound provisioning
+
+In **Suite sync**, choose **Generic SCIM 2.0** and enter the target's HTTPS SCIM
+base URL and its provisioning Bearer token. KySignOn encrypts the token at rest;
+**Replace token** changes it without changing the connector or application identity.
+The token is never returned in listings or copied into delivery errors. **Test
+connection** performs a filtered Users read; success does not prove write permissions
+or that an account has been provisioned.
+
+The target must support `externalId eq "..."` filtering, standard ListResponse totals,
+User creation, PUT updates, and PATCH of `active`. Lookup requests ask for the first
+two matches: zero permits creation, one identifies the managed account, and more
+than one requires intervention. Partial or inconsistent pages fail closed. Responses
+are bounded to 1 MiB. KySignOn sends its stable user ID as `externalId` and stores
+the remote ID returned by create or lookup. URLs ending in `/Users` from the old
+connection form are normalized to their base URL. Generic SCIM requires HTTPS even
+with private callbacks enabled; the existing outbound dial restrictions still apply.
+
+A source account deletion deactivates the remote account with `active=false`; it
+never sends DELETE. Local MFA resets send no generic SCIM mutation. Suite products
+retain their signed webhook events, including the existing deletion contract.
+
+After a lost create response, delivery looks up the same externalId before doing
+anything else. An unresolved create remains an error rather than risking a duplicate.
+Check the downstream operation and restore the correct externalId there, then resync;
+if the request never committed, operator reconciliation of the uncertain-create
+record is required. Do not clear that record while the target may still commit the
+request. Explicit create rejection (4xx) permits a later retry. Retry-After extends
+the ordinary backoff, capped at one hour; the existing five-attempt budget remains.
+
+Known KySecurity product types and **Custom signed suite webhook** use a generated
+signing secret shown once. They send bare SCIM user bodies with `syncauth` signatures,
+never a Bearer header. Legacy `custom` or unknown types show **Protocol review
+required** and retain pending events without spending retries. **Review connection**
+requires step-up: select the actual protocol, supplying a target-issued token for
+SCIM or retaining the existing signing secret for a suite webhook. Review preserves
+the destination URL, connection ID, application linkage and assignments.
+
+Provisioning still covers the existing whole-directory scope. Assignment-aware
+provisioning, per-resource ordering across events/workers, group delivery, and full
+reconciliation remain roadmap PR08–09. A late older update can still overwrite newer
+state; this interoperability change does not establish ordering or verified removal.

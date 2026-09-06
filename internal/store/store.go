@@ -330,6 +330,9 @@ func (s *Store) migrate() error {
 	if err := s.migrateNativeDevicePushTokenReplayState(); err != nil {
 		return err
 	}
+	if err := s.migrateSCIM(); err != nil {
+		return err
+	}
 	if err := s.migratePairedSystemsMetadata(); err != nil {
 		return err
 	}

@@ -998,3 +998,60 @@ func (h *AdminHandler) ListAuditEvents(w http.ResponseWriter, r *http.Request) {
 		"limit":       limit,
 	})
 }
+
+// ConfigureSystem reviews a legacy connector or replaces a generic SCIM token.
+func (h *AdminHandler) ConfigureSystem(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SystemType  string `json:"systemType"`
+		BearerToken string `json:"bearerToken"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		http.Error(w, `{"error":"invalid_request"}`, 400)
+		return
+	}
+	sys, err := h.store.GetPairedSystemByID(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, 500)
+		return
+	}
+	if sys == nil {
+		http.NotFound(w, r)
+		return
+	}
+	admin := GetUserFromContext(r.Context())
+	event := h.audit.Prepare("admin.system_configured", admin.ID, admin.Username, sys.ID, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"systemName": sys.Name, "systemType": req.SystemType})
+	if err = h.syncEngine.ReviewSystem(sys, req.SystemType, req.BearerToken, event.Row); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_connection", "error_description": err.Error()})
+		return
+	}
+	event.Committed()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (h *AdminHandler) TestSystem(w http.ResponseWriter, r *http.Request) {
+	sys, err := h.store.GetPairedSystemByID(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, `{"error":"internal_error"}`, 500)
+		return
+	}
+	if sys == nil {
+		http.NotFound(w, r)
+		return
+	}
+	err = h.syncEngine.TestSystem(r.Context(), sys)
+	admin := GetUserFromContext(r.Context())
+	result := "success"
+	if err != nil {
+		result = "failure"
+	}
+	h.audit.Record("admin.system_tested", admin.ID, admin.Username, sys.ID, "system", h.middleware.ClientIP(r), r.UserAgent(), result, nil)
+	if err != nil {
+		http.Error(w, `{"error":"connection_test_failed","error_description":"Check the SCIM base URL, bearer token, network access and externalId filtering."}`, 400)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}

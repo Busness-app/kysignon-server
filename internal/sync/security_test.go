@@ -85,7 +85,7 @@ func TestEventsAreScopedToTheirSystem(t *testing.T) {
 
 	pair := func(name, url string) string {
 		ps, _, err := e.CreateSystem(&CreateSystemRequest{
-			Name: name, SystemType: "custom", CallbackURL: url,
+			Name: name, SystemType: "suite_webhook", CallbackURL: url,
 		})
 		if err != nil {
 			t.Fatalf("pairing %s: %v", name, err)
@@ -123,7 +123,7 @@ func TestUndeliverableEventStaysQueued(t *testing.T) {
 	defer srv.Close()
 
 	ps, _, err := e.CreateSystem(&CreateSystemRequest{
-		Name: "mail", SystemType: "custom", CallbackURL: srv.URL,
+		Name: "mail", SystemType: "suite_webhook", CallbackURL: srv.URL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestFailedDeliveryBacksOff(t *testing.T) {
 	defer failing.Close()
 
 	ps, _, err := e.CreateSystem(&CreateSystemRequest{
-		Name: "flaky", SystemType: "custom", CallbackURL: failing.URL,
+		Name: "flaky", SystemType: "suite_webhook", CallbackURL: failing.URL,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +250,7 @@ func TestConcurrentDispatchDeliversEachEventOnce(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ps, _, err := e.CreateSystem(&CreateSystemRequest{Name: "dup-check", SystemType: "custom", CallbackURL: srv.URL})
+	ps, _, err := e.CreateSystem(&CreateSystemRequest{Name: "dup-check", SystemType: "suite_webhook", CallbackURL: srv.URL})
 	if err != nil {
 		t.Fatal(err)
 	}

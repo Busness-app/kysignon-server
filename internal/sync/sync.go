@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/scim"
 	"github.com/Busness-app/ky-primitives/syncauth"
 	"github.com/Busness-app/kysignon-server/internal/crypto"
 	"github.com/Busness-app/kysignon-server/internal/netguard"
@@ -39,7 +40,7 @@ func ValidateCallbackURL(raw string) error {
 	return netguard.ValidateURL(raw, "callbackUrl")
 }
 
-// SigningSecret recovers the webhook/SCIM bearer signing secret for a paired system.
+// SigningSecret recovers the encrypted connector credential (signing secret or SCIM Bearer token).
 func (e *Engine) SigningSecret(sys *store.PairedSystem) (string, error) {
 	if sys.HMACSecretEncrypted == "" {
 		return "", errors.New("paired system has no signing secret; re-pair it")
@@ -315,9 +316,10 @@ type CreateSystemRequest struct {
 	Description string `json:"description,omitempty"`
 	IconURL     string `json:"iconUrl,omitempty"`
 	CallbackURL string `json:"callbackUrl"`
+	BearerToken string `json:"bearerToken,omitempty"`
 }
 
-// CreateSystem connects a downstream SCIM target service directly with a server-generated Bearer API token.
+// CreateSystem stores a supplied SCIM token or generates a suite webhook signing secret.
 func (e *Engine) CreateSystem(req *CreateSystemRequest) (*store.PairedSystem, string, error) {
 	if req.Name == "" {
 		req.Name = req.SystemType
@@ -332,10 +334,23 @@ func (e *Engine) CreateSystem(req *CreateSystemRequest) (*store.PairedSystem, st
 		return nil, "", err
 	}
 
-	// Always generate a cryptographically secure 256-bit Bearer API token
-	token, err := crypto.GenerateRandomHex(32)
-	if err != nil {
-		return nil, "", err
+	if !supportedSystemType(req.SystemType) {
+		return nil, "", errors.New("select scim or suite_webhook explicitly for a custom service")
+	}
+	token := req.BearerToken
+	var err error
+	if req.SystemType == "scim" {
+		if err = validateSCIMConfig(req.CallbackURL, token); err != nil {
+			return nil, "", err
+		}
+	} else {
+		if token != "" {
+			return nil, "", errors.New("suite webhooks use a generated signing secret")
+		}
+		token, err = crypto.GenerateRandomHex(32)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 
 	encrypted, err := crypto.EncryptAESGCM(e.encryptionKey, []byte(token))
@@ -355,6 +370,9 @@ func (e *Engine) CreateSystem(req *CreateSystemRequest) (*store.PairedSystem, st
 	}
 	if err := e.store.CreatePairedSystem(ps); err != nil {
 		return nil, "", err
+	}
+	if req.SystemType == "scim" {
+		return ps, "", nil
 	}
 	return ps, token, nil
 }
@@ -413,7 +431,7 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 			}
 			continue
 		}
-		if sys.Status == "disabled" {
+		if sys.Status == "disabled" || !supportedSystemType(sys.SystemType) {
 			if err := e.store.ReleaseSyncEventLease(ev.ID); err != nil {
 				return err
 			}
@@ -452,12 +470,17 @@ func (e *Engine) DispatchPendingEvents(ctx context.Context) error {
 				return serr
 			}
 			if attempts >= 5 {
-				if serr := e.store.UpdateSyncEventStatus(ev.ID, "failed", derr.Error(), attempts, nil); serr != nil {
+				if serr := e.store.UpdateSyncEventStatus(ev.ID, "failed", deliveryError(derr), attempts, nil); serr != nil {
 					return serr
 				}
 			} else {
-				next := time.Now().UTC().Add(retryDelay(ev.Attempts))
-				if serr := e.store.UpdateSyncEventStatus(ev.ID, "pending", derr.Error(), attempts, &next); serr != nil {
+				delay := retryDelay(ev.Attempts)
+				var remoteErr *scim.Error
+				if errors.As(derr, &remoteErr) {
+					delay = max(delay, remoteErr.RetryAfter)
+				}
+				next := time.Now().UTC().Add(delay)
+				if serr := e.store.UpdateSyncEventStatus(ev.ID, "pending", deliveryError(derr), attempts, &next); serr != nil {
 					return serr
 				}
 			}
@@ -494,37 +517,17 @@ func resolveSCIMURL(sys *store.PairedSystem, eventType, userID string) (method s
 		return http.MethodPost, trimmed, true
 	}
 
-	// Explicit generic SCIM targets use RFC 7644 routes. Suite product types own
-	// their signed webhook contract even if an old callback path contains "scim".
-	isRESTfulSCIM := sys.SystemType == "scim" || (sys.SystemType == "custom" && (strings.Contains(trimmed, "/scim") ||
-		strings.HasSuffix(trimmed, "/Users") ||
-		strings.HasSuffix(trimmed, "/v2")))
-
-	if isRESTfulSCIM {
-		var baseUsersURL string
-		if strings.HasSuffix(trimmed, "/Users") {
-			baseUsersURL = trimmed
-		} else {
-			baseUsersURL = trimmed + "/Users"
-		}
-
-		switch eventType {
-		case "user.created":
-			return http.MethodPost, baseUsersURL, true
-		case "user.updated":
-			return http.MethodPut, fmt.Sprintf("%s/%s", baseUsersURL, url.PathEscape(userID)), true
-		case "user.deleted":
-			return http.MethodDelete, fmt.Sprintf("%s/%s", baseUsersURL, url.PathEscape(userID)), false
-		default:
-			return http.MethodPost, baseUsersURL, true
-		}
-	}
-
 	// For legacy webhooks, default to POST callback URL directly
 	return http.MethodPost, trimmed, true
 }
 
 func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, eventID, eventType, userID string, payload []byte) error {
+	if sys.SystemType == "scim" {
+		return e.deliverSCIM(ctx, sys, secret, eventType, userID, payload)
+	}
+	if !supportedSystemType(sys.SystemType) {
+		return errors.New("connector protocol requires administrator review")
+	}
 	method, targetURL, isBodyRequired := resolveSCIMURL(sys, eventType, userID)
 
 	var bodyReader *bytes.Reader
@@ -561,7 +564,7 @@ func (e *Engine) deliver(ctx context.Context, sys *store.PairedSystem, secret, e
 	}
 	defer resp.Body.Close()
 
-	// SCIM success codes: 200, 201, 204, or 404 on DELETE (already gone), or 409 on POST (already exists)
+	// Preserve suite webhook acknowledgments, including already-gone deletion.
 	if (resp.StatusCode >= 200 && resp.StatusCode < 300) ||
 		(eventType == "user.deleted" && resp.StatusCode == http.StatusNotFound) ||
 		(eventType == "user.created" && resp.StatusCode == http.StatusConflict) {

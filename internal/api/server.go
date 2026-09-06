@@ -207,6 +207,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.Handle("DELETE /api/admin/users/{id}", adminStepUpM(http.HandlerFunc(adminH.DeleteUser)))
 
 	mux.Handle("GET /api/admin/systems", adminM(http.HandlerFunc(adminH.ListPairedSystems)))
+	mux.Handle("PUT /api/admin/systems/{id}/connection", adminStepUpM(http.HandlerFunc(adminH.ConfigureSystem)))
+	mux.Handle("POST /api/admin/systems/{id}/test", adminM(http.HandlerFunc(adminH.TestSystem)))
 	mux.Handle("POST /api/admin/systems", adminStepUpM(http.HandlerFunc(adminH.CreatePairedSystem)))
 	mux.Handle("POST /api/admin/systems/{id}/resync", adminM(http.HandlerFunc(adminH.ResyncSystem)))
 	mux.Handle("DELETE /api/admin/systems/{id}", adminStepUpM(http.HandlerFunc(adminH.DeletePairedSystem)))

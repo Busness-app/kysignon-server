@@ -216,3 +216,106 @@ func TestEnrollmentPolicyDenialAuditAndPreviewFailure(t *testing.T) {
 		t.Fatal("unaudited preview disclosed", r.Code, r.Body.String())
 	}
 }
+
+func TestEnrollmentInteractionCannotSkipExistingFactor(t *testing.T) {
+	for _, allowed := range []string{"push", "webauthn"} {
+		t.Run(allowed, func(t *testing.T) {
+			srv, db, _, _, _, cleanup := setupTestServer(t)
+			defer cleanup()
+			admin := newUser(t, db, "admin")
+			if allowed == "webauthn" {
+				enrolPasskey(t, db, admin.ID, newTestAuthenticator(t, "admin-key"))
+			} else {
+				if err := db.UpsertNativeDevice(&store.NativeDevice{ID: "admin-phone", UserID: admin.ID, DeviceIdentifier: "phone", PublicKey: "test", IsMFAApprover: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Now().UTC()
+			if err := db.CreateSession(&store.Session{ID: "policy-admin", UserID: admin.ID, SessionTokenHash: "policy-admin", ExpiresAt: now.Add(time.Hour), AuthenticationEvidence: store.AuthenticationEvidence{PrimaryAuthenticatedAt: &now, FactorAuthenticatedAt: &now, FactorMethod: allowed}}); err != nil {
+				t.Fatal(err)
+			}
+			u := newUser(t, db, "user")
+			if err := srv.mfaEngine.SaveUserTOTP(u.ID, "JBSWY3DPEHPK3PXP", nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SetEnrollmentPolicy(store.EnrollmentPolicy{Scope: "organization", Required: true, AllowedMethods: []string{allowed}, Revision: 1}, "policy-admin", nil); err != nil {
+				t.Fatal(err)
+			}
+			newClient(t, db, "app", []string{"https://app.example/cb"}, []string{"openid"})
+			setTestAuthenticationPolicy(t, db, "app", store.AppAuthenticationPolicy{Mode: "reuse", Factor: "passkey"})
+			browser := interactionBrowser(t, srv)
+			r := browser("GET", "/oauth/authorize?"+appAuthQuery("app").Encode(), nil)
+			location, _ := url.Parse(r.Header().Get("Location"))
+			interaction := location.Query().Get("interaction")
+			if interaction == "" {
+				t.Fatal("missing interaction")
+			}
+			r = browser("POST", "/api/auth/login", map[string]string{"username": u.Username, "password": "correct-horse-battery", "interaction": interaction})
+			if r.Code != 403 {
+				t.Fatalf("existing TOTP bypassed: status=%d body=%s", r.Code, r.Body.String())
+			}
+			for _, c := range r.Result().Cookies() {
+				if c.Name == "kysignon_session" && c.Value != "" {
+					t.Fatal("password-only session issued")
+				}
+			}
+			if r := browser("POST", "/api/user/devices/pairing-token", nil); r.Code != 401 {
+				t.Fatal("unauthenticated pairing", r.Code)
+			}
+
+			// Normal sign-in still requires the existing factor before enrollment access.
+			r = browser("POST", "/api/auth/login", map[string]string{"username": u.Username, "password": "correct-horse-battery"})
+			var step LoginResponse
+			if err := json.Unmarshal(r.Body.Bytes(), &step); err != nil || !step.MFARequired {
+				t.Fatal("existing factor not required", r.Body.String())
+			}
+			r = browser("POST", "/api/auth/mfa/totp/verify", map[string]string{"mfaToken": step.MFAToken, "code": testTOTPCode(t, "JBSWY3DPEHPK3PXP")})
+			if r.Code != 200 || !strings.Contains(r.Body.String(), `"restricted":true`) {
+				t.Fatal("verified factor enrollment access", r.Code, r.Body.String())
+			}
+			if r := browser("POST", "/api/user/devices/pairing-token", nil); r.Code != 403 {
+				t.Fatal("pairing without step-up", r.Code)
+			}
+			r = browser("POST", "/api/auth/step-up", map[string]string{"password": "correct-horse-battery", "operation": "POST /api/user/devices/pairing-token"})
+			if r.Code == 200 {
+				t.Fatal("password alone obtained enrollment grant", r.Body.String())
+			}
+			// A genuinely never-enrolled account can still enter restricted enrollment.
+			fresh := newUser(t, db, "user")
+			freshBrowser := interactionBrowser(t, srv)
+			r = freshBrowser("GET", "/oauth/authorize?"+appAuthQuery("app").Encode(), nil)
+			location, _ = url.Parse(r.Header().Get("Location"))
+			r = freshBrowser("POST", "/api/auth/login", map[string]string{"username": fresh.Username, "password": "correct-horse-battery", "interaction": location.Query().Get("interaction")})
+			if r.Code != 200 || sessionCookie(r) == nil || !strings.Contains(r.Body.String(), `"restricted":true`) {
+				t.Fatal("never-enrolled fallback broken", r.Code, r.Body.String())
+			}
+		})
+	}
+}
+
+func TestPairingTokenRequiresBoundSingleUseStepUp(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	admin := enrollmentAPIAdmin(t, srv, db)
+	u := newUser(t, db, "user")
+	body := policyJSON(t, store.EnrollmentPolicy{Scope: "organization", Required: true, AllowedMethods: []string{"totp", "push"}, Revision: 1})
+	if r := adminRequest(t, srv, "PUT", "/api/admin/enrollment-policies", admin, body); r.Code != 200 {
+		t.Fatal(r.Body.String())
+	}
+	cookie := newSession(t, db, u, time.Now().UTC().Add(time.Hour))
+	path := "/api/user/devices/pairing-token"
+	if r := adminRequestNoStepUp(t, srv, "POST", path, cookie, `{}`); r.Code != 403 {
+		t.Fatalf("pairing without proof: %d", r.Code)
+	}
+	wrong := mintStepUp(t, srv, cookie, "POST /api/user/mfa/totp/enable")
+	if r := adminRequestWithStepUp(t, srv, "POST", path, cookie, `{}`, wrong); r.Code != 403 {
+		t.Fatal("wrong operation accepted", r.Code)
+	}
+	grant := mintStepUp(t, srv, cookie, "POST "+path)
+	if r := adminRequestWithStepUp(t, srv, "POST", path, cookie, `{}`, grant); r.Code != 200 {
+		t.Fatal("authorized enrollment denied", r.Code, r.Body.String())
+	}
+	if r := adminRequestWithStepUp(t, srv, "POST", path, cookie, `{}`, grant); r.Code != 403 {
+		t.Fatal("grant replay", r.Code)
+	}
+}

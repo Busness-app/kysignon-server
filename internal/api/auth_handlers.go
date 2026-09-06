@@ -222,7 +222,8 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if len(methodTypes) == 0 && (policy.Factor != "password" || requirements.ACR == oauth.MFAACR) {
-			if enrollment.Required && !enrollment.Enrolled && enrollment.Deadline <= time.Now().Unix() {
+			// A disallowed factor is still an enrolled credential; it must not be bypassed.
+			if enrollment.Required && len(mfaMethods) == 0 && len(passkeys) == 0 && enrollment.Deadline <= time.Now().Unix() {
 				h.createSessionAndRespond(w, r, user, store.AuthenticationEvidence{PrimaryAuthenticatedAt: &primaryAt}, interactionHash)
 				return
 			}

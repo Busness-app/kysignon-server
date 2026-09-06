@@ -138,11 +138,12 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
   }, [showPairModal, pairStartedAt, pairExpiresAt, pairDeviceIdsBefore, onUserUpdate]);
 
   const handleStartDevicePairing = async () => {
-    setShowPairModal(true);
-    setPairStartedAt(Date.now());
-    setPairDeviceIdsBefore(new Set(devices.map((dev) => dev.id)));
     try {
-      const data = await apiJson('/api/user/devices/pairing-token', parsePairingToken, { method: 'POST' });
+      const stepUpToken = await requestGrant('Pair a phone that can approve sign-ins.', 'POST /api/user/devices/pairing-token');
+      setShowPairModal(true);
+      setPairStartedAt(Date.now());
+      setPairDeviceIdsBefore(new Set(devices.map((dev) => dev.id)));
+      const data = await apiJson('/api/user/devices/pairing-token', parsePairingToken, { method: 'POST', stepUpToken });
       setPairPin(data.pinCode);
       const exp = new Date(data.expiresAt).getTime();
       setPairExpiresAt(exp);
@@ -156,7 +157,7 @@ export const DeviceSettings: React.FC<DeviceSettingsProps> = ({ user, onUserUpda
         });
       }
     } catch (err) {
-      alert(errorMessage(err, 'Failed to generate pairing token'));
+      if (!isCancelled(err)) alert(errorMessage(err, 'Failed to generate pairing token'));
       closePairModal();
     }
   };

@@ -43,6 +43,11 @@ func (h *DeviceHandler) GenerateDevicePairingToken(w http.ResponseWriter, r *htt
 		return
 	}
 
+	if err := consumeStepUp(h.store, r); err != nil {
+		writeStepUpError(w, err)
+		return
+	}
+
 	token, pin, expiresAt, err := h.mfaEngine.GenerateDevicePairingToken(user.ID)
 	if err != nil {
 		log.Printf("device pairing token creation failed for user %s: %v", user.ID, err)

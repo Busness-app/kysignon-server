@@ -359,7 +359,9 @@ requirements remain PR06b.
 
 Unenrolled users may continue during grace, subject to stricter app policies. Users with
 a permitted factor must sign in with it immediately. At the deadline, password-only
-sign-in produces an enrollment-only session. Recovery sign-in is also restricted when
+sign-in produces an enrollment-only session only for accounts with no enrolled factor.
+An existing factor still has to be verified even when policy no longer permits it.
+Pairing a new approver phone requires operation-bound step-up, including during enrollment. Recovery sign-in is also restricted when
 MFA is required. Such sessions can inspect identity/factors, obtain operation-bound
 factor-enrollment grants, enroll and sign out; they cannot access applications, admin
 APIs, OAuth codes or online tokens. Completing enrollment does not upgrade that session:

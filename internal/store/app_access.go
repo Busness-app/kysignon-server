@@ -108,6 +108,9 @@ func (s *Store) SetAppPolicy(id, mode string, enabled bool, revision int, audit 
 	if err = revokeLostAppAccessTx(tx); err != nil {
 		return err
 	}
+	if err = reconcileProvisioningTx(tx, time.Now().UTC()); err != nil {
+		return err
+	}
 	if err = appRegistryAudit(audit, map[string]any{"before": before, "accessMode": mode, "enabled": enabled}); err != nil {
 		return err
 	}
@@ -160,6 +163,9 @@ func (s *Store) SetAppAssignment(id, kind, principal string, assigned bool, audi
 	if err = revokeLostAppAccessTx(tx); err != nil {
 		return err
 	}
+	if err = reconcileProvisioningTx(tx, time.Now().UTC()); err != nil {
+		return err
+	}
 	app, err := scanAppRecord(tx.QueryRow(appRecordSelect+appRecordFrom+` WHERE a.id=?`, id))
 	if err != nil {
 		return err
@@ -190,7 +196,10 @@ type AppAccessUsers struct {
 	Limit        int             `json:"limit"`
 	Offset       int             `json:"offset"`
 	LosingAccess int             `json:"losingAccess"`
-	App          AppRecord       `json:"app"`
+	// GainingAccess counts active users the proposed policy would newly admit; with a
+	// linked provisioning system these become downstream account changes.
+	GainingAccess int       `json:"gainingAccess"`
+	App           AppRecord `json:"app"`
 }
 
 func (s *Store) ListAppAccessUsers(id, query, previewMode string, previewEnabled *bool, limit, offset int) (*AppAccessUsers, error) {
@@ -217,6 +226,9 @@ func (s *Store) ListAppAccessUsers(id, query, previewMode string, previewEnabled
 	current, proposed := appAllowedSQL("f.access_mode", "f.enabled"), appAllowedSQL("?", "?")
 	// Predicate placeholders appear in enabled, mode order.
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM app_access_facts f WHERE f.app_id=? AND (`+current+`) AND NOT (`+proposed+`)`, id, enabled, mode).Scan(&p.LosingAccess); err != nil {
+		return nil, err
+	}
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM app_access_facts f WHERE f.app_id=? AND NOT (`+current+`) AND (`+proposed+`)`, id, enabled, mode).Scan(&p.GainingAccess); err != nil {
 		return nil, err
 	}
 	from := ` FROM users u JOIN app_access_facts f ON f.user_id=u.id WHERE f.app_id=? AND (instr(lower(u.username),lower(?))>0 OR instr(lower(u.display_name),lower(?))>0)`

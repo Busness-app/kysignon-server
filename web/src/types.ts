@@ -24,6 +24,7 @@ export interface PairedSystem {
   status: 'active' | 'failing' | 'disabled';
   lastSyncedAt?: string;
   createdAt: string;
+  groupsEnabled: boolean;
 }
 
 export interface NativeDevice {
@@ -193,4 +194,4 @@ export interface AppAccessUser {
  reason: 'user_disabled' | 'app_disabled' | 'client_disabled' | 'all_active_users' | 'direct_assignment' | 'group_assignment' | 'not_assigned';
 }
 export interface AppAccessGroup { id: string; name: string; assigned: boolean }
-export interface AppAccessPage extends DirectoryPage<AppAccessUser> { app: AppRecord; losingAccess: number }
+export interface AppAccessPage extends DirectoryPage<AppAccessUser> { app: AppRecord; losingAccess: number; gainingAccess: number }

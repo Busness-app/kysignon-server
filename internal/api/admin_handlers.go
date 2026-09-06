@@ -106,7 +106,7 @@ func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		"username": user.Username,
 		"role":     user.Role,
 	})
-	if err := h.syncEngine.CreateUserAndQueueSyncEvents(user, userSyncPayload(user), created.Row); err != nil {
+	if err := h.syncEngine.CreateUserAndQueueSyncEvents(user, created.Row); err != nil {
 		http.Error(w, `{"error":"user_exists","error_description":"Username or email already exists"}`, http.StatusConflict)
 		return
 	}
@@ -181,7 +181,7 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		"demoted":       demoted,
 		"accessRevoked": revokeAccess,
 	})
-	if err := h.syncEngine.UpdateUserAndQueueSyncEvents(user, revokeAccess, userSyncPayload(user), updated.Row); err != nil {
+	if err := h.syncEngine.UpdateUserAndQueueSyncEvents(user, revokeAccess, updated.Row); err != nil {
 		if errors.Is(err, store.ErrEnrollmentPolicy) {
 			enrollmentError(w, err)
 		} else if errors.Is(err, store.ErrLastActiveAdmin) {
@@ -225,10 +225,7 @@ func (h *AdminHandler) ResetUserMFA(w http.ResponseWriter, r *http.Request) {
 	reset := h.audit.Prepare("admin.user_mfa_reset", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"username": user.Username,
 	})
-	if err := h.syncEngine.ResetUserMFAAndRevoke(user.ID, map[string]any{
-		"id":       user.ID,
-		"username": user.Username,
-	}, reset.Row); err != nil {
+	if err := h.syncEngine.ResetUserMFAAndRevoke(user.ID, reset.Row); err != nil {
 		log.Printf("MFA reset for user %s failed: %v", user.ID, err)
 		h.audit.Record("admin.user_mfa_reset", admin.ID, admin.Username, user.ID, "user", h.middleware.ClientIP(r), r.UserAgent(), "failure", map[string]any{
 			"username": user.Username,
@@ -279,10 +276,7 @@ func (h *AdminHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	deleted := h.audit.Prepare("admin.user_deleted", admin.ID, admin.Username, userID, "user", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{
 		"username": user.Username,
 	})
-	if err := h.syncEngine.DeleteUserAndQueueSyncEvents(userID, map[string]any{
-		"id":       userID,
-		"username": user.Username,
-	}, deleted.Row); err != nil {
+	if err := h.syncEngine.DeleteUserAndQueueSyncEvents(userID, deleted.Row); err != nil {
 		if errors.Is(err, store.ErrLastActiveAdmin) {
 			http.Error(w, `{"error":"cannot_delete_last_admin","error_description":"Cannot delete the only active administrator"}`, http.StatusBadRequest)
 		} else {
@@ -777,10 +771,6 @@ func (h *AdminHandler) CreateApplication(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "application": app})
 }
 
-func userSyncPayload(user *store.User) *sync.SCIMUserResource {
-	return sync.UserToSCIMResource(user)
-}
-
 func validateRegisteredURLs(redirectURIs []string, launchURL string) error {
 	for _, raw := range redirectURIs {
 		if err := validateExternalURL(raw); err != nil {
@@ -1004,6 +994,7 @@ func (h *AdminHandler) ConfigureSystem(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SystemType  string `json:"systemType"`
 		BearerToken string `json:"bearerToken"`
+		Groups      *bool  `json:"groups"`
 	}
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		http.Error(w, `{"error":"invalid_request"}`, 400)
@@ -1018,9 +1009,14 @@ func (h *AdminHandler) ConfigureSystem(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// An omitted flag keeps the current setting; only an explicit value changes it.
+	groups := sys.GroupsEnabled
+	if req.Groups != nil {
+		groups = *req.Groups
+	}
 	admin := GetUserFromContext(r.Context())
-	event := h.audit.Prepare("admin.system_configured", admin.ID, admin.Username, sys.ID, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"systemName": sys.Name, "systemType": req.SystemType})
-	if err = h.syncEngine.ReviewSystem(sys, req.SystemType, req.BearerToken, event.Row); err != nil {
+	event := h.audit.Prepare("admin.system_configured", admin.ID, admin.Username, sys.ID, "system", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"systemName": sys.Name, "systemType": req.SystemType, "groups": groups})
+	if err = h.syncEngine.ReviewSystem(sys, req.SystemType, req.BearerToken, groups, event.Row); err != nil {
 		protocol := req.SystemType
 		if protocol != "scim" && protocol != "suite_webhook" {
 			protocol = "invalid"

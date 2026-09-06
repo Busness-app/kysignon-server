@@ -7,6 +7,7 @@ import (
 	"github.com/Busness-app/kysignon-server/internal/store"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -41,9 +42,10 @@ func (t *deliveryTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return resp, err
 }
 
-// ReadBackSyncUser reports observation only. It cannot prove a remote write has
-// finished and deliberately does not release a delivery fence or create marker.
-func (e *Engine) ReadBackSyncUser(ctx context.Context, sys *store.PairedSystem, userID string) (map[string]any, error) {
+// ReadBackSyncResource reports observation only. It cannot prove a remote write has
+// finished and deliberately does not release a delivery fence or create marker. The
+// collection follows the attempt's event type, so a group attempt never reads Users.
+func (e *Engine) ReadBackSyncResource(ctx context.Context, sys *store.PairedSystem, eventType, resourceID string) (map[string]any, error) {
 	if sys.SystemType != "scim" {
 		return map[string]any{"state": "unsupported"}, nil
 	}
@@ -51,12 +53,16 @@ func (e *Engine) ReadBackSyncUser(ctx context.Context, sys *store.PairedSystem, 
 	if err != nil {
 		return nil, err
 	}
-	remote, err := e.findSCIMUser(ctx, e.scimClient(sys, secret), userID)
+	collection := "Users"
+	if strings.HasPrefix(eventType, "group.") {
+		collection = "Groups"
+	}
+	remoteID, err := e.findSCIMResource(ctx, e.scimClient(sys, secret), collection, resourceID)
 	if errors.Is(err, scim.ErrNotFound) {
 		return map[string]any{"state": "absent"}, nil
 	}
 	if err != nil {
 		return nil, errors.New("read-back failed; verify endpoint, credentials and externalId filtering")
 	}
-	return map[string]any{"state": "present", "remoteId": remote.ID}, nil
+	return map[string]any{"state": "present", "remoteId": remoteID}, nil
 }

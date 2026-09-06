@@ -126,6 +126,11 @@ describe('parsePairedSystems', () => {
       /status/,
     );
   });
+
+  it('defaults groupsEnabled to false when absent', () => {
+    expect(parsePairedSystems({ systems: [system] })[0].groupsEnabled).toBe(false);
+    expect(parsePairedSystems({ systems: [{ ...system, groupsEnabled: true }] })[0].groupsEnabled).toBe(true);
+  });
 });
 
 describe('parseAuditPage', () => {
@@ -329,8 +334,9 @@ it('validates app registry references and revisions', () => {
 it('validates effective-access decisions and preview metadata', () => {
  const app = { id: 'app', revision: 1, authenticationRevision: 1, authentication: { mode: 'reuse', primaryMaxAge: 0, factor: 'password', factorMaxAge: 0 }, accessMode: 'assigned_only', enabled: true, clientId: 'c', clientName: 'C', launcherId: '', launcherName: '', systemId: '', systemName: '' };
  const user = { id: 'u', username: 'User', displayName: '', status: 'active', direct: false, groupAssigned: true, effective: true, preview: false, reason: 'group_assignment' };
- const page = { app, users: [user], total: 1, limit: 25, offset: 0, losingAccess: 1 };
+ const page = { app, users: [user], total: 1, limit: 25, offset: 0, losingAccess: 1, gainingAccess: 2 };
  expect(parseAppAccessPage(page).items[0].effective).toBe(true);
+ expect(parseAppAccessPage(page).gainingAccess).toBe(2);
  expect(() => parseAppAccessPage({ ...page, users: [{ ...user, effective: 'yes' }] })).toThrow();
  expect(() => parseAppAccessPage({ ...page, users: [{ ...user, reason: 'unknown' }] })).toThrow();
  expect(() => parseAppAccessPage({ ...page, losingAccess: -1 })).toThrow();

@@ -19,11 +19,11 @@ func TestSCIMMappingDurability(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	first, err := s.StartSCIMCreate("a", u.ID)
+	first, err := s.StartSCIMCreate("a", "user", u.ID)
 	if err != nil || !first {
 		t.Fatal("create not claimed", err)
 	}
-	first, err = s.StartSCIMCreate("a", u.ID)
+	first, err = s.StartSCIMCreate("a", "user", u.ID)
 	if err != nil || first {
 		t.Fatal("duplicate create claimed", err)
 	}
@@ -39,7 +39,7 @@ func TestSCIMMappingDurability(t *testing.T) {
 	if err = s.SaveSCIMUserLink("b", u.ID, "remote"); err != nil {
 		t.Fatal("connector mappings overlap", err)
 	}
-	if err = s.DeleteUserWithSyncEvents(u.ID, nil, nil); err != nil {
+	if err = s.DeleteUserWithSyncEvents(u.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Close(); err != nil {
@@ -74,7 +74,7 @@ func TestSCIMConfigurationAuditRollback(t *testing.T) {
 	if _, err := s.db.Exec(`CREATE TRIGGER reject_scim_audit BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	err := s.ConfigureSystem(sys.ID, "custom", "scim", "replacement", &AuditEvent{ID: "audit", Action: "admin.system_configured"})
+	err := s.ConfigureSystem(sys.ID, "custom", "scim", "replacement", false, &AuditEvent{ID: "audit", Action: "admin.system_configured"})
 	if err == nil {
 		t.Fatal("configuration succeeded without audit")
 	}

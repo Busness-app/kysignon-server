@@ -79,6 +79,9 @@ func (s *Store) UpdateGroup(g *Group, audit *AuditEvent) error {
 	if n == 0 {
 		return ErrGroupTargetMissing
 	}
+	if err = reconcileProvisioningTx(tx, g.UpdatedAt); err != nil {
+		return err
+	}
 	if err = recordAuditTx(tx, audit); err != nil {
 		return err
 	}
@@ -134,6 +137,9 @@ func (s *Store) DeleteGroupForSession(id, sessionID string, audit *AuditEvent) e
 		return err
 	}
 	if err = revokeLostAppAccessTx(tx); err != nil {
+		return err
+	}
+	if err = reconcileProvisioningTx(tx, time.Now().UTC()); err != nil {
 		return err
 	}
 	setGroupAuditDetails(audit, map[string]string{"name": name})
@@ -200,6 +206,9 @@ func (s *Store) SetGroupMembershipForSession(groupID, userID string, member bool
 		}
 	}
 	if err = revokeLostAppAccessTx(tx); err != nil {
+		return err
+	}
+	if err = reconcileProvisioningTx(tx, time.Now().UTC()); err != nil {
 		return err
 	}
 	setGroupAuditDetails(audit, map[string]string{"userId": userID, "username": username, "groupName": groupName})

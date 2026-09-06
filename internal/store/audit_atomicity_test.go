@@ -48,7 +48,7 @@ func TestUserUpdateRollsBackWhenItsAuditRowCannotBeWritten(t *testing.T) {
 
 	u.DisplayName = "Renamed"
 	u.Status = "disabled"
-	if err := s.UpdateUserWithSyncEvents(u, true, nil, audit); err == nil {
+	if err := s.UpdateUserWithSyncEvents(u, true, audit); err == nil {
 		t.Fatal("an unauditable user update reported success")
 	}
 
@@ -88,7 +88,7 @@ func TestUserCreateRollsBackWhenItsAuditRowCannotBeWritten(t *testing.T) {
 		ID: "u2", Username: "grace", DisplayName: "Grace", Email: "grace@example.test",
 		PasswordHash: "hash", Role: "admin", Status: "active",
 	}
-	if err := s.CreateUserWithSyncEvents(u, nil, audit); err == nil {
+	if err := s.CreateUserWithSyncEvents(u, audit); err == nil {
 		t.Fatal("an unauditable user creation reported success")
 	}
 	stored, err := s.GetUserByID("u2")
@@ -104,7 +104,7 @@ func TestUserDeleteRollsBackWhenItsAuditRowCannotBeWritten(t *testing.T) {
 	s, u := newStoreWithUser(t, "user")
 	audit := poisonedAudit(t, s, "admin.user_deleted", u.ID)
 
-	if err := s.DeleteUserWithSyncEvents(u.ID, nil, audit); err == nil {
+	if err := s.DeleteUserWithSyncEvents(u.ID, audit); err == nil {
 		t.Fatal("an unauditable user deletion reported success")
 	}
 	stored, err := s.GetUserByID(u.ID)
@@ -125,7 +125,7 @@ func TestMFAResetRollsBackWhenItsAuditRowCannotBeWritten(t *testing.T) {
 	}
 	audit := poisonedAudit(t, s, "admin.user_mfa_reset", u.ID)
 
-	if err := s.ResetUserMFA(u.ID, nil, audit); err == nil {
+	if err := s.ResetUserMFA(u.ID, audit); err == nil {
 		t.Fatal("an unauditable MFA reset reported success")
 	}
 	methods, err := s.ListUserMFAMethods(u.ID)
@@ -229,7 +229,7 @@ func TestSuccessfulMutationsCommitTheirAuditRow(t *testing.T) {
 		ID: "ok-1", Action: "admin.user_updated", TargetID: u.ID,
 		ActorUsername: "root", Outcome: "success",
 	}
-	if err := s.UpdateUserWithSyncEvents(u, false, nil, audit); err != nil {
+	if err := s.UpdateUserWithSyncEvents(u, false, audit); err != nil {
 		t.Fatal(err)
 	}
 	events, total, err := s.ListAuditEvents(10, 0)

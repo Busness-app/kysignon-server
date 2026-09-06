@@ -48,7 +48,7 @@ export function SyncDeliveries({ system, onClose }: { system: PairedSystem; onCl
     <button className="secondary-btn sm" onClick={onClose}>Close deliveries</button>
     {attempts.length === 0 ? <p>No in-flight or blocked deliveries.</p> : <>
       <p>Showing up to 100 attempts, oldest first.</p>
-      <table className="admin-table"><thead><tr><th>User ID</th><th>Event</th><th>Recovery available after</th><th>Actions</th></tr></thead>
+      <table className="admin-table"><thead><tr><th>Resource ID</th><th>Event</th><th>Recovery available after</th><th>Actions</th></tr></thead>
         <tbody>{attempts.map(a => <tr key={a.token}><td>{a.userId}</td><td>{a.eventType}</td><td>{new Date(a.recoverAfter).toLocaleString()}</td><td>
           <button className="secondary-btn sm" disabled={busy} onClick={() => void readBack(a.token)}>Read remote state</button>{' '}
           <button className="secondary-btn sm" disabled={busy || !confirmed || Date.parse(a.recoverAfter) > Date.now()} onClick={() => void resume(a.token)}>Resume delivery</button>

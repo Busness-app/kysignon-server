@@ -12,8 +12,9 @@ and 05b (administrator per-app policies, factor freshness and policy revision en
 merged as GitHub PR #30). PR06 is split into 06a (organization/admin enrollment policy,
 merged as GitHub PR #31) and 06b (group-specific requirements, merged as GitHub PR #32).
 PR07 merged as GitHub PR #33 with CI passed and both findings resolved.
-PR08 is split into 08a (resource ordering and uncertain-write recovery, in progress)
-and 08b (assignment-aware desired state, revisions and group delivery, planned).
+PR08 is split into 08a (resource ordering and uncertain-write recovery, merged as
+GitHub PR #34) and 08b (assignment-aware desired state, revisions and group delivery,
+implemented on feat/provisioning-access).
 PRs 09–23 and D1–D4 remain planned.
 PR33 review limitations remain: truncated input omitted frontend source; the reviewer
 performed no dynamic real-target SCIM exercise. It was not an exhaustive whole-PR audit.
@@ -300,8 +301,10 @@ Transport uncertainty does not expire with a lease; recovery requires operator-p
 quiescence, step-up and audit. Read-back is diagnostic only. Explicit no-create
 confirmation plus empty lookup permits clearing a lost-create guard. See README.md.
 This conservative foundation does not claim automated convergence after uncertainty.
-08b retains all desired-state, scope, supersession, revision and group requirements
-below; it must add their acceptance tests before claiming PR08 complete.
+08b implements the desired-state, scope, supersession, revision and group requirements
+below with `sync_resource_state`; README.md "Provisioning scope" and "SCIM Groups"
+describe the behavior. Conditional writes (`If-Match`) are not implemented; read-back
+and reconcile after uncertainty remain operator-driven until PR09.
 
 Depends on: 03, 04, 07. Touch: sync/store, app-to-system linking and assignment UI.
 

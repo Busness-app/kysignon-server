@@ -18,6 +18,43 @@ import (
 	"github.com/google/uuid"
 )
 
+// queueForAll enqueues one event per active connector directly, bypassing scope, so
+// wire-format tests can exercise delivery without configuring assignments.
+func queueForAll(t *testing.T, e *Engine, userID, eventType string, payload any) {
+	t.Helper()
+	systems, err := e.store.ListActivePairedSystems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sys := range systems {
+		if err := e.store.CreateAccountSyncEvent(&store.AccountSyncEvent{ID: uuid.NewString(), UserID: userID, SystemID: sys.ID, EventType: eventType, PayloadJSON: string(body), Status: "pending", Revision: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// grantAllUsers puts every active user in the connector's provisioning scope.
+func grantAllUsers(t *testing.T, s *store.Store, systemID string) {
+	t.Helper()
+	apps, _, err := s.ListAppRecords("", 1000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range apps {
+		if a.SystemID == systemID {
+			if err := s.SetAppPolicy(a.ID, "all_active_users", true, a.Revision, nil); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+	}
+	t.Fatalf("no app record for system %s", systemID)
+}
+
 func setupTestSyncEngine(t *testing.T) (*Engine, *store.Store, *store.User, func()) {
 	tmpDir, err := os.MkdirTemp("", "kysignon-sync-test-*")
 	if err != nil {
@@ -156,9 +193,7 @@ func TestAccountSyncWebhookDispatch(t *testing.T) {
 		"status":      adminUser.Status,
 	}
 
-	if err := engine.QueueAccountSyncEvent(adminUser.ID, "user.created", userPayload); err != nil {
-		t.Fatalf("QueueAccountSyncEvent failed: %v", err)
-	}
+	queueForAll(t, engine, adminUser.ID, "user.created", userPayload)
 
 	// Dispatch pending events
 	if err := engine.DispatchPendingEvents(context.Background()); err != nil {
@@ -216,9 +251,7 @@ func TestAccountSyncSCIMPayloadAndHeaders(t *testing.T) {
 	}
 
 	scimUser := UserToSCIMResource(adminUser)
-	if err := engine.QueueAccountSyncEvent(adminUser.ID, "user.created", scimUser); err != nil {
-		t.Fatalf("QueueAccountSyncEvent failed: %v", err)
-	}
+	queueForAll(t, engine, adminUser.ID, "user.created", scimUser)
 
 	if err := engine.DispatchPendingEvents(context.Background()); err != nil {
 		t.Fatalf("DispatchPendingEvents failed: %v", err)

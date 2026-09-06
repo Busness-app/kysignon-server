@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -171,6 +172,9 @@ func (s *Store) LinkAppRecords(targetID, sourceID string, targetRevision, source
 	if _, err = tx.Exec(`UPDATE app_registry SET client_id=?,launcher_id=?,system_id=?,revision=revision+1 WHERE id=?`, pick(target.ClientID, source.ClientID), pick(target.LauncherID, source.LauncherID), pick(target.SystemID, source.SystemID), targetID); err != nil {
 		return err
 	}
+	if err = reconcileProvisioningTx(tx, time.Now().UTC()); err != nil {
+		return err
+	}
 	if err = appRegistryAudit(audit, map[string]any{"target": target, "source": source}); err != nil {
 		return err
 	}
@@ -227,6 +231,9 @@ func (s *Store) UnlinkAppRecord(id, kind string, revision int, audit *AuditEvent
 		if _, err = tx.Exec(`INSERT INTO `+spec.table+`(app_id,`+spec.column+`) SELECT ?,`+spec.column+` FROM `+spec.table+` WHERE app_id=?`, newID, id); err != nil {
 			return "", err
 		}
+	}
+	if err = reconcileProvisioningTx(tx, time.Now().UTC()); err != nil {
+		return "", err
 	}
 	if err = appRegistryAudit(audit, map[string]any{"previous": a, "connection": kind, "newAppId": newID}); err != nil {
 		return "", err

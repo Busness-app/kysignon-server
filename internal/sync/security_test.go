@@ -94,7 +94,14 @@ func TestEventsAreScopedToTheirSystem(t *testing.T) {
 	}
 
 	idA := pair("system-a", srvA.URL)
-	pair("system-b", srvB.URL)
+	idB := pair("system-b", srvB.URL)
+	grantAllUsers(t, db, idA)
+	grantAllUsers(t, db, idB)
+	// Scope grants queue creates for both systems; only the resync must reach A.
+	if err := e.DispatchPendingEvents(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	hitsA, hitsB = 0, 0
 
 	if err := e.ResyncAllAccounts(idA); err != nil {
 		t.Fatal(err)
@@ -136,7 +143,7 @@ func TestUndeliverableEventStaysQueued(t *testing.T) {
 	if err := db.CreateUser(u); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.QueueAccountSyncEvent(u.ID, "user.deleted", map[string]any{"id": u.ID}); err != nil {
+	if err := func() error { queueForAll(t, e, u.ID, "user.deleted", map[string]any{"id": u.ID}); return nil }(); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.UpdatePairedSystemStatus(ps.ID, "disabled"); err != nil {
@@ -254,6 +261,7 @@ func TestConcurrentDispatchDeliversEachEventOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	grantAllUsers(t, e.store, ps.ID)
 	if err := e.ResyncAllAccounts(ps.ID); err != nil {
 		t.Fatal(err)
 	}

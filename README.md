@@ -162,7 +162,7 @@ Administrators can create, rename and delete groups under **Groups**, manage eac
 members, or open membership controls from a row in **Users**. Names are trimmed and unique
 under the directory's SQLite `NOCASE` collation; renaming preserves the group's stable ID.
 Membership does not change the user's global role. Group assignments grant app access;
-SCIM group provisioning remains a subsequent roadmap step.
+SCIM Groups delivery is available per generic SCIM connector; see Outbound provisioning.
 
 Group and membership mutations require a single-use step-up grant for their exact method
 and path and commit with their audit event. Repeated add/remove requests are idempotent;
@@ -214,7 +214,7 @@ Policy changes show how many users would lose access across the directory, even 
 list is filtered. The preview reflects current membership; edits use app revisions to
 reject stale settings. Mutations require operation-bound step-up and atomic audit records.
 Launcher-only access controls visibility, not authorization at the destination website.
-Provisioning continues with its existing scope; assignment-aware SCIM delivery is PR08.
+Provisioning follows effective access; see Outbound provisioning, Provisioning scope.
 
 OAuth authorization and token exchange both enforce current access. Losing effective
 access revokes online tokens and invalidates authorization codes in the same transaction.
@@ -561,7 +561,49 @@ requires step-up: select the actual protocol, supplying a target-issued token fo
 SCIM or retaining the existing signing secret for a suite webhook. Review preserves
 the destination URL, connection ID, application linkage and assignments.
 
-Provisioning still covers the existing whole-directory scope. This is PR08a's delivery
-ordering foundation. Assignment-aware desired state, superseding stale queued work,
-suite resource revisions and group delivery remain PR08b; automated reconciliation
-remains PR09. Completion does not establish verified removal across the suite.
+### Provisioning scope
+
+Each connector provisions exactly the users who hold effective access to its linked
+application: the access policy, direct and group assignments, user status, app enabled
+state and OAuth client state all apply. Existing connectors migrated with the
+all-active-users policy keep their whole-directory scope until an administrator
+changes it. A user who gains access is created, or reactivated with `user.updated`
+and `active=true`, and a user who loses it is deactivated with `user.updated` and
+`active=false`; this is the same event a local disablement sends. Accounts are never
+deleted downstream. Generic SCIM never creates an account for an inactive state, and
+suite receivers may answer an inactive update for an unknown account with 404.
+
+The access policy preview reports how many users would gain or lose access, which is
+the number of downstream account changes a linked connector will receive. Mutation,
+audit and provisioning work commit in one transaction. A slower worker pass also
+reconciles cascades (client deletion, foreign-key removal) within a minute.
+
+A newer desired state supersedes queued work for the same connector and resource that
+has not begun delivery; an attempt that has begun keeps its place and the newer state
+queues behind it, so an old create can never undo a later disable. A resource whose
+create was never acknowledged is forgotten on loss rather than disabled. Every event
+carries a monotonic per-resource revision; suite receivers receive it as `meta.version`
+(`W/"<n>"`) and should refuse writes older than one they applied. Conditional
+`If-Match` writes to generic SCIM targets are not implemented.
+
+Work that exhausts its attempt budget is not abandoned: each reconcile pass returns it
+to the queue with a 30-minute backoff when it still describes current desired state,
+and discards it when a newer state has overtaken it. A local deletion is sent to every
+enabled connector; only a connector known to hold the account receives the profile,
+the rest receive the identifier and `active=false`.
+
+**Resync** re-sends every in-scope account (and assigned group) and never provisions a
+user outside scope. Automated drift detection and repair remain PR09.
+
+### SCIM Groups
+
+Generic SCIM connectors may enable **Deliver SCIM Groups** under Connection settings.
+Every group assigned to the connector's application is created at the target with the
+group's ID as `externalId`, its name as `displayName`, and `members` holding the
+target's IDs of in-scope members that already exist there. Membership, rename, scope
+and assignment changes replace the whole member list; a member's first acknowledged
+create re-queues its groups. Stored group mappings are re-verified by `externalId`
+before every write, and only 200/204 completes a write. Unassigning or deleting a
+group deletes the remote group (404 is accepted). Disabling the flag leaves remote groups untouched. Group attempts
+appear in Deliveries with the group ID as the resource; read-back and lost-create
+recovery use the Groups collection. Suite receivers never receive group events.

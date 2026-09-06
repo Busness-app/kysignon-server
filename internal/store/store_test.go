@@ -89,10 +89,13 @@ func TestDeleteUserWithSyncEventsMigratesLegacyForeignKey(t *testing.T) {
 	}
 	defer s.Close()
 
-	if err := s.DeleteUserWithSyncEvents("deleted-user", []AccountSyncEvent{{
-		ID: "deletion-event", UserID: "deleted-user", SystemID: "system",
-		EventType: "user.deleted", PayloadJSON: `{"id":"deleted-user"}`, Status: "pending",
-	}}, nil); err != nil {
+	if err := s.CreatePairedSystem(&PairedSystem{ID: "system", Name: "system", SystemType: "scim", CallbackURL: "https://example.com/scim", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO sync_resource_state(system_id,resource_id,active,provisioned,revision) VALUES('system','deleted-user',1,1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUserWithSyncEvents("deleted-user", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,7 +110,7 @@ func TestDeleteUserWithSyncEventsMigratesLegacyForeignKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0].ID != "deletion-event" || pending[0].EventType != "user.deleted" {
+	if len(pending) != 1 || pending[0].UserID != "deleted-user" || pending[0].EventType != "user.deleted" || pending[0].Revision != 2 {
 		t.Fatalf("deletion event was not retained: %+v", pending)
 	}
 }
@@ -123,7 +126,7 @@ func TestUpdateUserWithSyncEventsPreservesLastAdmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	u.Role = "user"
-	if err := s.UpdateUserWithSyncEvents(u, false, nil, nil); !errors.Is(err, ErrLastActiveAdmin) {
+	if err := s.UpdateUserWithSyncEvents(u, false, nil); !errors.Is(err, ErrLastActiveAdmin) {
 		t.Fatalf("demoting final admin error = %v", err)
 	}
 }
@@ -461,7 +464,7 @@ func TestMFAWipesRemovePasskeys(t *testing.T) {
 		name string
 		wipe func(*Store, string) error
 	}{
-		{"ResetUserMFA", func(s *Store, uid string) error { return s.ResetUserMFA(uid, nil, nil) }},
+		{"ResetUserMFA", func(s *Store, uid string) error { return s.ResetUserMFA(uid, nil) }},
 		{"DeleteUserMFAMethods", func(s *Store, uid string) error { return s.DeleteUserMFAMethods(uid) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

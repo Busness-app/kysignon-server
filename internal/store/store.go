@@ -773,8 +773,11 @@ func (s *Store) DeleteUserWithSyncEvents(userID string, audit *AuditEvent) error
 		}
 	}
 
-	rows, err := tx.Query(`SELECT st.system_id,st.revision+1 FROM sync_resource_state st JOIN paired_systems s ON s.id=st.system_id
- WHERE st.resource_id=? AND st.kind='user' AND s.status<>'disabled' ORDER BY st.system_id`, userID)
+	// Every connector may hold the account from whole-directory delivery that predates
+	// desired-state tracking; receivers tolerate a deletion for an unknown account.
+	rows, err := tx.Query(`SELECT s.id,COALESCE(st.revision,0)+1 FROM paired_systems s
+ LEFT JOIN sync_resource_state st ON st.system_id=s.id AND st.resource_id=? AND st.kind='user'
+ WHERE s.status<>'disabled' ORDER BY s.id`, userID)
 	if err != nil {
 		return err
 	}

@@ -282,7 +282,15 @@ func reconcileProvisioningTx(tx *sql.Tx, now time.Time) error {
 			return err
 		}
 	}
-	return reconcileGroupsTx(tx, now, false)
+	if err := reconcileGroupsTx(tx, now, false); err != nil {
+		return err
+	}
+	// Exhausted work still describes state the receiver never acknowledged. Desired state
+	// does not lapse because a connector was down, so it re-enters backoff instead of
+	// staying failed with nothing queued to repair it.
+	_, err = tx.Exec(`UPDATE account_sync_events SET status='pending',attempts=0,next_attempt_at=?,updated_at=? WHERE status='failed'
+ AND NOT EXISTS(SELECT 1 FROM sync_delivery_attempts a WHERE a.event_id=account_sync_events.id)`, now.Add(30*time.Minute), now)
+	return err
 }
 
 type desiredGroup struct{ systemID, groupID, name string }

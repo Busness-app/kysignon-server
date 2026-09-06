@@ -39,6 +39,7 @@ func (e *Engine) deliverSCIMGroup(ctx context.Context, sys *store.PairedSystem, 
 	if err != nil {
 		return err
 	}
+	verifyMapping := remoteID != ""
 	if remoteID == "" {
 		found, lookupErr := e.findSCIMResource(ctx, c, "Groups", groupID)
 		switch {
@@ -54,6 +55,21 @@ func (e *Engine) deliverSCIMGroup(ctx context.Context, sys *store.PairedSystem, 
 		}
 	}
 	base, _ := url.Parse(c.BaseURL)
+	// A stored mapping may outlive a target restore or ID reuse; IDs established by this
+	// call's externalId lookup have already been checked.
+	if verifyMapping {
+		status, raw, err := e.scimRequest(ctx, c, http.MethodGet, base.JoinPath("Groups", remoteID).String(), nil)
+		if errors.Is(err, scim.ErrNotFound) && eventType == "group.deleted" {
+			return e.store.DeleteSCIMLink(sys.ID, "group", groupID)
+		}
+		if err != nil {
+			return err
+		}
+		var current scimGroup
+		if status != http.StatusOK || json.Unmarshal(raw, &current) != nil || current.ID != remoteID || current.ExternalID != groupID {
+			return scim.ErrMalformedResponse
+		}
+	}
 	switch eventType {
 	case "group.deleted":
 		if remoteID == "" {
@@ -63,7 +79,9 @@ func (e *Engine) deliverSCIMGroup(ctx context.Context, sys *store.PairedSystem, 
 		if err != nil && !errors.Is(err, scim.ErrNotFound) {
 			return err
 		}
-		_ = status
+		if err == nil && status != http.StatusOK && status != http.StatusNoContent {
+			return scim.ErrMalformedResponse
+		}
 		return e.store.DeleteSCIMLink(sys.ID, "group", groupID)
 	case "group.updated":
 	default:
@@ -109,6 +127,10 @@ func (e *Engine) deliverSCIMGroup(ctx context.Context, sys *store.PairedSystem, 
 		}
 		return e.store.SaveSCIMLink(sys.ID, "group", groupID, created.ID)
 	}
-	_, _, err = e.scimRequest(ctx, c, http.MethodPut, base.JoinPath("Groups", remoteID).String(), body)
+	// Only a completion status proves the member list was applied; 202 stays blocked.
+	status, _, err := e.scimRequest(ctx, c, http.MethodPut, base.JoinPath("Groups", remoteID).String(), body)
+	if err == nil && status != http.StatusOK && status != http.StatusNoContent {
+		return scim.ErrMalformedResponse
+	}
 	return err
 }

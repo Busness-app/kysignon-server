@@ -48,6 +48,27 @@ func TestSCIMConnectionAdministration(t *testing.T) {
 	if strings.Contains(rr.Body.String(), secret) || strings.Contains(rr.Body.String(), sys.HMACSecretEncrypted) {
 		t.Fatal("listing exposes credentials")
 	}
+	// Group delivery changes only when the request says so; an omitted flag and an
+	// omitted token both keep the current settings.
+	if rr = adminRequest(t, srv, "PUT", path, cookie, `{"systemType":"scim","groups":true}`); rr.Code != 200 {
+		t.Fatalf("enable groups: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr = adminRequest(t, srv, "PUT", path, cookie, `{"systemType":"scim"}`); rr.Code != 200 {
+		t.Fatalf("review without flag: %d %s", rr.Code, rr.Body.String())
+	}
+	sys, _ = db.GetPairedSystemByID(id)
+	if !sys.GroupsEnabled {
+		t.Fatal("omitted groups field disabled group delivery")
+	}
+	if secret, _ = engine.SigningSecret(sys); secret != "replacement-secret" {
+		t.Fatal("omitted token replaced the credential")
+	}
+	if rr = adminRequest(t, srv, "PUT", path, cookie, `{"systemType":"scim","groups":false}`); rr.Code != 200 {
+		t.Fatalf("disable groups: %d %s", rr.Code, rr.Body.String())
+	}
+	if sys, _ = db.GetPairedSystemByID(id); sys.GroupsEnabled {
+		t.Fatal("explicit false ignored")
+	}
 	// A known protocol cannot be changed by reusing its credentials.
 	rr = adminRequest(t, srv, "PUT", path, cookie, `{"systemType":"suite_webhook"}`)
 	if rr.Code != 400 {

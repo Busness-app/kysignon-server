@@ -25,6 +25,8 @@ type fakeSCIM struct {
 	groups map[string]scimGroup
 	posts  map[string]int
 	next   int
+	// putStatus, when set, is answered to every Group PUT without applying it.
+	putStatus int
 }
 
 func newFakeSCIM() *fakeSCIM {
@@ -109,6 +111,10 @@ func (f *fakeSCIM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch r.Method {
 		case "PUT":
+			if f.putStatus != 0 {
+				w.WriteHeader(f.putStatus)
+				return
+			}
 			_ = json.NewDecoder(r.Body).Decode(&g)
 			g.ID = id
 			f.groups[id] = g
@@ -334,6 +340,88 @@ func TestGenericSCIMGroupDelivery(t *testing.T) {
 	pending, err := s.GetPendingSyncEvents(10)
 	if err != nil || len(pending) != 0 {
 		t.Fatal("undelivered work remains", pending, err)
+	}
+}
+
+func groupFixture(t *testing.T) (*Engine, *store.Store, *fakeSCIM, *store.Group, func()) {
+	t.Helper()
+	e, s, u, cleanup := setupTestSyncEngine(t)
+	remote := newFakeSCIM()
+	srv := httptest.NewTLSServer(remote)
+	e.httpClient = srv.Client()
+	sys, _, err := e.CreateSystem(&CreateSystemRequest{Name: "target", SystemType: "scim", CallbackURL: srv.URL + "/scim/v2", BearerToken: "target-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ReviewSystem(sys, "scim", "", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	app := appRecordFor(t, s, sys.ID)
+	group := &store.Group{ID: uuid.NewString(), Name: "staff"}
+	if err := s.CreateGroup(group, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetGroupMembership(group.ID, u.ID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAppAssignment(app.ID, "groups", group.ID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, e)
+	if g, ok := remote.groupByExternal(group.ID); !ok || len(g.Members) != 1 {
+		t.Fatal("fixture group not delivered", g, ok)
+	}
+	return e, s, remote, group, func() { srv.Close(); cleanup() }
+}
+
+func TestGroupWriteRefusesForeignMapping(t *testing.T) {
+	e, s, remote, group, cleanup := groupFixture(t)
+	defer cleanup()
+	// The target restored from backup: our stored ID now names someone else's group.
+	remote.mu.Lock()
+	for id, g := range remote.groups {
+		g.ExternalID = "foreign"
+		remote.groups[id] = g
+	}
+	remote.mu.Unlock()
+	group.Name = "renamed"
+	if err := s.UpdateGroup(group, nil); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, e)
+	remote.mu.Lock()
+	defer remote.mu.Unlock()
+	for _, g := range remote.groups {
+		if g.DisplayName != "staff" || len(g.Members) != 1 {
+			t.Fatal("foreign group overwritten", g)
+		}
+	}
+	if pending, _ := s.GetPendingSyncEvents(10); len(pending) != 1 || pending[0].EventType != "group.updated" {
+		t.Fatal("refused write not retained", pending)
+	}
+}
+
+func TestGroupWriteRequiresCompletion(t *testing.T) {
+	e, s, remote, group, cleanup := groupFixture(t)
+	defer cleanup()
+	remote.mu.Lock()
+	remote.putStatus = http.StatusAccepted
+	remote.mu.Unlock()
+	group.Name = "renamed"
+	if err := s.UpdateGroup(group, nil); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, e)
+	if g, _ := remote.groupByExternal(group.ID); g.DisplayName != "staff" {
+		t.Fatal("unapplied write changed the fake", g)
+	}
+	sys, _ := s.ListAllPairedSystems()
+	attempts, err := s.ListSyncDeliveryAttempts(sys[0].ID)
+	if err != nil || len(attempts) != 1 || attempts[0].EventType != "group.updated" {
+		t.Fatal("202 did not stay fenced as uncertain", attempts, err)
+	}
+	if pending, _ := s.GetPendingSyncEvents(10); len(pending) != 1 {
+		t.Fatal("accepted write recorded as delivered", pending)
 	}
 }
 

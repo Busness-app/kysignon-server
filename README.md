@@ -586,6 +586,11 @@ carries a monotonic per-resource revision; suite receivers receive it as `meta.v
 (`W/"<n>"`) and should refuse writes older than one they applied. Conditional
 `If-Match` writes to generic SCIM targets are not implemented.
 
+Work that exhausts its attempt budget is not abandoned: each reconcile pass returns it
+to the queue with a 30-minute backoff, because desired state does not lapse while a
+connector is down. A local deletion is sent to every enabled connector, including one
+that received the account before scope tracking existed.
+
 **Resync** re-sends every in-scope account (and assigned group) and never provisions a
 user outside scope. Automated drift detection and repair remain PR09.
 
@@ -596,7 +601,8 @@ Every group assigned to the connector's application is created at the target wit
 group's ID as `externalId`, its name as `displayName`, and `members` holding the
 target's IDs of in-scope members that already exist there. Membership, rename, scope
 and assignment changes replace the whole member list; a member's first acknowledged
-create re-queues its groups. Unassigning or deleting a group deletes the remote group
-(404 is accepted). Disabling the flag leaves remote groups untouched. Group attempts
+create re-queues its groups. Stored group mappings are re-verified by `externalId`
+before every write, and only 200/204 completes a write. Unassigning or deleting a
+group deletes the remote group (404 is accepted). Disabling the flag leaves remote groups untouched. Group attempts
 appear in Deliveries with the group ID as the resource; read-back and lost-create
 recovery use the Groups collection. Suite receivers never receive group events.

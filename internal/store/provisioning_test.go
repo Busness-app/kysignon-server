@@ -203,24 +203,65 @@ func TestResyncNeverProvisionsUnassignedUsers(t *testing.T) {
 	}
 }
 
-func TestDeleteUserNotifiesHoldingConnectors(t *testing.T) {
+func TestDeleteUserNotifiesEveryConnector(t *testing.T) {
 	s, cleanup := setupTestStore(t)
 	defer cleanup()
 	app := provisioningFixture(t, s, "target")
-	provisioningFixture(t, s, "other")
+	provisioningFixture(t, s, "legacy")
 	u := createTestUser(t, s)
 	if err := s.SetAppAssignment(app, "users", u.ID, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	deliverAll(t, s)
+	// A pre-upgrade connector holds the account without any desired-state row.
+	if err := s.SaveSCIMUserLink("legacy", u.ID, "remote"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.DeleteUserWithSyncEvents(u.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := pendingFor(t, s, "target", u.ID); len(got) != 1 || got[0] != (queued{"user.deleted", 2, false}) {
 		t.Fatal("deletion", got)
 	}
-	if got := pendingFor(t, s, "other", u.ID); len(got) != 0 {
-		t.Fatal("deletion sent to a connector that never held the account", got)
+	if got := pendingFor(t, s, "legacy", u.ID); len(got) != 1 || got[0] != (queued{"user.deleted", 1, false}) {
+		t.Fatal("deletion skipped a connector without desired-state rows", got)
+	}
+}
+
+func TestProvisioningRevivesExhaustedWork(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+	app := provisioningFixture(t, s, "target")
+	u := createTestUser(t, s)
+	if err := s.SetAppAssignment(app, "users", u.ID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	deliverAll(t, s)
+	if err := s.SetAppAssignment(app, "users", u.ID, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.ClaimDueSyncEvents(10, time.Minute)
+	if err != nil || len(events) != 1 {
+		t.Fatal(events, err)
+	}
+	if ok, err := s.BeginSyncDelivery(events[0], time.Minute); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if err := s.FinishSyncDelivery(events[0], "failed", "boom", 5, nil); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := s.GetPendingSyncEvents(10); len(pending) != 0 {
+		t.Fatal("exhausted event still listed", pending)
+	}
+	if err := s.ReconcileProvisioning(); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.GetPendingSyncEvents(10)
+	if err != nil || len(pending) != 1 || pending[0].EventType != "user.updated" || pending[0].Attempts != 0 || pending[0].NextAttempt == nil {
+		t.Fatalf("disable not revived into backoff: %+v %v", pending, err)
+	}
+	if got := pendingFor(t, s, "target", u.ID); len(got) != 1 || got[0] != (queued{"user.updated", 2, false}) {
+		t.Fatal(got)
 	}
 }
 

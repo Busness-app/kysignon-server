@@ -587,9 +587,10 @@ carries a monotonic per-resource revision; suite receivers receive it as `meta.v
 `If-Match` writes to generic SCIM targets are not implemented.
 
 Work that exhausts its attempt budget is not abandoned: each reconcile pass returns it
-to the queue with a 30-minute backoff, because desired state does not lapse while a
-connector is down. A local deletion is sent to every enabled connector, including one
-that received the account before scope tracking existed.
+to the queue with a 30-minute backoff when it still describes current desired state,
+and discards it when a newer state has overtaken it. A local deletion is sent to every
+enabled connector; only a connector known to hold the account receives the profile,
+the rest receive the identifier and `active=false`.
 
 **Resync** re-sends every in-scope account (and assigned group) and never provisions a
 user outside scope. Automated drift detection and repair remain PR09.

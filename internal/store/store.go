@@ -774,22 +774,28 @@ func (s *Store) DeleteUserWithSyncEvents(userID string, audit *AuditEvent) error
 	}
 
 	// Every connector may hold the account from whole-directory delivery that predates
-	// desired-state tracking; receivers tolerate a deletion for an unknown account.
-	rows, err := tx.Query(`SELECT s.id,COALESCE(st.revision,0)+1 FROM paired_systems s
- LEFT JOIN sync_resource_state st ON st.system_id=s.id AND st.resource_id=? AND st.kind='user'
- WHERE s.status<>'disabled' ORDER BY s.id`, userID)
+	// desired-state tracking; receivers tolerate a deletion for an unknown account. Only
+	// a connector known to hold the account receives the profile; the rest get the ID.
+	rows, err := tx.Query(`SELECT s.id,COALESCE(st.revision,0)+1,
+ st.resource_id IS NOT NULL OR EXISTS(SELECT 1 FROM scim_user_links l WHERE l.system_id=s.id AND l.local_id=? AND l.kind='user')
+ FROM paired_systems s LEFT JOIN sync_resource_state st ON st.system_id=s.id AND st.resource_id=? AND st.kind='user'
+ WHERE s.status<>'disabled' ORDER BY s.id`, userID, userID)
 	if err != nil {
 		return err
 	}
-	targets := map[string]int{}
+	type target struct {
+		revision int
+		held     bool
+	}
+	targets := map[string]target{}
 	for rows.Next() {
 		var sys string
-		var rev int
-		if err := rows.Scan(&sys, &rev); err != nil {
+		var t target
+		if err := rows.Scan(&sys, &t.revision, &t.held); err != nil {
 			rows.Close()
 			return err
 		}
-		targets[sys] = rev
+		targets[sys] = t
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -808,8 +814,12 @@ func (s *Store) DeleteUserWithSyncEvents(userID string, audit *AuditEvent) error
 	if err != nil {
 		return err
 	}
-	for sys, revision := range targets {
-		if err := insertResourceEventTx(tx, sys, userID, "user.deleted", payload, revision, now); err != nil {
+	for sys, t := range targets {
+		body := scimInactivePayload(userID)
+		if t.held {
+			body = payload
+		}
+		if err := insertResourceEventTx(tx, sys, userID, "user.deleted", body, t.revision, now); err != nil {
 			return err
 		}
 	}

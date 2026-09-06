@@ -285,11 +285,18 @@ func reconcileProvisioningTx(tx *sql.Tx, now time.Time) error {
 	if err := reconcileGroupsTx(tx, now, false); err != nil {
 		return err
 	}
-	// Exhausted work still describes state the receiver never acknowledged. Desired state
-	// does not lapse because a connector was down, so it re-enters backoff instead of
-	// staying failed with nothing queued to repair it.
-	_, err = tx.Exec(`UPDATE account_sync_events SET status='pending',attempts=0,next_attempt_at=?,updated_at=? WHERE status='failed'
- AND NOT EXISTS(SELECT 1 FROM sync_delivery_attempts a WHERE a.event_id=account_sync_events.id)`, now.Add(30*time.Minute), now)
+	// Exhausted work that still describes current desired state re-enters backoff: desired
+	// state does not lapse because a connector was down. Exhausted work a newer state has
+	// overtaken (it survived supersession only because it was fenced) is discarded, exactly
+	// as supersession would have done; reviving it would replay an old create after a
+	// later disable. Deletion and MFA reset carry no desired state and always retry.
+	current := `(SELECT st.revision FROM sync_resource_state st WHERE st.system_id=account_sync_events.system_id AND st.resource_id=account_sync_events.user_id)`
+	unfenced := `status='failed' AND NOT EXISTS(SELECT 1 FROM sync_delivery_attempts a WHERE a.event_id=account_sync_events.id)`
+	stateless := `event_type IN ('user.deleted','user.mfa_reset')`
+	if _, err = tx.Exec(`DELETE FROM account_sync_events WHERE ` + unfenced + ` AND NOT ` + stateless + ` AND revision<>COALESCE(` + current + `,-1)`); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE account_sync_events SET status='pending',attempts=0,next_attempt_at=?,updated_at=? WHERE `+unfenced+` AND (`+stateless+` OR revision=`+current+`)`, now.Add(30*time.Minute), now)
 	return err
 }
 

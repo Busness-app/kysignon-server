@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,6 +209,7 @@ func TestDeleteUserNotifiesEveryConnector(t *testing.T) {
 	defer cleanup()
 	app := provisioningFixture(t, s, "target")
 	provisioningFixture(t, s, "legacy")
+	provisioningFixture(t, s, "stranger")
 	u := createTestUser(t, s)
 	if err := s.SetAppAssignment(app, "users", u.ID, true, nil); err != nil {
 		t.Fatal(err)
@@ -225,6 +227,64 @@ func TestDeleteUserNotifiesEveryConnector(t *testing.T) {
 	}
 	if got := pendingFor(t, s, "legacy", u.ID); len(got) != 1 || got[0] != (queued{"user.deleted", 1, false}) {
 		t.Fatal("deletion skipped a connector without desired-state rows", got)
+	}
+	// A connector that never held the account learns only the identifier.
+	var body string
+	if err := s.db.QueryRow(`SELECT payload_json FROM account_sync_events WHERE system_id='stranger' AND user_id=?`, u.ID).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(body), &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"userName", "emails", "displayName", "name", "roles"} {
+		if v, ok := fields[k]; ok && v != "" {
+			t.Fatalf("profile field %s sent to a connector that never held the account: %s", k, body)
+		}
+	}
+	if fields["id"] != u.ID || fields["active"] != false {
+		t.Fatal(body)
+	}
+	if err := s.db.QueryRow(`SELECT payload_json FROM account_sync_events WHERE system_id='legacy' AND user_id=?`, u.ID).Scan(&body); err != nil || !strings.Contains(body, u.Username) {
+		t.Fatal("holding connector lost the profile", body, err)
+	}
+}
+
+func TestReconcileDiscardsSupersededFailedCreate(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+	app := provisioningFixture(t, s, "target")
+	u := createTestUser(t, s)
+	if err := s.SetAppAssignment(app, "users", u.ID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	creates, err := s.ClaimDueSyncEvents(10, time.Minute)
+	if err != nil || len(creates) != 1 {
+		t.Fatal(creates, err)
+	}
+	if ok, err := s.BeginSyncDelivery(creates[0], time.Minute); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	// Revoked while the create is fenced: the disable queues behind it.
+	if err := s.SetAppAssignment(app, "users", u.ID, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishSyncDelivery(creates[0], "failed", "boom", 5, nil); err != nil {
+		t.Fatal(err)
+	}
+	if events := deliverAll(t, s); len(events) != 1 || events[0].EventType != "user.updated" {
+		t.Fatal("disable did not deliver past the exhausted create", events)
+	}
+	if err := s.ReconcileProvisioning(); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range pendingFor(t, s, "target", u.ID) {
+		if q.Type == "user.created" {
+			t.Fatal("superseded create revived after the disable", q)
+		}
+	}
+	if pending, _ := s.GetPendingSyncEvents(10); len(pending) != 0 {
+		t.Fatal(pending)
 	}
 }
 

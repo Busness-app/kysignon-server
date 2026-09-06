@@ -48,15 +48,43 @@ func readEnrollmentPolicy(r *http.Request) (store.EnrollmentPolicy, error) {
 	}
 	return p, nil
 }
+
+// Rejected writes have rolled back their success audit, so record the denial separately.
+func (h *AdminHandler) enrollmentDenied(w http.ResponseWriter, r *http.Request, action, scope string, err error) {
+	if scope != "organization" && scope != "administrators" {
+		scope = ""
+	}
+	reason := "storage_error"
+	switch {
+	case errors.Is(err, store.ErrEnrollmentPolicy):
+		reason = "invalid_policy"
+	case errors.Is(err, store.ErrEmergencyAdministrator):
+		reason = "compliant_admin_required"
+	case errors.Is(err, store.ErrAppLinkConflict):
+		reason = "revision_conflict"
+	}
+	u := GetUserFromContext(r.Context())
+	if auditErr := h.audit.Record(action, u.ID, u.Username, scope, "enrollment_policy", h.middleware.ClientIP(r), r.UserAgent(), "denied", map[string]any{"reason": reason}); auditErr != nil {
+		stepUpInternalError(w)
+		return
+	}
+	enrollmentError(w, err)
+}
+
 func (h *AdminHandler) PreviewEnrollmentPolicy(w http.ResponseWriter, r *http.Request) {
 	p, err := readEnrollmentPolicy(r)
 	if err != nil {
-		enrollmentError(w, err)
+		h.enrollmentDenied(w, r, "admin.mfa_enrollment_policy_previewed", p.Scope, err)
 		return
 	}
 	preview, err := h.store.PreviewEnrollmentPolicy(p, GetSessionFromContext(r.Context()).ID)
 	if err != nil {
-		enrollmentError(w, err)
+		h.enrollmentDenied(w, r, "admin.mfa_enrollment_policy_previewed", p.Scope, err)
+		return
+	}
+	u := GetUserFromContext(r.Context())
+	if err := h.audit.Record("admin.mfa_enrollment_policy_previewed", u.ID, u.Username, p.Scope, "enrollment_policy", h.middleware.ClientIP(r), r.UserAgent(), "success", map[string]any{"policy": p, "impact": preview}); err != nil {
+		stepUpInternalError(w)
 		return
 	}
 	writeGroupJSON(w, preview)
@@ -64,13 +92,13 @@ func (h *AdminHandler) PreviewEnrollmentPolicy(w http.ResponseWriter, r *http.Re
 func (h *AdminHandler) SetEnrollmentPolicy(w http.ResponseWriter, r *http.Request) {
 	p, err := readEnrollmentPolicy(r)
 	if err != nil {
-		enrollmentError(w, err)
+		h.enrollmentDenied(w, r, "admin.mfa_enrollment_policy_changed", p.Scope, err)
 		return
 	}
 	u := GetUserFromContext(r.Context())
 	event := h.audit.Prepare("admin.mfa_enrollment_policy_changed", u.ID, u.Username, p.Scope, "enrollment_policy", h.middleware.ClientIP(r), r.UserAgent(), "success", nil)
 	if err = h.store.SetEnrollmentPolicy(p, GetSessionFromContext(r.Context()).ID, event.Row); err != nil {
-		enrollmentError(w, err)
+		h.enrollmentDenied(w, r, "admin.mfa_enrollment_policy_changed", p.Scope, err)
 		return
 	}
 	event.Committed()

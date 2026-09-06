@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/url"
 	"strings"
@@ -72,6 +73,23 @@ func TestEnrollmentPolicyAdminBoundaries(t *testing.T) {
 	if r := adminRequest(t, srv, "PUT", path, admin, body); r.Code != 409 {
 		t.Fatal("stale policy overwrite", r.Code)
 	}
+	events, _, err := db.ListAuditEvents(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var preview, denied bool
+	for _, event := range events {
+		if event.Action == "admin.mfa_enrollment_policy_previewed" && event.Outcome == "success" {
+			preview = true
+		}
+		if event.Action == "admin.mfa_enrollment_policy_changed" && event.Outcome == "denied" && strings.Contains(event.DetailsJSON, "revision_conflict") {
+			denied = true
+		}
+	}
+	if !preview || !denied {
+		t.Fatalf("missing audit records: preview=%v stale-denial=%v", preview, denied)
+	}
+
 }
 
 func TestEnrollmentRestrictedHTTPAndTOTPCompletion(t *testing.T) {
@@ -151,5 +169,50 @@ func TestEnrollmentRestrictedHTTPAndTOTPCompletion(t *testing.T) {
 	}
 	if r := browser("GET", "/api/user/applications", nil); r.Code != 200 {
 		t.Fatal("fresh compliant login denied", r.Code)
+	}
+}
+
+func TestEnrollmentPolicyDenialAuditAndPreviewFailure(t *testing.T) {
+	srv, db, _, _, _, cleanup := setupTestServer(t)
+	defer cleanup()
+	u := newUser(t, db, "admin")
+	cookie := newSession(t, db, u, time.Now().UTC().Add(time.Hour))
+	path := "/api/admin/enrollment-policies"
+	body := policyJSON(t, store.EnrollmentPolicy{Scope: "organization", Required: true, AllowedMethods: []string{"totp"}, GraceSeconds: 3600, Revision: 1})
+	for _, tc := range []struct {
+		body, reason string
+		code         int
+	}{
+		{body, "compliant_admin_required", 409}, {`{}`, "invalid_policy", 400},
+	} {
+		r := adminRequest(t, srv, "PUT", path, cookie, tc.body)
+		if r.Code != tc.code {
+			t.Fatal(r.Code, r.Body.String())
+		}
+		events, _, err := db.ListAuditEvents(100, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, e := range events {
+			if e.Action == "admin.mfa_enrollment_policy_changed" && e.Outcome == "denied" && e.ActorID == u.ID && strings.Contains(e.DetailsJSON, tc.reason) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("missing denial audit", tc.reason)
+		}
+	}
+	raw, err := sql.Open("sqlite", srv.cfg.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`CREATE TRIGGER reject_preview_audit BEFORE INSERT ON audit_events WHEN NEW.action='admin.mfa_enrollment_policy_previewed' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	r := adminRequestNoStepUp(t, srv, "POST", path+"/preview", cookie, body)
+	if r.Code != 500 || strings.Contains(r.Body.String(), "missingFactor") {
+		t.Fatal("unaudited preview disclosed", r.Code, r.Body.String())
 	}
 }
